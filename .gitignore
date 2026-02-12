@@ -1,0 +1,24 @@
+# Build
+build/
+cmake-build-*/
+
+# Godot
+demo/.godot/
+demo/addons/goldsrc/bin/
+
+# Game assets (user-provided)
+*.bsp
+*.wad
+*.mdl
+*.spr
+demo/assets/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
