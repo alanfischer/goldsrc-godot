@@ -2,16 +2,17 @@
 build/
 cmake-build-*/
 
+# Compiled binaries
+addons/goldsrc/bin/
+
 # Godot
 demo/.godot/
-demo/addons/goldsrc/bin/
 
 # Game assets (user-provided)
 *.bsp
 *.wad
 *.mdl
 *.spr
-demo/assets/
 
 # IDE
 .vscode/

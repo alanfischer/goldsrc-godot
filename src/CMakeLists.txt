@@ -51,8 +51,8 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
     PREFIX "lib"
 )
 
-# Output directly to demo addon so Godot can find it
+# Output to the addon's bin directory
 set_target_properties(${PROJECT_NAME} PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/demo/addons/goldsrc/bin"
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/demo/addons/goldsrc/bin"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/addons/goldsrc/bin"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/addons/goldsrc/bin"
 )
