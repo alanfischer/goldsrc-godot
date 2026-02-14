@@ -105,6 +105,7 @@ Ref<ImageTexture> GoldSrcBSP::find_texture(const string &name) const {
 			memcpy(pixels.ptrw(), tex.data.data(), tex.data.size());
 			Ref<Image> img = Image::create_from_data(tex.width, tex.height,
 				false, Image::FORMAT_RGBA8, pixels);
+			img->generate_mipmaps();
 			return ImageTexture::create_from_image(img);
 		}
 	}
@@ -513,7 +514,7 @@ void GoldSrcBSP::build_mesh() {
 			Ref<ImageTexture> texture = find_texture(tex_name);
 			if (texture.is_valid()) {
 				material->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, texture);
-				material->set_texture_filter(BaseMaterial3D::TEXTURE_FILTER_NEAREST);
+				material->set_texture_filter(BaseMaterial3D::TEXTURE_FILTER_LINEAR_WITH_MIPMAPS);
 			} else {
 				material->set_albedo(Color(0.5f, 0.5f, 0.5f));
 			}

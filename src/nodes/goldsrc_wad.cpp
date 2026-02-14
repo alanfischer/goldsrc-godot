@@ -60,6 +60,7 @@ Ref<ImageTexture> GoldSrcWAD::get_texture(const String &name) const {
 
 	Ref<Image> image = Image::create_from_data(tex->width, tex->height,
 		false, Image::FORMAT_RGBA8, pixels);
+	image->generate_mipmaps();
 
 	Ref<ImageTexture> texture = ImageTexture::create_from_image(image);
 	texture_cache[sname] = texture;
