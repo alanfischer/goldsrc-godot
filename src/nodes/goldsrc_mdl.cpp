@@ -1,16 +1,22 @@
 #include "goldsrc_mdl.h"
 
 #include <godot_cpp/classes/file_access.hpp>
+#include <godot_cpp/classes/mesh_instance3d.hpp>
+#include <godot_cpp/classes/array_mesh.hpp>
+#include <godot_cpp/classes/animation_player.hpp>
+#include <godot_cpp/classes/animation.hpp>
+#include <godot_cpp/classes/animation_library.hpp>
+#include <godot_cpp/classes/standard_material3d.hpp>
+#include <godot_cpp/classes/image.hpp>
+#include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/variant/basis.hpp>
 
 #include <cmath>
+#include <cstring>
 
-GoldSrcMDL::GoldSrcMDL() {
-}
-
-GoldSrcMDL::~GoldSrcMDL() {
-}
+using namespace godot;
+using namespace std;
 
 void GoldSrcMDL::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("load_mdl", "path"), &GoldSrcMDL::load_mdl);
@@ -36,7 +42,7 @@ Error GoldSrcMDL::load_mdl(const String &path) {
 	int64_t len = file->get_length();
 	PackedByteArray data = file->get_buffer(len);
 
-	parser = std::make_unique<goldsrc::MDLParser>();
+	parser = make_unique<goldsrc::MDLParser>();
 	if (!parser->parse(data.ptr(), data.size())) {
 		UtilityFunctions::printerr("[GoldSrc] Failed to parse MDL file: ", path);
 		parser.reset();
@@ -137,10 +143,10 @@ Transform3D GoldSrcMDL::compute_bone_transform(int bone_idx, const goldsrc::Pars
 
 // Compute world (model-space) transforms for all bones by walking the hierarchy.
 // Result is in Godot coordinate space.
-std::vector<Transform3D> GoldSrcMDL::compute_bone_world_transforms(const goldsrc::ParsedAnimFrame &frame) const {
+vector<Transform3D> GoldSrcMDL::compute_bone_world_transforms(const goldsrc::ParsedAnimFrame &frame) const {
 	const auto &mdl = parser->get_data();
 	int num_bones = (int)mdl.bones.size();
-	std::vector<Transform3D> world(num_bones);
+	vector<Transform3D> world(num_bones);
 
 	for (int i = 0; i < num_bones; i++) {
 		Transform3D local = compute_bone_transform(i, frame);
@@ -217,8 +223,8 @@ void GoldSrcMDL::build_meshes() {
 	const auto &mdl = parser->get_data();
 
 	// Create textures
-	std::vector<Ref<ImageTexture>> godot_textures;
-	std::vector<Ref<StandardMaterial3D>> materials;
+	vector<Ref<ImageTexture>> godot_textures;
+	vector<Ref<StandardMaterial3D>> materials;
 
 	for (const auto &tex : mdl.textures) {
 		PackedByteArray pixels;

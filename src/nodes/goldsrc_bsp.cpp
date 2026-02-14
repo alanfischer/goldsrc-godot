@@ -1,19 +1,36 @@
 #include "goldsrc_bsp.h"
 
 #include <godot_cpp/classes/file_access.hpp>
+#include <godot_cpp/classes/mesh_instance3d.hpp>
+#include <godot_cpp/classes/array_mesh.hpp>
+#include <godot_cpp/classes/standard_material3d.hpp>
+#include <godot_cpp/classes/static_body3d.hpp>
+#include <godot_cpp/classes/concave_polygon_shape3d.hpp>
+#include <godot_cpp/classes/collision_shape3d.hpp>
+#include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #include <algorithm>
 #include <cstring>
 #include <map>
 
+using namespace godot;
+using namespace std;
+
+namespace {
+
+string str_to_lower(const string &s) {
+	string result = s;
+	transform(result.begin(), result.end(), result.begin(), ::tolower);
+	return result;
+}
+
+} // anonymous namespace
+
 GoldSrcBSP::GoldSrcBSP() {
 	for (int i = 0; i < 64; i++) {
 		lightstyle_values[i] = 1.0f;
 	}
-}
-
-GoldSrcBSP::~GoldSrcBSP() {
 }
 
 void GoldSrcBSP::_bind_methods() {
@@ -41,7 +58,7 @@ Error GoldSrcBSP::load_bsp(const String &path) {
 	int64_t len = file->get_length();
 	PackedByteArray data = file->get_buffer(len);
 
-	parser = std::make_unique<goldsrc::BSPParser>();
+	parser = make_unique<goldsrc::BSPParser>();
 	if (!parser->parse(data.ptr(), data.size())) {
 		UtilityFunctions::printerr("[GoldSrc] Failed to parse BSP file: ", path);
 		parser.reset();
@@ -76,11 +93,12 @@ float GoldSrcBSP::get_scale_factor() const {
 	return scale_factor;
 }
 
-Ref<ImageTexture> GoldSrcBSP::find_texture(const std::string &name) const {
-	// First check BSP embedded textures
+Ref<ImageTexture> GoldSrcBSP::find_texture(const string &name) const {
+	// First check BSP embedded textures (case-insensitive, matching GoldSrc behavior)
 	const auto &bsp_data = parser->get_data();
+	string lower_name = str_to_lower(name);
 	for (const auto &tex : bsp_data.textures) {
-		if (tex.has_data && tex.name == name) {
+		if (tex.has_data && str_to_lower(tex.name) == lower_name) {
 			PackedByteArray pixels;
 			pixels.resize(tex.data.size());
 			memcpy(pixels.ptrw(), tex.data.data(), tex.data.size());
@@ -188,6 +206,31 @@ struct ShelfPacker {
 	}
 };
 
+static void bake_lightmap_pixels(
+	const uint8_t styles[4], int lightmap_offset, int lm_width, int lm_height,
+	int atlas_x, int atlas_y, int atlas_width,
+	uint8_t *dest, const vector<uint8_t> &lighting, const float *lightstyle_values) {
+
+	int pixel_count = lm_width * lm_height;
+	for (int p = 0; p < pixel_count; p++) {
+		float r = 0, g = 0, b = 0;
+		for (int s = 0; s < 4; s++) {
+			if (styles[s] >= 64) break;
+			float brightness = lightstyle_values[styles[s]];
+			int ofs = lightmap_offset + s * pixel_count * 3 + p * 3;
+			r += lighting[ofs + 0] * brightness;
+			g += lighting[ofs + 1] * brightness;
+			b += lighting[ofs + 2] * brightness;
+		}
+		int px = atlas_x + (p % lm_width);
+		int py = atlas_y + (p / lm_width);
+		int dst = (py * atlas_width + px) * 3;
+		dest[dst + 0] = (uint8_t)clamp(r, 0.0f, 255.0f);
+		dest[dst + 1] = (uint8_t)clamp(g, 0.0f, 255.0f);
+		dest[dst + 2] = (uint8_t)clamp(b, 0.0f, 255.0f);
+	}
+}
+
 } // anonymous namespace
 
 void GoldSrcBSP::build_mesh() {
@@ -201,7 +244,7 @@ void GoldSrcBSP::build_mesh() {
 	face_lm_info.resize(bsp_data.faces.size());
 
 	// Build entity lookup: "*N" → entity properties
-	std::map<std::string, const goldsrc::ParsedEntity *> model_entities;
+	map<string, const goldsrc::ParsedEntity *> model_entities;
 	for (const auto &ent : bsp_data.entities) {
 		auto it = ent.properties.find("model");
 		if (it != ent.properties.end() && !it->second.empty() && it->second[0] == '*') {
@@ -214,7 +257,7 @@ void GoldSrcBSP::build_mesh() {
 		const goldsrc::ParsedFace *face;
 		int global_index;
 	};
-	std::map<int, std::vector<FaceRef>> model_faces;
+	map<int, vector<FaceRef>> model_faces;
 	for (int i = 0; i < (int)bsp_data.faces.size(); i++) {
 		model_faces[bsp_data.faces[i].model_index].push_back({&bsp_data.faces[i], i});
 	}
@@ -229,10 +272,10 @@ void GoldSrcBSP::build_mesh() {
 		if (faces_for_model.empty()) continue;
 
 		// Determine entity info for brush models
-		std::string classname = "worldspawn";
-		std::string targetname;
+		string classname = "worldspawn";
+		string targetname;
+		string model_key = (m > 0) ? string("*") + std::to_string(m) : "";
 		if (m > 0) {
-			std::string model_key = "*" + std::to_string(m);
 			auto ent_it = model_entities.find(model_key);
 			if (ent_it != model_entities.end()) {
 				auto cn = ent_it->second->properties.find("classname");
@@ -257,7 +300,7 @@ void GoldSrcBSP::build_mesh() {
 		model_node->set_name(node_name);
 
 		// Set origin for brush entities
-		if (m > 0 && m < num_models) {
+		if (m > 0) {
 			const auto &bmodel = bsp_data.models[m];
 			if (bmodel.origin[0] != 0 || bmodel.origin[1] != 0 || bmodel.origin[2] != 0) {
 				model_node->set_position(goldsrc_to_godot(
@@ -267,7 +310,6 @@ void GoldSrcBSP::build_mesh() {
 
 		// Store entity properties as metadata
 		if (m > 0) {
-			std::string model_key = "*" + std::to_string(m);
 			auto ent_it = model_entities.find(model_key);
 			if (ent_it != model_entities.end()) {
 				Dictionary meta;
@@ -281,13 +323,13 @@ void GoldSrcBSP::build_mesh() {
 		add_child(model_node);
 
 		// Group this model's faces by texture, preserving global indices
-		std::map<std::string, std::vector<FaceRef>> tex_groups;
+		map<string, vector<FaceRef>> tex_groups;
 		for (const auto &fr : faces_for_model) {
 			tex_groups[fr.face->texture_name].push_back(fr);
 		}
 
 		for (const auto &group : tex_groups) {
-			const std::string &tex_name = group.first;
+			const string &tex_name = group.first;
 			const auto &face_refs = group.second;
 
 			int total_tris = 0;
@@ -308,7 +350,7 @@ void GoldSrcBSP::build_mesh() {
 				int atlas_x, atlas_y;
 				bool has_lightmap;
 			};
-			std::vector<FacePack> face_packs;
+			vector<FacePack> face_packs;
 			face_packs.reserve(face_refs.size());
 
 			for (const auto &fr : face_refs) {
@@ -344,7 +386,7 @@ void GoldSrcBSP::build_mesh() {
 							info.atlas_y = fp.atlas_y;
 							info.lm_width = face->lightmap_width;
 							info.lm_height = face->lightmap_height;
-							std::memcpy(info.styles, face->styles, 4);
+							memcpy(info.styles, face->styles, 4);
 							info.lightmap_offset = face->lightmap_offset;
 						}
 					}
@@ -374,28 +416,10 @@ void GoldSrcBSP::build_mesh() {
 					if (!fp.has_lightmap) continue;
 
 					const auto *face = face_refs[fi].face;
-					int w = face->lightmap_width;
-					int h = face->lightmap_height;
-					int pixel_count = w * h;
-
-					for (int p = 0; p < pixel_count; p++) {
-						float r = 0, g = 0, b = 0;
-						for (int s = 0; s < 4; s++) {
-							if (face->styles[s] == 255) break;
-							float brightness = lightstyle_values[face->styles[s]];
-							int ofs = face->lightmap_offset + s * pixel_count * 3 + p * 3;
-							r += bsp_data.lighting[ofs + 0] * brightness;
-							g += bsp_data.lighting[ofs + 1] * brightness;
-							b += bsp_data.lighting[ofs + 2] * brightness;
-						}
-
-						int px = fp.atlas_x + (p % w);
-						int py = fp.atlas_y + (p / w);
-						int dst = (py * atlas_w + px) * 3;
-						atlas_ptr[dst + 0] = (uint8_t)std::min(r, 255.0f);
-						atlas_ptr[dst + 1] = (uint8_t)std::min(g, 255.0f);
-						atlas_ptr[dst + 2] = (uint8_t)std::min(b, 255.0f);
-					}
+					bake_lightmap_pixels(face->styles, face->lightmap_offset,
+						face->lightmap_width, face->lightmap_height,
+						fp.atlas_x, fp.atlas_y, atlas_w,
+						atlas_ptr, bsp_data.lighting, lightstyle_values);
 				}
 
 				Ref<Image> atlas_img = Image::create_from_data(
@@ -482,7 +506,7 @@ void GoldSrcBSP::build_mesh() {
 
 			Ref<StandardMaterial3D> material;
 			material.instantiate();
-			material->set_shading_mode(BaseMaterial3D::SHADING_MODE_PER_PIXEL);
+			material->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
 
 			Ref<ImageTexture> texture = find_texture(tex_name);
 			if (texture.is_valid()) {
@@ -513,7 +537,7 @@ void GoldSrcBSP::build_mesh() {
 		}
 
 		// Build collision for this model (extract just the face pointers)
-		std::vector<const goldsrc::ParsedFace *> collision_faces;
+		vector<const goldsrc::ParsedFace *> collision_faces;
 		collision_faces.reserve(faces_for_model.size());
 		for (const auto &fr : faces_for_model) {
 			collision_faces.push_back(fr.face);
@@ -528,7 +552,7 @@ void GoldSrcBSP::build_mesh() {
 }
 
 void GoldSrcBSP::build_collision(Node3D *parent,
-	const std::vector<const goldsrc::ParsedFace *> &faces) {
+	const vector<const goldsrc::ParsedFace *> &faces) {
 
 	PackedVector3Array collision_verts;
 
@@ -547,7 +571,7 @@ void GoldSrcBSP::build_collision(Node3D *parent,
 		}
 	}
 
-	if (collision_verts.size() == 0) return;
+	if (collision_verts.is_empty()) return;
 
 	Ref<ConcavePolygonShape3D> shape;
 	shape.instantiate();
@@ -576,47 +600,11 @@ float GoldSrcBSP::get_lightstyle(int style_index) const {
 	return lightstyle_values[style_index];
 }
 
-void GoldSrcBSP::bake_face_lightmap(int face_idx) {
-	// Bakes a single face's lightmap into the atlas pixel buffer.
-	// Caller must provide a writable pointer via the atlas image data.
-	if (!parser) return;
-	const auto &bsp_data = parser->get_data();
-	const auto &info = face_lm_info[face_idx];
-	if (info.atlas_index < 0 || info.atlas_index >= (int)lm_atlases.size()) return;
-
-	auto &atlas = lm_atlases[info.atlas_index];
-	PackedByteArray img_data = atlas.image->get_data();
-	uint8_t *ptr = img_data.ptrw();
-	int pixel_count = info.lm_width * info.lm_height;
-
-	for (int p = 0; p < pixel_count; p++) {
-		float r = 0, g = 0, b = 0;
-		for (int s = 0; s < 4; s++) {
-			if (info.styles[s] == 255) break;
-			float brightness = lightstyle_values[info.styles[s]];
-			int ofs = info.lightmap_offset + s * pixel_count * 3 + p * 3;
-			r += bsp_data.lighting[ofs + 0] * brightness;
-			g += bsp_data.lighting[ofs + 1] * brightness;
-			b += bsp_data.lighting[ofs + 2] * brightness;
-		}
-
-		int px = info.atlas_x + (p % info.lm_width);
-		int py = info.atlas_y + (p / info.lm_width);
-		int dst = (py * atlas.width + px) * 3;
-		ptr[dst + 0] = (uint8_t)std::min(r, 255.0f);
-		ptr[dst + 1] = (uint8_t)std::min(g, 255.0f);
-		ptr[dst + 2] = (uint8_t)std::min(b, 255.0f);
-	}
-
-	atlas.image = Image::create_from_data(atlas.width, atlas.height,
-		false, Image::FORMAT_RGB8, img_data);
-}
-
 void GoldSrcBSP::rebake_lightstyle(int style_index) {
 	if (!parser) return;
 
 	// Collect faces per atlas that use this style
-	std::map<int, std::vector<int>> atlas_faces;
+	map<int, vector<int>> atlas_faces;
 
 	for (int i = 0; i < (int)face_lm_info.size(); i++) {
 		const auto &info = face_lm_info[i];
@@ -641,26 +629,10 @@ void GoldSrcBSP::rebake_lightstyle(int style_index) {
 
 		for (int fi : face_indices) {
 			const auto &info = face_lm_info[fi];
-			int pixel_count = info.lm_width * info.lm_height;
-
-			for (int p = 0; p < pixel_count; p++) {
-				float r = 0, g = 0, b = 0;
-				for (int s = 0; s < 4; s++) {
-					if (info.styles[s] == 255) break;
-					float brightness = lightstyle_values[info.styles[s]];
-					int ofs = info.lightmap_offset + s * pixel_count * 3 + p * 3;
-					r += bsp_data.lighting[ofs + 0] * brightness;
-					g += bsp_data.lighting[ofs + 1] * brightness;
-					b += bsp_data.lighting[ofs + 2] * brightness;
-				}
-
-				int px = info.atlas_x + (p % info.lm_width);
-				int py = info.atlas_y + (p / info.lm_width);
-				int dst = (py * atlas.width + px) * 3;
-				ptr[dst + 0] = (uint8_t)std::min(r, 255.0f);
-				ptr[dst + 1] = (uint8_t)std::min(g, 255.0f);
-				ptr[dst + 2] = (uint8_t)std::min(b, 255.0f);
-			}
+			bake_lightmap_pixels(info.styles, info.lightmap_offset,
+				info.lm_width, info.lm_height,
+				info.atlas_x, info.atlas_y, atlas.width,
+				ptr, bsp_data.lighting, lightstyle_values);
 		}
 
 		atlas.image = Image::create_from_data(atlas.width, atlas.height,

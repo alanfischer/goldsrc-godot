@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <cstring>
 #include <string>
 #include <vector>
 #include <map>
@@ -25,7 +24,7 @@ struct WADLumpInfo {
 	char name[16];
 };
 
-static const int MIPLEVELS = 4;
+inline constexpr int MIPLEVELS = 4;
 
 struct WADMipTex {
 	char name[16];
@@ -58,7 +57,7 @@ private:
 		return temp;
 	}
 
-	void decode_texture(const WADMipTex *miptex, const uint8_t *base);
+	void decode_texture(const WADMipTex *miptex, const uint8_t *base, size_t lump_size);
 
 	std::vector<std::string> texture_names;
 	std::map<std::string, WADTexture> textures;

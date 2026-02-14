@@ -1,16 +1,13 @@
 #pragma once
 
 #include <cstdint>
-#include <cstring>
 #include <string>
 #include <vector>
-#include <cmath>
 
 namespace goldsrc {
 
-static const int MDL_MAGIC = 0x54534449; // "IDST"
-static const int MDL_SEQ_MAGIC = 0x51534449; // "IDSQ"
-static const int MDL_VERSION = 10;
+inline constexpr int MDL_MAGIC = 0x54534449; // "IDST"
+inline constexpr int MDL_VERSION = 10;
 
 #pragma pack(push, 1)
 
@@ -246,9 +243,9 @@ public:
 	const MDLData &get_data() const { return mdl_data; }
 
 private:
-	void parse_bones(const uint8_t *data);
-	void parse_textures(const uint8_t *data);
-	void parse_skins(const uint8_t *data);
+	void parse_bones(const uint8_t *data, size_t size);
+	void parse_textures(const uint8_t *data, size_t size);
+	void parse_skins(const uint8_t *data, size_t size);
 	void parse_bodyparts(const uint8_t *data, size_t size);
 	void parse_sequences(const uint8_t *data, size_t size);
 

@@ -7,8 +7,8 @@
 namespace goldsrc {
 
 // SPR format constants
-static const int SPR_MAGIC = 0x50534449; // "IDSP"
-static const int SPR_VERSION = 2;
+inline constexpr int SPR_MAGIC = 0x50534449; // "IDSP"
+inline constexpr int SPR_VERSION = 2;
 
 enum SPRType {
 	SPR_VP_PARALLEL_UPRIGHT = 0,

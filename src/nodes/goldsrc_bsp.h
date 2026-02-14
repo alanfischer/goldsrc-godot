@@ -1,39 +1,29 @@
-#ifndef GOLDSRC_BSP_H
-#define GOLDSRC_BSP_H
+#pragma once
 
 #include <godot_cpp/classes/node3d.hpp>
-#include <godot_cpp/classes/mesh_instance3d.hpp>
-#include <godot_cpp/classes/array_mesh.hpp>
-#include <godot_cpp/classes/standard_material3d.hpp>
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
-#include <godot_cpp/classes/static_body3d.hpp>
-#include <godot_cpp/classes/concave_polygon_shape3d.hpp>
-#include <godot_cpp/classes/collision_shape3d.hpp>
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/array.hpp>
-#include <godot_cpp/variant/dictionary.hpp>
 
 #include "../parsers/bsp_parser.h"
 #include "goldsrc_wad.h"
 #include <memory>
 
-using namespace godot;
-
-class GoldSrcBSP : public Node3D {
-	GDCLASS(GoldSrcBSP, Node3D)
+class GoldSrcBSP : public godot::Node3D {
+	GDCLASS(GoldSrcBSP, godot::Node3D)
 
 protected:
 	static void _bind_methods();
 
 public:
 	GoldSrcBSP();
-	~GoldSrcBSP();
+	~GoldSrcBSP() = default;
 
-	Error load_bsp(const String &path);
-	void set_wad(const Ref<GoldSrcWAD> &wad);
-	void add_wad(const Ref<GoldSrcWAD> &wad);
-	Array get_entities() const;
+	godot::Error load_bsp(const godot::String &path);
+	void set_wad(const godot::Ref<GoldSrcWAD> &wad);
+	void add_wad(const godot::Ref<GoldSrcWAD> &wad);
+	godot::Array get_entities() const;
 	void build_mesh();
 
 	void set_scale_factor(float scale);
@@ -43,12 +33,11 @@ public:
 	float get_lightstyle(int style_index) const;
 
 private:
-	Ref<ImageTexture> find_texture(const std::string &name) const;
-	Vector3 goldsrc_to_godot(float x, float y, float z) const;
-	void build_collision(Node3D *parent,
+	godot::Ref<godot::ImageTexture> find_texture(const std::string &name) const;
+	godot::Vector3 goldsrc_to_godot(float x, float y, float z) const;
+	void build_collision(godot::Node3D *parent,
 		const std::vector<const goldsrc::ParsedFace *> &faces);
 	void rebake_lightstyle(int style_index);
-	void bake_face_lightmap(int face_idx);
 
 	// Per-face lightmap placement info (for rebaking)
 	struct FaceLightmapInfo {
@@ -61,8 +50,8 @@ private:
 
 	// Per-atlas state
 	struct LightmapAtlasState {
-		Ref<Image> image;
-		Ref<ImageTexture> texture;
+		godot::Ref<godot::Image> image;
+		godot::Ref<godot::ImageTexture> texture;
 		int width, height;
 	};
 
@@ -71,9 +60,7 @@ private:
 	float lightstyle_values[64];
 
 	std::unique_ptr<goldsrc::BSPParser> parser;
-	std::vector<Ref<GoldSrcWAD>> wads;
+	std::vector<godot::Ref<GoldSrcWAD>> wads;
 	float scale_factor = 0.025f; // GoldSrc units to Godot units
 	bool mesh_built = false;
 };
-
-#endif // GOLDSRC_BSP_H

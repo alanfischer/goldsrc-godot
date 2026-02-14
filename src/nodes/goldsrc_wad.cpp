@@ -1,13 +1,13 @@
 #include "goldsrc_wad.h"
 
 #include <godot_cpp/classes/file_access.hpp>
+#include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
-GoldSrcWAD::GoldSrcWAD() {
-}
+#include <cstring>
 
-GoldSrcWAD::~GoldSrcWAD() {
-}
+using namespace godot;
+using namespace std;
 
 void GoldSrcWAD::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("load_wad", "path"), &GoldSrcWAD::load_wad);
@@ -27,7 +27,7 @@ Error GoldSrcWAD::load_wad(const String &path) {
 	int64_t len = file->get_length();
 	PackedByteArray data = file->get_buffer(len);
 
-	parser = std::make_unique<goldsrc::WADParser>();
+	parser = make_unique<goldsrc::WADParser>();
 	if (!parser->parse(data.ptr(), data.size())) {
 		UtilityFunctions::printerr("[GoldSrc] Failed to parse WAD file: ", path);
 		parser.reset();
@@ -42,7 +42,7 @@ Error GoldSrcWAD::load_wad(const String &path) {
 Ref<ImageTexture> GoldSrcWAD::get_texture(const String &name) const {
 	if (!parser) return Ref<ImageTexture>();
 
-	std::string sname = name.utf8().get_data();
+	string sname = name.utf8().get_data();
 
 	// Check cache
 	auto it = texture_cache.find(sname);

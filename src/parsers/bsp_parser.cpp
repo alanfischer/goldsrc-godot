@@ -2,23 +2,25 @@
 #include <cstring>
 #include <cmath>
 
+using namespace std;
+
 namespace goldsrc {
 
 template <typename T>
-static std::vector<T> read_lump(const uint8_t *data, size_t file_size, const BSPLump &lump) {
-	std::vector<T> result;
+static vector<T> read_lump(const uint8_t *data, size_t file_size, const BSPLump &lump) {
+	vector<T> result;
 	if (lump.fileofs < 0 || lump.filelen <= 0) return result;
 	if ((size_t)lump.fileofs + lump.filelen > file_size) return result;
 	size_t count = lump.filelen / sizeof(T);
 	result.resize(count);
-	std::memcpy(result.data(), data + lump.fileofs, count * sizeof(T));
+	memcpy(result.data(), data + lump.fileofs, count * sizeof(T));
 	return result;
 }
 
 bool BSPParser::parse(const uint8_t *data, size_t size) {
 	if (size < sizeof(BSPHeader)) return false;
 
-	std::memcpy(&header, data, sizeof(BSPHeader));
+	memcpy(&header, data, sizeof(BSPHeader));
 
 	if (header.version != HLBSP_VERSION) {
 		return false;
@@ -37,7 +39,7 @@ bool BSPParser::parse(const uint8_t *data, size_t size) {
 		const BSPLump &lump = header.lumps[LUMP_LIGHTING];
 		if (lump.filelen > 0 && (size_t)lump.fileofs + lump.filelen <= size) {
 			bsp_data.lighting.resize(lump.filelen);
-			std::memcpy(bsp_data.lighting.data(), data + lump.fileofs, lump.filelen);
+			memcpy(bsp_data.lighting.data(), data + lump.fileofs, lump.filelen);
 		}
 	}
 
@@ -53,12 +55,23 @@ bool BSPParser::parse(const uint8_t *data, size_t size) {
 void BSPParser::parse_textures(const uint8_t *data, size_t size) {
 	const BSPLump &lump = header.lumps[LUMP_TEXTURES];
 	if (lump.filelen <= 0) return;
+	if ((size_t)lump.fileofs + lump.filelen > size) return;
 
+	const size_t lump_end = (size_t)lump.fileofs + lump.filelen;
 	const uint8_t *tex_base = data + lump.fileofs;
-	const BSPMipTexLump *miptexlump = reinterpret_cast<const BSPMipTexLump *>(tex_base);
+	const size_t lump_size = lump.filelen;
 
-	int32_t count = miptexlump->nummiptex;
-	// dataofs array starts at offset 4 in the lump
+	// Need at least 4 bytes for nummiptex
+	if (lump_size < 4) return;
+
+	int32_t count;
+	memcpy(&count, tex_base, sizeof(int32_t));
+	if (count <= 0) return;
+
+	// Validate offset array fits: 4 + count * 4
+	size_t offsets_end = 4 + (size_t)count * sizeof(int32_t);
+	if (offsets_end > lump_size) return;
+
 	const int32_t *offsets = reinterpret_cast<const int32_t *>(tex_base + 4);
 
 	bsp_data.textures.resize(count);
@@ -67,21 +80,32 @@ void BSPParser::parse_textures(const uint8_t *data, size_t size) {
 		int32_t ofs = offsets[i];
 		if (ofs < 0) continue;
 
+		// Validate miptex header fits within lump
+		if ((size_t)ofs + sizeof(BSPMipTex) > lump_size) continue;
+
 		const BSPMipTex *miptex = reinterpret_cast<const BSPMipTex *>(tex_base + ofs);
 
 		BSPTextureData &tex = bsp_data.textures[i];
-		tex.name = std::string(miptex->name, strnlen(miptex->name, 16));
+		tex.name = string(miptex->name, strnlen(miptex->name, 16));
 		tex.width = miptex->width;
 		tex.height = miptex->height;
 		tex.has_data = false;
 
 		// If offsets[0] > 0, texture data is embedded in the BSP
 		if (miptex->offsets[0] > 0 && miptex->width > 0 && miptex->height > 0) {
+			// Guard against overflow: cap dimensions to reasonable BSP limits
+			if (miptex->width > 4096 || miptex->height > 4096) continue;
+
 			uint32_t pixels = miptex->width * miptex->height;
 			uint32_t datasize = pixels + (pixels / 4) + (pixels / 16) + (pixels / 64);
 
-			const uint8_t *pixel_data = reinterpret_cast<const uint8_t *>(miptex) + miptex->offsets[0];
-			const uint8_t *palette = reinterpret_cast<const uint8_t *>(miptex) + miptex->offsets[0] + datasize + 2;
+			// Validate pixel data + palette (2-byte count + 256*3 palette) fits within lump
+			size_t pixel_start = (size_t)ofs + miptex->offsets[0];
+			size_t palette_end = pixel_start + datasize + 2 + 256 * 3;
+			if (palette_end > lump_size) continue;
+
+			const uint8_t *pixel_data = tex_base + pixel_start;
+			const uint8_t *palette = tex_base + pixel_start + datasize + 2;
 
 			bool has_transparency = (miptex->name[0] == '{');
 
@@ -111,7 +135,7 @@ void BSPParser::parse_textures(const uint8_t *data, size_t size) {
 
 void BSPParser::parse_faces(const uint8_t *data, size_t size) {
 	// Build a face-index-to-model-index lookup
-	std::vector<int> face_to_model(raw_faces.size(), -1);
+	vector<int> face_to_model(raw_faces.size(), -1);
 	for (int m = 0; m < (int)raw_models.size(); m++) {
 		int first = raw_models[m].firstface;
 		int count = raw_models[m].numfaces;
@@ -122,6 +146,9 @@ void BSPParser::parse_faces(const uint8_t *data, size_t size) {
 
 	for (size_t f = 0; f < raw_faces.size(); f++) {
 		const BSPFace &face = raw_faces[f];
+
+		// Bounds check texinfo index
+		if (face.texinfo < 0 || (size_t)face.texinfo >= texinfos.size()) continue;
 		const BSPTexInfo &ti = texinfos[face.texinfo];
 
 		int tex_idx = ti.miptex;
@@ -129,9 +156,17 @@ void BSPParser::parse_faces(const uint8_t *data, size_t size) {
 
 		const BSPTextureData &tex = bsp_data.textures[tex_idx];
 
-		// Skip sky and trigger textures
+		// Skip sky textures (rendered separately)
 		if (tex.name.compare(0, 3, "sky") == 0) continue;
-		if (tex.name == "aaatrigger" || tex.name == "clip" || tex.name == "origin" || tex.name == "null") continue;
+
+		// Skip tool textures on worldspawn (they have no visible geometry or
+		// face-based collision). Keep them on brush entities (e.g. func_ladder).
+		bool is_tool = (tex.name == "aaatrigger" || tex.name == "clip" ||
+			tex.name == "origin" || tex.name == "null");
+		if (is_tool && face_to_model[f] == 0) continue;
+
+		// Bounds check plane index
+		if (face.planenum < 0 || (size_t)face.planenum >= planes.size()) continue;
 
 		// Get face normal from plane
 		float nx = planes[face.planenum].normal[0];
@@ -147,22 +182,35 @@ void BSPParser::parse_faces(const uint8_t *data, size_t size) {
 		pface.texture_width = tex.width > 0 ? tex.width : 1;
 		pface.texture_height = tex.height > 0 ? tex.height : 1;
 		pface.lightmap_offset = face.lightofs;
-		std::memcpy(pface.styles, face.styles, 4);
+		memcpy(pface.styles, face.styles, 4);
 
 		// Compute lightmap extents
 		float min_s = 1e30f, min_t = 1e30f;
 		float max_s = -1e30f, max_t = -1e30f;
 
 		// First pass: collect vertices and compute texture bounds
-		std::vector<ParsedVertex> verts;
+		vector<ParsedVertex> verts;
+		bool face_valid = true;
 		for (int e = 0; e < face.numedges; e++) {
-			int32_t surfedge = surfedges[face.firstedge + e];
+			// Bounds check surfedge index
+			size_t se_idx = (size_t)face.firstedge + e;
+			if (se_idx >= surfedges.size()) { face_valid = false; break; }
+
+			int32_t surfedge = surfedges[se_idx];
+
+			// Bounds check edge index
+			size_t edge_idx = (size_t)(surfedge >= 0 ? surfedge : -surfedge);
+			if (edge_idx >= edges.size()) { face_valid = false; break; }
+
 			uint16_t vi;
 			if (surfedge >= 0) {
-				vi = edges[surfedge].v[0];
+				vi = edges[edge_idx].v[0];
 			} else {
-				vi = edges[-surfedge].v[1];
+				vi = edges[edge_idx].v[1];
 			}
+
+			// Bounds check vertex index
+			if ((size_t)vi >= vertexes.size()) { face_valid = false; break; }
 
 			const BSPVertex &vertex = vertexes[vi];
 
@@ -199,11 +247,13 @@ void BSPParser::parse_faces(const uint8_t *data, size_t size) {
 			verts.push_back(pv);
 		}
 
+		if (!face_valid) continue;
+
 		// Compute lightmap size for this face
-		int lm_mins_s = (int)std::floor(min_s / 16.0f);
-		int lm_mins_t = (int)std::floor(min_t / 16.0f);
-		int lm_maxs_s = (int)std::ceil(max_s / 16.0f);
-		int lm_maxs_t = (int)std::ceil(max_t / 16.0f);
+		int lm_mins_s = (int)floor(min_s / 16.0f);
+		int lm_mins_t = (int)floor(min_t / 16.0f);
+		int lm_maxs_s = (int)ceil(max_s / 16.0f);
+		int lm_maxs_t = (int)ceil(max_t / 16.0f);
 		pface.lightmap_width = lm_maxs_s - lm_mins_s + 1;
 		pface.lightmap_height = lm_maxs_t - lm_mins_t + 1;
 
@@ -223,8 +273,9 @@ void BSPParser::parse_faces(const uint8_t *data, size_t size) {
 void BSPParser::parse_entities(const uint8_t *data, size_t size) {
 	const BSPLump &lump = header.lumps[LUMP_ENTITIES];
 	if (lump.filelen <= 0) return;
+	if ((size_t)lump.fileofs + lump.filelen > size) return;
 
-	std::string ent_str(reinterpret_cast<const char *>(data + lump.fileofs), lump.filelen);
+	string ent_str(reinterpret_cast<const char *>(data + lump.fileofs), lump.filelen);
 
 	ParsedEntity current;
 	bool in_entity = false;
@@ -248,7 +299,8 @@ void BSPParser::parse_entities(const uint8_t *data, size_t size) {
 			pos++;
 			size_t key_start = pos;
 			while (pos < ent_str.size() && ent_str[pos] != '"') pos++;
-			std::string key = ent_str.substr(key_start, pos - key_start);
+			string key = ent_str.substr(key_start, pos - key_start);
+			if (pos >= ent_str.size()) break;
 			pos++; // skip closing quote
 
 			// Skip whitespace
@@ -259,8 +311,8 @@ void BSPParser::parse_entities(const uint8_t *data, size_t size) {
 				pos++;
 				size_t val_start = pos;
 				while (pos < ent_str.size() && ent_str[pos] != '"') pos++;
-				std::string value = ent_str.substr(val_start, pos - val_start);
-				pos++;
+				string value = ent_str.substr(val_start, pos - val_start);
+				if (pos < ent_str.size()) pos++; // skip closing quote
 				current.properties[key] = value;
 			}
 		} else {

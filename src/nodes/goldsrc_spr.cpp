@@ -1,13 +1,13 @@
 #include "goldsrc_spr.h"
 
 #include <godot_cpp/classes/file_access.hpp>
+#include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
-GoldSrcSPR::GoldSrcSPR() {
-}
+#include <cstring>
 
-GoldSrcSPR::~GoldSrcSPR() {
-}
+using namespace godot;
+using namespace std;
 
 void GoldSrcSPR::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("load_spr", "path"), &GoldSrcSPR::load_spr);
@@ -27,7 +27,7 @@ Error GoldSrcSPR::load_spr(const String &path) {
 	int64_t len = file->get_length();
 	PackedByteArray data = file->get_buffer(len);
 
-	parser = std::make_unique<goldsrc::SPRParser>();
+	parser = make_unique<goldsrc::SPRParser>();
 	if (!parser->parse(data.ptr(), data.size())) {
 		UtilityFunctions::printerr("[GoldSrc] Failed to parse SPR file: ", path);
 		parser.reset();

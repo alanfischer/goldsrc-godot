@@ -1,14 +1,13 @@
 #pragma once
 
 #include <cstdint>
-#include <cstring>
 #include <string>
 #include <vector>
 #include <map>
 
 namespace goldsrc {
 
-static const int HLBSP_VERSION = 30;
+inline constexpr int HLBSP_VERSION = 30;
 
 enum BSPLumpType {
 	LUMP_ENTITIES = 0,
