@@ -21,7 +21,8 @@ namespace {
 
 string str_to_lower(const string &s) {
 	string result = s;
-	transform(result.begin(), result.end(), result.begin(), ::tolower);
+	transform(result.begin(), result.end(), result.begin(),
+		[](unsigned char c) { return tolower(c); });
 	return result;
 }
 
@@ -217,7 +218,8 @@ static void bake_lightmap_pixels(
 		for (int s = 0; s < 4; s++) {
 			if (styles[s] >= 64) break;
 			float brightness = lightstyle_values[styles[s]];
-			int ofs = lightmap_offset + s * pixel_count * 3 + p * 3;
+			size_t ofs = (size_t)lightmap_offset + (size_t)s * pixel_count * 3 + (size_t)p * 3;
+			if (ofs + 2 >= lighting.size()) break;
 			r += lighting[ofs + 0] * brightness;
 			g += lighting[ofs + 1] * brightness;
 			b += lighting[ofs + 2] * brightness;

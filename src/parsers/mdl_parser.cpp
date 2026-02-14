@@ -122,15 +122,15 @@ void MDLParser::parse_bodyparts(const uint8_t *data, size_t size) {
 			sm.name = string(model.name, strnlen(model.name, 64));
 
 			// Vertices
-			if (model.numverts > 0 && check_range(model.vertindex, model.numverts * 3, sizeof(float), size)) {
+			if (model.numverts > 0 && check_range(model.vertindex, (size_t)model.numverts * 3, sizeof(float), size)) {
 				const float *verts = reinterpret_cast<const float *>(data + model.vertindex);
-				sm.vertices.assign(verts, verts + model.numverts * 3);
+				sm.vertices.assign(verts, verts + (size_t)model.numverts * 3);
 			}
 
 			// Normals
-			if (model.numnorms > 0 && check_range(model.normindex, model.numnorms * 3, sizeof(float), size)) {
+			if (model.numnorms > 0 && check_range(model.normindex, (size_t)model.numnorms * 3, sizeof(float), size)) {
 				const float *norms = reinterpret_cast<const float *>(data + model.normindex);
-				sm.normals.assign(norms, norms + model.numnorms * 3);
+				sm.normals.assign(norms, norms + (size_t)model.numnorms * 3);
 			}
 
 			// Bone indices
@@ -314,12 +314,15 @@ void MDLParser::decode_animation(const uint8_t *data, size_t size,
 
 				for (int t = 0; t < (int)total && frame < num_frames; t++, frame++) {
 					float value;
-					size_t read_idx = anim_idx + (t < (int)valid ? t : valid - 1);
-					if (read_idx >= max_anim_entries) {
-						// Out of bounds, use base value for remaining frames
+					if (valid == 0) {
 						value = base_value;
 					} else {
-						value = base_value + anim_values[read_idx].value * scale;
+						size_t read_idx = anim_idx + (t < (int)valid ? t : valid - 1);
+						if (read_idx >= max_anim_entries) {
+							value = base_value;
+						} else {
+							value = base_value + anim_values[read_idx].value * scale;
+						}
 					}
 
 					if (channel < 3) {
