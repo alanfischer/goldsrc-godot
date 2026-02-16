@@ -8,6 +8,7 @@
 
 #include "../parsers/bsp_parser.h"
 #include "goldsrc_wad.h"
+#include <map>
 #include <memory>
 
 class GoldSrcBSP : public godot::Node3D {
@@ -37,6 +38,7 @@ private:
 	godot::Vector3 goldsrc_to_godot(float x, float y, float z) const;
 	void build_collision(godot::Node3D *parent,
 		const std::vector<const goldsrc::ParsedFace *> &faces);
+	void build_hull_collision(godot::Node3D *parent, int model_index);
 	void rebake_lightstyle(int style_index);
 
 	// Per-face lightmap placement info (for rebaking)
@@ -61,6 +63,7 @@ private:
 
 	std::unique_ptr<goldsrc::BSPParser> parser;
 	std::vector<godot::Ref<GoldSrcWAD>> wads;
+	mutable std::map<std::string, godot::Ref<godot::ImageTexture>> texture_cache;
 	float scale_factor = 0.025f; // GoldSrc units to Godot units
 	bool mesh_built = false;
 };

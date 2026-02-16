@@ -6,6 +6,7 @@
 #include <godot_cpp/classes/standard_material3d.hpp>
 #include <godot_cpp/classes/static_body3d.hpp>
 #include <godot_cpp/classes/concave_polygon_shape3d.hpp>
+#include <godot_cpp/classes/convex_polygon_shape3d.hpp>
 #include <godot_cpp/classes/collision_shape3d.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
@@ -95,9 +96,16 @@ float GoldSrcBSP::get_scale_factor() const {
 }
 
 Ref<ImageTexture> GoldSrcBSP::find_texture(const string &name) const {
-	// First check BSP embedded textures (case-insensitive, matching GoldSrc behavior)
-	const auto &bsp_data = parser->get_data();
 	string lower_name = str_to_lower(name);
+
+	// Check cache first
+	auto it = texture_cache.find(lower_name);
+	if (it != texture_cache.end()) {
+		return it->second;
+	}
+
+	// Check BSP embedded textures (case-insensitive, matching GoldSrc behavior)
+	const auto &bsp_data = parser->get_data();
 	for (const auto &tex : bsp_data.textures) {
 		if (tex.has_data && str_to_lower(tex.name) == lower_name) {
 			PackedByteArray pixels;
@@ -106,7 +114,9 @@ Ref<ImageTexture> GoldSrcBSP::find_texture(const string &name) const {
 			Ref<Image> img = Image::create_from_data(tex.width, tex.height,
 				false, Image::FORMAT_RGBA8, pixels);
 			img->generate_mipmaps();
-			return ImageTexture::create_from_image(img);
+			Ref<ImageTexture> result = ImageTexture::create_from_image(img);
+			texture_cache[lower_name] = result;
+			return result;
 		}
 	}
 
@@ -114,10 +124,13 @@ Ref<ImageTexture> GoldSrcBSP::find_texture(const string &name) const {
 	String gname = String(name.c_str());
 	for (const auto &wad : wads) {
 		if (wad->has_texture(gname)) {
-			return wad->get_texture(gname);
+			Ref<ImageTexture> result = wad->get_texture(gname);
+			texture_cache[lower_name] = result;
+			return result;
 		}
 	}
 
+	texture_cache[lower_name] = Ref<ImageTexture>();
 	return Ref<ImageTexture>();
 }
 
@@ -139,6 +152,78 @@ Array GoldSrcBSP::get_entities() const {
 Vector3 GoldSrcBSP::goldsrc_to_godot(float x, float y, float z) const {
 	return Vector3(-x * scale_factor, z * scale_factor, y * scale_factor);
 }
+
+// --- Hull collision helpers ---
+
+namespace {
+
+struct HullPlane {
+	float normal[3];
+	float dist;
+};
+
+struct ConvexCell {
+	vector<HullPlane> planes;
+};
+
+static void walk_clip_tree(
+	const vector<goldsrc::BSPClipNode> &clipnodes,
+	const vector<goldsrc::BSPPlane> &planes,
+	int node_index,
+	const float hull_half[3],
+	vector<HullPlane> &accumulated,
+	vector<ConvexCell> &out_cells) {
+
+	if (node_index < 0) {
+		// Leaf node — contents is the node_index value itself
+		if (node_index == goldsrc::CONTENTS_SOLID) {
+			ConvexCell cell;
+			cell.planes = accumulated;
+			out_cells.push_back(std::move(cell));
+		}
+		return;
+	}
+
+	if ((size_t)node_index >= clipnodes.size()) return;
+
+	const auto &node = clipnodes[node_index];
+	if (node.planenum < 0 || (size_t)node.planenum >= planes.size()) return;
+
+	const auto &plane = planes[node.planenum];
+
+	// Un-expand the ORIGINAL BSP plane distance (before any negation).
+	// Hull planes are expanded outward by support(normal) via Minkowski sum.
+	float dist = plane.dist;
+	if (hull_half) {
+		dist -= fabsf(plane.normal[0]) * hull_half[0]
+			  + fabsf(plane.normal[1]) * hull_half[1]
+			  + fabsf(plane.normal[2]) * hull_half[2];
+	}
+
+	// Front child (children[0]): positive half-space, dot(n, p) >= dist.
+	// Represent as half-space constraint: dot(-n, p) <= -dist
+	HullPlane front_plane;
+	front_plane.normal[0] = -plane.normal[0];
+	front_plane.normal[1] = -plane.normal[1];
+	front_plane.normal[2] = -plane.normal[2];
+	front_plane.dist = -dist;
+	accumulated.push_back(front_plane);
+	walk_clip_tree(clipnodes, planes, node.children[0], hull_half, accumulated, out_cells);
+	accumulated.pop_back();
+
+	// Back child (children[1]): negative half-space, dot(n, p) <= dist.
+	// Represent as half-space constraint: dot(n, p) <= dist
+	HullPlane back_plane;
+	back_plane.normal[0] = plane.normal[0];
+	back_plane.normal[1] = plane.normal[1];
+	back_plane.normal[2] = plane.normal[2];
+	back_plane.dist = dist;
+	accumulated.push_back(back_plane);
+	walk_clip_tree(clipnodes, planes, node.children[1], hull_half, accumulated, out_cells);
+	accumulated.pop_back();
+}
+
+} // anonymous namespace
 
 // --- Shelf-based lightmap atlas packer ---
 
@@ -539,13 +624,19 @@ void GoldSrcBSP::build_mesh() {
 			model_node->add_child(mesh_instance);
 		}
 
-		// Build collision for this model (extract just the face pointers)
-		vector<const goldsrc::ParsedFace *> collision_faces;
-		collision_faces.reserve(faces_for_model.size());
-		for (const auto &fr : faces_for_model) {
-			collision_faces.push_back(fr.face);
+		// Build collision for this model
+		if (m == 0 && !bsp_data.clipnodes.empty()) {
+			// Worldspawn: use clip hull (includes CLIP brushes, simplified geometry)
+			build_hull_collision(model_node, m);
+		} else {
+			// Brush entities: face-based collision (needed for Area3D triggers/ladders)
+			vector<const goldsrc::ParsedFace *> collision_faces;
+			collision_faces.reserve(faces_for_model.size());
+			for (const auto &fr : faces_for_model) {
+				collision_faces.push_back(fr.face);
+			}
+			build_collision(model_node, collision_faces);
 		}
-		build_collision(model_node, collision_faces);
 	}
 
 	UtilityFunctions::print("[GoldSrc] Built BSP: ",
@@ -589,6 +680,151 @@ void GoldSrcBSP::build_collision(Node3D *parent,
 
 	body->add_child(col);
 	parent->add_child(body);
+}
+
+void GoldSrcBSP::build_hull_collision(Node3D *parent, int model_index) {
+	const auto &bsp_data = parser->get_data();
+
+	if (model_index < 0 || model_index >= (int)bsp_data.models.size()) return;
+
+	const auto &bmodel = bsp_data.models[model_index];
+
+	// Hull 1 = standing player (32x32x72 bbox). headnode[1] is the clip tree root.
+	int root = bmodel.headnode[1];
+	if (root < 0 || (size_t)root >= bsp_data.clipnodes.size()) return;
+
+	// Hull 1 half-extents in GoldSrc units (for un-expansion in tree walk)
+	const float hull_half[3] = {16.0f, 16.0f, 36.0f};
+
+	// Step A: Walk clip BSP tree to collect solid cells
+	// Un-expansion is done inside walk_clip_tree on the original BSP plane
+	// (before negation for front children), ensuring correct sign handling.
+	vector<HullPlane> accumulated;
+	vector<ConvexCell> cells;
+	walk_clip_tree(bsp_data.clipnodes, bsp_data.planes, root, hull_half, accumulated, cells);
+
+	if (cells.empty()) return;
+
+	// Bounding box planes from model (padded by 1 unit)
+	HullPlane bbox_planes[6];
+	// +X
+	bbox_planes[0] = {{ 1, 0, 0}, bmodel.maxs[0] + 1.0f};
+	// -X
+	bbox_planes[1] = {{-1, 0, 0}, -bmodel.mins[0] + 1.0f};
+	// +Y
+	bbox_planes[2] = {{ 0, 1, 0}, bmodel.maxs[1] + 1.0f};
+	// -Y
+	bbox_planes[3] = {{ 0,-1, 0}, -bmodel.mins[1] + 1.0f};
+	// +Z
+	bbox_planes[4] = {{ 0, 0, 1}, bmodel.maxs[2] + 1.0f};
+	// -Z
+	bbox_planes[5] = {{ 0, 0,-1}, -bmodel.mins[2] + 1.0f};
+
+	StaticBody3D *body = memnew(StaticBody3D);
+	body->set_name("HullCollision");
+
+	int shape_count = 0;
+	const float EPSILON = 0.01f;
+
+	for (auto &cell : cells) {
+		// Add bbox clipping planes
+		for (int i = 0; i < 6; i++) {
+			cell.planes.push_back(bbox_planes[i]);
+		}
+
+		// Step D: Compute vertices via triple-plane intersection
+		int np = (int)cell.planes.size();
+		vector<Vector3> verts;
+
+		for (int i = 0; i < np - 2; i++) {
+			for (int j = i + 1; j < np - 1; j++) {
+				for (int k = j + 1; k < np; k++) {
+					const auto &p1 = cell.planes[i];
+					const auto &p2 = cell.planes[j];
+					const auto &p3 = cell.planes[k];
+
+					// n2 × n3
+					float cx = p2.normal[1] * p3.normal[2] - p2.normal[2] * p3.normal[1];
+					float cy = p2.normal[2] * p3.normal[0] - p2.normal[0] * p3.normal[2];
+					float cz = p2.normal[0] * p3.normal[1] - p2.normal[1] * p3.normal[0];
+
+					// denom = n1 . (n2 × n3)
+					float denom = p1.normal[0] * cx + p1.normal[1] * cy + p1.normal[2] * cz;
+					if (fabsf(denom) < 1e-6f) continue;
+
+					// n3 × n1
+					float ax = p3.normal[1] * p1.normal[2] - p3.normal[2] * p1.normal[1];
+					float ay = p3.normal[2] * p1.normal[0] - p3.normal[0] * p1.normal[2];
+					float az = p3.normal[0] * p1.normal[1] - p3.normal[1] * p1.normal[0];
+
+					// n1 × n2
+					float bx = p1.normal[1] * p2.normal[2] - p1.normal[2] * p2.normal[1];
+					float by = p1.normal[2] * p2.normal[0] - p1.normal[0] * p2.normal[2];
+					float bz = p1.normal[0] * p2.normal[1] - p1.normal[1] * p2.normal[0];
+
+					float inv_denom = 1.0f / denom;
+					float px = (p1.dist * cx + p2.dist * ax + p3.dist * bx) * inv_denom;
+					float py = (p1.dist * cy + p2.dist * ay + p3.dist * by) * inv_denom;
+					float pz = (p1.dist * cz + p2.dist * az + p3.dist * bz) * inv_denom;
+
+					// Check point is inside ALL planes
+					bool inside = true;
+					for (int m = 0; m < np; m++) {
+						if (m == i || m == j || m == k) continue;
+						const auto &pp = cell.planes[m];
+						float dot = pp.normal[0] * px + pp.normal[1] * py + pp.normal[2] * pz;
+						if (dot > pp.dist + EPSILON) {
+							inside = false;
+							break;
+						}
+					}
+					if (!inside) continue;
+
+					// Deduplicate
+					bool duplicate = false;
+					Vector3 gv = goldsrc_to_godot(px, py, pz);
+					for (const auto &ev : verts) {
+						if (ev.distance_to(gv) < EPSILON * scale_factor) {
+							duplicate = true;
+							break;
+						}
+					}
+					if (!duplicate) {
+						verts.push_back(gv);
+					}
+				}
+			}
+		}
+
+		// Need at least 4 vertices for a convex hull
+		if ((int)verts.size() < 4) continue;
+
+		// Step E: Create ConvexPolygonShape3D
+		PackedVector3Array points;
+		points.resize(verts.size());
+		for (int i = 0; i < (int)verts.size(); i++) {
+			points[i] = verts[i];
+		}
+
+		Ref<ConvexPolygonShape3D> shape;
+		shape.instantiate();
+		shape->set_points(points);
+
+		CollisionShape3D *col = memnew(CollisionShape3D);
+		col->set_name(String("HullShape_") + String::num_int64(shape_count));
+		col->set_shape(shape);
+		body->add_child(col);
+		shape_count++;
+	}
+
+	if (shape_count > 0) {
+		parent->add_child(body);
+		UtilityFunctions::print("[GoldSrc] Hull collision: ",
+			(int64_t)shape_count, " convex shapes for model ",
+			(int64_t)model_index);
+	} else {
+		memdelete(body);
+	}
 }
 
 void GoldSrcBSP::set_lightstyle(int style_index, float brightness) {

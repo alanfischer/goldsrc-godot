@@ -111,6 +111,10 @@ struct BSPLeaf {
 	uint8_t ambient_level[4];
 };
 
+inline constexpr int CONTENTS_EMPTY = -1;
+inline constexpr int CONTENTS_SOLID = -2;
+inline constexpr int CONTENTS_WATER = -3;
+
 #pragma pack(pop)
 
 // Parsed face data ready for mesh building
@@ -150,6 +154,8 @@ struct BSPData {
 	std::vector<BSPTextureData> textures;
 	std::vector<uint8_t> lighting; // raw RGB lightmap data
 	std::vector<BSPModel> models;
+	std::vector<BSPClipNode> clipnodes;
+	std::vector<BSPPlane> planes;
 };
 
 class BSPParser {
@@ -170,6 +176,7 @@ private:
 	std::vector<BSPFace> raw_faces;
 	std::vector<BSPTexInfo> texinfos;
 	std::vector<BSPModel> raw_models;
+	std::vector<BSPClipNode> clipnodes;
 
 	BSPData bsp_data;
 };
