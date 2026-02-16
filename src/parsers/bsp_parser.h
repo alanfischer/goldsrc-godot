@@ -156,6 +156,8 @@ struct BSPData {
 	std::vector<BSPModel> models;
 	std::vector<BSPClipNode> clipnodes;
 	std::vector<BSPPlane> planes;
+	std::vector<BSPNode> nodes;
+	std::vector<BSPLeaf> leafs;
 };
 
 class BSPParser {
@@ -177,6 +179,8 @@ private:
 	std::vector<BSPTexInfo> texinfos;
 	std::vector<BSPModel> raw_models;
 	std::vector<BSPClipNode> clipnodes;
+	std::vector<BSPNode> nodes;
+	std::vector<BSPLeaf> leafs;
 
 	BSPData bsp_data;
 };

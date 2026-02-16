@@ -46,6 +46,7 @@ void GoldSrcBSP::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("set_lightstyle", "index", "brightness"), &GoldSrcBSP::set_lightstyle);
 	ClassDB::bind_method(D_METHOD("get_lightstyle", "index"), &GoldSrcBSP::get_lightstyle);
+	ClassDB::bind_method(D_METHOD("point_contents", "position"), &GoldSrcBSP::point_contents);
 
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "scale_factor"), "set_scale_factor", "get_scale_factor");
 }
@@ -93,6 +94,36 @@ void GoldSrcBSP::set_scale_factor(float scale) {
 
 float GoldSrcBSP::get_scale_factor() const {
 	return scale_factor;
+}
+
+int GoldSrcBSP::point_contents(Vector3 godot_pos) const {
+	if (!parser) return goldsrc::CONTENTS_EMPTY;
+	const auto &bsp_data = parser->get_data();
+	if (bsp_data.nodes.empty() || bsp_data.leafs.empty()) return goldsrc::CONTENTS_EMPTY;
+
+	// Convert Godot coords back to GoldSrc: godot=(-x*s, z*s, y*s)
+	float gs_x = -godot_pos.x / scale_factor;
+	float gs_y = godot_pos.z / scale_factor;
+	float gs_z = godot_pos.y / scale_factor;
+
+	// Walk hull 0 BSP node tree
+	int node_index = bsp_data.models[0].headnode[0];
+	while (node_index >= 0) {
+		if ((size_t)node_index >= bsp_data.nodes.size()) return goldsrc::CONTENTS_EMPTY;
+		const auto &node = bsp_data.nodes[node_index];
+		if (node.planenum < 0 || (size_t)node.planenum >= bsp_data.planes.size())
+			return goldsrc::CONTENTS_EMPTY;
+		const auto &plane = bsp_data.planes[node.planenum];
+		float dot = plane.normal[0] * gs_x + plane.normal[1] * gs_y + plane.normal[2] * gs_z;
+		if (dot >= plane.dist)
+			node_index = node.children[0];
+		else
+			node_index = node.children[1];
+	}
+	int leaf_index = -(node_index + 1);
+	if (leaf_index < 0 || (size_t)leaf_index >= bsp_data.leafs.size())
+		return goldsrc::CONTENTS_EMPTY;
+	return bsp_data.leafs[leaf_index].contents;
 }
 
 Ref<ImageTexture> GoldSrcBSP::find_texture(const string &name) const {
@@ -166,10 +197,68 @@ struct ConvexCell {
 	vector<HullPlane> planes;
 };
 
+// Walk the BSP node tree (hull 0) which has zero Minkowski expansion.
+// BSPNode children: >= 0 means another node index, < 0 means -(leaf_index + 1).
+// BSPLeaf contains the contents field (CONTENTS_SOLID, CONTENTS_EMPTY, etc.)
+static void walk_bsp_tree(
+	const vector<goldsrc::BSPNode> &nodes,
+	const vector<goldsrc::BSPLeaf> &leafs,
+	const vector<goldsrc::BSPPlane> &planes,
+	int node_index,
+	vector<HullPlane> &accumulated,
+	vector<ConvexCell> &out_cells) {
+
+	if (node_index < 0) {
+		// Leaf node: index = -(leaf_index + 1)
+		int leaf_index = -(node_index + 1);
+		if (leaf_index < 0 || (size_t)leaf_index >= leafs.size()) return;
+		if (leafs[leaf_index].contents == goldsrc::CONTENTS_SOLID) {
+			ConvexCell cell;
+			cell.planes = accumulated;
+			out_cells.push_back(std::move(cell));
+		}
+		return;
+	}
+
+	if ((size_t)node_index >= nodes.size()) return;
+
+	const auto &node = nodes[node_index];
+	if (node.planenum < 0 || (size_t)node.planenum >= planes.size()) return;
+
+	const auto &plane = planes[node.planenum];
+
+	// Front child (children[0]): positive half-space, dot(n, p) >= dist.
+	// Represent as half-space constraint: dot(-n, p) <= -dist
+	HullPlane front_plane;
+	front_plane.normal[0] = -plane.normal[0];
+	front_plane.normal[1] = -plane.normal[1];
+	front_plane.normal[2] = -plane.normal[2];
+	front_plane.dist = -plane.dist;
+	accumulated.push_back(front_plane);
+	walk_bsp_tree(nodes, leafs, planes, node.children[0], accumulated, out_cells);
+	accumulated.pop_back();
+
+	// Back child (children[1]): negative half-space, dot(n, p) <= dist.
+	// Represent as half-space constraint: dot(n, p) <= dist
+	HullPlane back_plane;
+	back_plane.normal[0] = plane.normal[0];
+	back_plane.normal[1] = plane.normal[1];
+	back_plane.normal[2] = plane.normal[2];
+	back_plane.dist = plane.dist;
+	accumulated.push_back(back_plane);
+	walk_bsp_tree(nodes, leafs, planes, node.children[1], accumulated, out_cells);
+	accumulated.pop_back();
+}
+
+// Walk a clip node tree (hulls 1-3) with Minkowski un-expansion.
+// Every plane in the expanded BSP was expanded by: D_exp = D_orig + support(N, hull_half).
+// Un-expand: D_orig = D_exp - support(N). Apply BEFORE constructing front/back constraints.
+// hull_half = (0,0,0) means no un-expansion (raw expanded geometry).
 static void walk_clip_tree(
 	const vector<goldsrc::BSPClipNode> &clipnodes,
 	const vector<goldsrc::BSPPlane> &planes,
 	int node_index,
+	float hull_hx, float hull_hy, float hull_hz,
 	vector<HullPlane> &accumulated,
 	vector<ConvexCell> &out_cells) {
 
@@ -189,27 +278,57 @@ static void walk_clip_tree(
 
 	const auto &plane = planes[node.planenum];
 
-	// Front child (children[0]): positive half-space, dot(n, p) >= dist.
-	// Represent as half-space constraint: dot(-n, p) <= -dist
+	// Un-expand: recover original plane distance before Minkowski expansion
+	float support = fabsf(plane.normal[0]) * hull_hx
+	              + fabsf(plane.normal[1]) * hull_hy
+	              + fabsf(plane.normal[2]) * hull_hz;
+	float orig_dist = plane.dist - support;
+
+	// Front child: dot(-N, P) <= -orig_dist
 	HullPlane front_plane;
 	front_plane.normal[0] = -plane.normal[0];
 	front_plane.normal[1] = -plane.normal[1];
 	front_plane.normal[2] = -plane.normal[2];
-	front_plane.dist = -plane.dist;
+	front_plane.dist = -orig_dist;
 	accumulated.push_back(front_plane);
-	walk_clip_tree(clipnodes, planes, node.children[0], accumulated, out_cells);
+	walk_clip_tree(clipnodes, planes, node.children[0],
+		hull_hx, hull_hy, hull_hz, accumulated, out_cells);
 	accumulated.pop_back();
 
-	// Back child (children[1]): negative half-space, dot(n, p) <= dist.
-	// Represent as half-space constraint: dot(n, p) <= dist
+	// Back child: dot(N, P) <= orig_dist
 	HullPlane back_plane;
 	back_plane.normal[0] = plane.normal[0];
 	back_plane.normal[1] = plane.normal[1];
 	back_plane.normal[2] = plane.normal[2];
-	back_plane.dist = plane.dist;
+	back_plane.dist = orig_dist;
 	accumulated.push_back(back_plane);
-	walk_clip_tree(clipnodes, planes, node.children[1], accumulated, out_cells);
+	walk_clip_tree(clipnodes, planes, node.children[1],
+		hull_hx, hull_hy, hull_hz, accumulated, out_cells);
 	accumulated.pop_back();
+}
+
+// Test if a point is in solid space by tracing through the BSP node tree (hull 0).
+static bool point_in_bsp_solid(
+	const vector<goldsrc::BSPNode> &nodes,
+	const vector<goldsrc::BSPLeaf> &leafs,
+	const vector<goldsrc::BSPPlane> &planes,
+	int node_index,
+	float px, float py, float pz) {
+
+	while (node_index >= 0) {
+		if ((size_t)node_index >= nodes.size()) return false;
+		const auto &node = nodes[node_index];
+		if (node.planenum < 0 || (size_t)node.planenum >= planes.size()) return false;
+		const auto &plane = planes[node.planenum];
+		float dot = plane.normal[0] * px + plane.normal[1] * py + plane.normal[2] * pz;
+		if (dot >= plane.dist)
+			node_index = node.children[0]; // front
+		else
+			node_index = node.children[1]; // back
+	}
+	int leaf_index = -(node_index + 1);
+	if (leaf_index < 0 || (size_t)leaf_index >= leafs.size()) return false;
+	return leafs[leaf_index].contents == goldsrc::CONTENTS_SOLID;
 }
 
 // Compute convex hull vertices from a set of half-space planes via triple-plane
@@ -684,8 +803,8 @@ void GoldSrcBSP::build_mesh() {
 		}
 
 		// Build collision for this model
-		if (m == 0 && !bsp_data.clipnodes.empty()) {
-			// Worldspawn: use clip hull (includes CLIP brushes, simplified geometry)
+		if (m == 0 && !bsp_data.nodes.empty() && !bsp_data.leafs.empty()) {
+			// Worldspawn: use BSP node tree (hull 0, zero expansion)
 			build_hull_collision(model_node, m);
 		} else {
 			// Brush entities: face-based collision (needed for Area3D triggers/ladders)
@@ -748,15 +867,16 @@ void GoldSrcBSP::build_hull_collision(Node3D *parent, int model_index) {
 
 	const auto &bmodel = bsp_data.models[model_index];
 
-	// Hull 3 = point hull (0x0x0 bbox). No Minkowski expansion — planes are the
-	// original brush geometry. CLIP brushes are included. Godot's capsule provides
-	// the player standoff distance natively.
-	int root = bmodel.headnode[3];
-	if (root < 0 || (size_t)root >= bsp_data.clipnodes.size()) return;
+	// Hull 0 = rendering/point hull (0x0x0 bbox). No Minkowski expansion —
+	// planes are the original brush geometry. Uses BSPNode/BSPLeaf structures.
+	// Note: does NOT include CLIP brushes (collision-only), but matches visible
+	// geometry exactly. Godot's capsule provides player standoff natively.
+	int root = bmodel.headnode[0];
+	if (root < 0 || (size_t)root >= bsp_data.nodes.size()) return;
 
 	vector<HullPlane> accumulated;
 	vector<ConvexCell> cells;
-	walk_clip_tree(bsp_data.clipnodes, bsp_data.planes, root, accumulated, cells);
+	walk_bsp_tree(bsp_data.nodes, bsp_data.leafs, bsp_data.planes, root, accumulated, cells);
 
 	if (cells.empty()) return;
 
@@ -774,10 +894,18 @@ void GoldSrcBSP::build_hull_collision(Node3D *parent, int model_index) {
 
 	int shape_count = 0;
 	const float EPSILON = 0.01f;
+	// Inflate each convex shape by a small margin so adjacent shapes overlap,
+	// eliminating hairline gaps from floating-point precision in vertex generation.
+	const float COLLISION_MARGIN = 0.1f; // GoldSrc units (~0.0025m)
 
 	for (auto &cell : cells) {
 		for (int i = 0; i < 6; i++) {
 			cell.planes.push_back(bbox_planes[i]);
+		}
+
+		// Inflate cell planes outward to close gaps between adjacent shapes
+		for (auto &p : cell.planes) {
+			p.dist += COLLISION_MARGIN;
 		}
 
 		vector<Vector3> verts = compute_cell_vertices(
@@ -802,10 +930,80 @@ void GoldSrcBSP::build_hull_collision(Node3D *parent, int model_index) {
 		shape_count++;
 	}
 
+	// Also extract CLIP brush collision from hull 1 (standing player hull).
+	// CLIP brushes only exist in clip hulls (1-3), not hull 0. Walk hull 1
+	// with un-expansion to recover original geometry. Filter: only keep cells
+	// whose centroid is in hull 0's empty space (i.e. CLIP-only brushes).
+	// Hull 1 half-extents: (16, 16, 36) GoldSrc units.
+	int clip_count = 0;
+	int clip_root = bmodel.headnode[1];
+	if (clip_root >= 0 && (size_t)clip_root < bsp_data.clipnodes.size()) {
+		vector<HullPlane> clip_accumulated;
+		vector<ConvexCell> clip_cells;
+		walk_clip_tree(bsp_data.clipnodes, bsp_data.planes, clip_root,
+			16.0f, 16.0f, 36.0f,
+			clip_accumulated, clip_cells);
+
+		int hull0_root = bmodel.headnode[0];
+
+		for (auto &cell : clip_cells) {
+			// Add bbox clipping planes
+			for (int i = 0; i < 6; i++) {
+				cell.planes.push_back(bbox_planes[i]);
+			}
+
+			// Inflate to close gaps (same as hull0 shapes)
+			for (auto &p : cell.planes) {
+				p.dist += COLLISION_MARGIN;
+			}
+
+			vector<Vector3> verts = compute_cell_vertices(
+				cell.planes, scale_factor, EPSILON);
+			if ((int)verts.size() < 4) continue;
+
+			// Compute centroid in GoldSrc coords (reverse the Godot conversion)
+			// Godot: (-x*s, z*s, y*s) → GoldSrc: x=-gx/s, y=gz/s, z=gy/s
+			float cx = 0, cy = 0, cz = 0;
+			for (const auto &v : verts) {
+				cx += -v.x / scale_factor;
+				cy += v.z / scale_factor;
+				cz += v.y / scale_factor;
+			}
+			cx /= verts.size();
+			cy /= verts.size();
+			cz /= verts.size();
+
+			// If centroid is inside hull 0's solid, this is a regular brush
+			// (already covered). Only add if it's in hull 0's empty space (CLIP brush).
+			if (point_in_bsp_solid(bsp_data.nodes, bsp_data.leafs,
+					bsp_data.planes, hull0_root, cx, cy, cz)) {
+				continue;
+			}
+
+			PackedVector3Array points;
+			points.resize(verts.size());
+			for (int i = 0; i < (int)verts.size(); i++) {
+				points[i] = verts[i];
+			}
+
+			Ref<ConvexPolygonShape3D> shape;
+			shape.instantiate();
+			shape->set_points(points);
+
+			CollisionShape3D *col = memnew(CollisionShape3D);
+			col->set_name(String("ClipShape_") + String::num_int64(clip_count));
+			col->set_shape(shape);
+			body->add_child(col);
+			shape_count++;
+			clip_count++;
+		}
+	}
+
 	if (shape_count > 0) {
 		parent->add_child(body);
 		UtilityFunctions::print("[GoldSrc] Hull collision: ",
-			(int64_t)shape_count, " convex shapes for model ",
+			(int64_t)(shape_count - clip_count), " hull0 + ",
+			(int64_t)clip_count, " clip shapes for model ",
 			(int64_t)model_index);
 	} else {
 		memdelete(body);

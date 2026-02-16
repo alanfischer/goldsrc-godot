@@ -33,6 +33,9 @@ public:
 	void set_lightstyle(int style_index, float brightness);
 	float get_lightstyle(int style_index) const;
 
+	// Debug: check what the BSP thinks a point is (returns contents: -1=empty, -2=solid, -3=water)
+	int point_contents(godot::Vector3 godot_pos) const;
+
 private:
 	godot::Ref<godot::ImageTexture> find_texture(const std::string &name) const;
 	godot::Vector3 goldsrc_to_godot(float x, float y, float z) const;

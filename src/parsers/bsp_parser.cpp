@@ -34,6 +34,8 @@ bool BSPParser::parse(const uint8_t *data, size_t size) {
 	texinfos = read_lump<BSPTexInfo>(data, size, header.lumps[LUMP_TEXINFO]);
 	raw_models = read_lump<BSPModel>(data, size, header.lumps[LUMP_MODELS]);
 	clipnodes = read_lump<BSPClipNode>(data, size, header.lumps[LUMP_CLIPNODES]);
+	nodes = read_lump<BSPNode>(data, size, header.lumps[LUMP_NODES]);
+	leafs = read_lump<BSPLeaf>(data, size, header.lumps[LUMP_LEAFS]);
 
 	// Lighting data (raw bytes)
 	{
@@ -47,6 +49,8 @@ bool BSPParser::parse(const uint8_t *data, size_t size) {
 	bsp_data.models = raw_models;
 	bsp_data.clipnodes = clipnodes;
 	bsp_data.planes = planes;
+	bsp_data.nodes = nodes;
+	bsp_data.leafs = leafs;
 
 	parse_textures(data, size);
 	parse_faces(data, size);
