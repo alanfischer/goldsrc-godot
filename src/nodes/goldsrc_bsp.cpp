@@ -803,9 +803,22 @@ void GoldSrcBSP::build_mesh() {
 		}
 
 		// Build collision for this model
-		if (m == 0 && !bsp_data.nodes.empty() && !bsp_data.leafs.empty()) {
-			// Worldspawn: use BSP node tree (hull 0, zero expansion)
-			build_hull_collision(model_node, m);
+		if (m == 0) {
+			// Worldspawn: use face-based collision (ConcavePolygonShape3D).
+			// This creates a seamless triangle mesh that cylinder/capsule shapes
+			// can slide over smoothly, unlike ConvexPolygonShape3D cells which
+			// have edge seams that catch flat-bottomed shapes.
+			// Skip water faces ('!' prefix) — in HL, water has no collision;
+			// the player phases through into the CONTENTS_WATER leaf volume.
+			vector<const goldsrc::ParsedFace *> world_faces;
+			world_faces.reserve(faces_for_model.size());
+			for (const auto &fr : faces_for_model) {
+				if (!fr.face->texture_name.empty() && fr.face->texture_name[0] == '!') {
+					continue;  // skip water faces
+				}
+				world_faces.push_back(fr.face);
+			}
+			build_collision(model_node, world_faces);
 		} else {
 			// Brush entities: face-based collision (needed for Area3D triggers/ladders)
 			vector<const goldsrc::ParsedFace *> collision_faces;
@@ -847,6 +860,7 @@ void GoldSrcBSP::build_collision(Node3D *parent,
 
 	Ref<ConcavePolygonShape3D> shape;
 	shape.instantiate();
+	shape->set_backface_collision_enabled(true);
 	shape->set_faces(collision_verts);
 
 	StaticBody3D *body = memnew(StaticBody3D);
@@ -930,74 +944,11 @@ void GoldSrcBSP::build_hull_collision(Node3D *parent, int model_index) {
 		shape_count++;
 	}
 
-	// Also extract CLIP brush collision from hull 1 (standing player hull).
-	// CLIP brushes only exist in clip hulls (1-3), not hull 0. Walk hull 1
-	// with un-expansion to recover original geometry. Filter: only keep cells
-	// whose centroid is in hull 0's empty space (i.e. CLIP-only brushes).
-	// Hull 1 half-extents: (16, 16, 36) GoldSrc units.
+	// CLIP brush extraction disabled for now — centroid-based filtering produces
+	// false positives on some maps (e.g. ww_roc2). The player's capsule collider
+	// provides natural wall standoff, so CLIP brushes aren't strictly needed.
+	// TODO: improve filtering (e.g. check all vertices, not just centroid)
 	int clip_count = 0;
-	int clip_root = bmodel.headnode[1];
-	if (clip_root >= 0 && (size_t)clip_root < bsp_data.clipnodes.size()) {
-		vector<HullPlane> clip_accumulated;
-		vector<ConvexCell> clip_cells;
-		walk_clip_tree(bsp_data.clipnodes, bsp_data.planes, clip_root,
-			16.0f, 16.0f, 36.0f,
-			clip_accumulated, clip_cells);
-
-		int hull0_root = bmodel.headnode[0];
-
-		for (auto &cell : clip_cells) {
-			// Add bbox clipping planes
-			for (int i = 0; i < 6; i++) {
-				cell.planes.push_back(bbox_planes[i]);
-			}
-
-			// Inflate to close gaps (same as hull0 shapes)
-			for (auto &p : cell.planes) {
-				p.dist += COLLISION_MARGIN;
-			}
-
-			vector<Vector3> verts = compute_cell_vertices(
-				cell.planes, scale_factor, EPSILON);
-			if ((int)verts.size() < 4) continue;
-
-			// Compute centroid in GoldSrc coords (reverse the Godot conversion)
-			// Godot: (-x*s, z*s, y*s) → GoldSrc: x=-gx/s, y=gz/s, z=gy/s
-			float cx = 0, cy = 0, cz = 0;
-			for (const auto &v : verts) {
-				cx += -v.x / scale_factor;
-				cy += v.z / scale_factor;
-				cz += v.y / scale_factor;
-			}
-			cx /= verts.size();
-			cy /= verts.size();
-			cz /= verts.size();
-
-			// If centroid is inside hull 0's solid, this is a regular brush
-			// (already covered). Only add if it's in hull 0's empty space (CLIP brush).
-			if (point_in_bsp_solid(bsp_data.nodes, bsp_data.leafs,
-					bsp_data.planes, hull0_root, cx, cy, cz)) {
-				continue;
-			}
-
-			PackedVector3Array points;
-			points.resize(verts.size());
-			for (int i = 0; i < (int)verts.size(); i++) {
-				points[i] = verts[i];
-			}
-
-			Ref<ConvexPolygonShape3D> shape;
-			shape.instantiate();
-			shape->set_points(points);
-
-			CollisionShape3D *col = memnew(CollisionShape3D);
-			col->set_name(String("ClipShape_") + String::num_int64(clip_count));
-			col->set_shape(shape);
-			body->add_child(col);
-			shape_count++;
-			clip_count++;
-		}
-	}
 
 	if (shape_count > 0) {
 		parent->add_child(body);
