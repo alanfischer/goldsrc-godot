@@ -9,6 +9,8 @@
 #include <godot_cpp/classes/concave_polygon_shape3d.hpp>
 #include <godot_cpp/classes/convex_polygon_shape3d.hpp>
 #include <godot_cpp/classes/collision_shape3d.hpp>
+#include <godot_cpp/classes/occluder_instance3d.hpp>
+#include <godot_cpp/classes/polygon_occluder3d.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
@@ -801,6 +803,7 @@ void GoldSrcBSP::build_mesh() {
 			// to reconstruct original brush geometry.
 			build_hull_collision(model_node, m, 0, "WorldCollision", 1);
 			build_water_volumes(model_node);
+			build_occluders(model_node);
 		} else {
 			// Brush entities: hull 0 collision on layer 1 (GDScript converts
 			// to Area3D for triggers/ladders by reparenting the CollisionShape3D)
@@ -933,6 +936,96 @@ void GoldSrcBSP::build_water_volumes(Node3D *parent) {
 	} else {
 		memdelete(water_area);
 	}
+}
+
+void GoldSrcBSP::build_occluders(Node3D *parent) {
+	const auto &bsp_data = parser->get_data();
+
+	// Minimum face area in GoldSrc square units to qualify as an occluder.
+	// 4096 ≈ a 64×64 unit face. Smaller faces cost CPU rasterization time
+	// but occlude very little. Tune this up if profiling shows overhead.
+	const float MIN_AREA_GS = 32768.0f;  // ~180x180 GoldSrc units
+
+	int count = 0;
+
+	for (const auto &face : bsp_data.faces) {
+		if (face.model_index != 0) continue;  // worldspawn only
+
+		// Skip textures that shouldn't occlude
+		const auto &tn = face.texture_name;
+		if (tn.empty()) continue;
+		if (tn[0] == '{') continue;   // alpha-tested (fences, grates)
+		if (tn[0] == '!') continue;   // water/slime/lava
+		if (tn.compare(0, 3, "sky") == 0) continue;
+		if (tn == "aaatrigger" || tn == "clip" || tn == "null") continue;
+
+		int nv = (int)face.vertices.size();
+		if (nv < 3) continue;
+
+		// Compute face area in GoldSrc units (sum of triangle cross products)
+		float area = 0.0f;
+		for (int i = 2; i < nv; i++) {
+			Vector3 a(face.vertices[i-1].pos[0] - face.vertices[0].pos[0],
+			          face.vertices[i-1].pos[1] - face.vertices[0].pos[1],
+			          face.vertices[i-1].pos[2] - face.vertices[0].pos[2]);
+			Vector3 b(face.vertices[i].pos[0] - face.vertices[0].pos[0],
+			          face.vertices[i].pos[1] - face.vertices[0].pos[1],
+			          face.vertices[i].pos[2] - face.vertices[0].pos[2]);
+			area += a.cross(b).length();
+		}
+		area *= 0.5f;
+		if (area < MIN_AREA_GS) continue;
+
+		// Convert vertices to Godot coords and compute centroid
+		Vector3 centroid(0, 0, 0);
+		vector<Vector3> gd_verts(nv);
+		for (int i = 0; i < nv; i++) {
+			gd_verts[i] = goldsrc_to_godot(
+				face.vertices[i].pos[0],
+				face.vertices[i].pos[1],
+				face.vertices[i].pos[2]);
+			centroid += gd_verts[i];
+		}
+		centroid /= (float)nv;
+
+		// Face normal in Godot coords (same axis swap as goldsrc_to_godot, no scale)
+		Vector3 gd_normal(-face.normal[0], face.normal[2], face.normal[1]);
+		gd_normal.normalize();
+
+		// Build orthonormal basis on the face plane in Godot space.
+		// Pick a reference axis that isn't parallel to the normal.
+		Vector3 ref = (gd_normal.y > -0.9f && gd_normal.y < 0.9f)
+			? Vector3(0, 1, 0) : Vector3(1, 0, 0);
+		Vector3 local_x = ref.cross(gd_normal).normalized();
+		Vector3 local_y = gd_normal.cross(local_x).normalized();
+
+		// Project vertices into 2D relative to centroid
+		PackedVector2Array polygon;
+		polygon.resize(nv);
+		for (int i = 0; i < nv; i++) {
+			Vector3 rel = gd_verts[i] - centroid;
+			polygon[i] = Vector2(rel.dot(local_x), rel.dot(local_y));
+		}
+
+		// Build transform: local XY = face plane, Z = normal, origin = centroid
+		Transform3D xform;
+		xform.basis.set_column(0, local_x);
+		xform.basis.set_column(1, local_y);
+		xform.basis.set_column(2, gd_normal);
+		xform.origin = centroid;
+
+		Ref<PolygonOccluder3D> occluder;
+		occluder.instantiate();
+		occluder->set_polygon(polygon);
+
+		OccluderInstance3D *inst = memnew(OccluderInstance3D);
+		inst->set_occluder(occluder);
+		inst->set_transform(xform);
+		parent->add_child(inst);
+		count++;
+	}
+
+	UtilityFunctions::print("[GoldSrc] Built ", (int64_t)count, " occluders");
 }
 
 void GoldSrcBSP::set_lightstyle(int style_index, float brightness) {
