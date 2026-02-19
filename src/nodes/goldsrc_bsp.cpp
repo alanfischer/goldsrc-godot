@@ -313,208 +313,6 @@ static void walk_bsp_tree(
 	accumulated.pop_back();
 }
 
-// Walk a clip node tree (hulls 1-3) with Minkowski un-expansion.
-// Every plane in the expanded BSP was expanded by: D_exp = D_orig + support(N, hull_half).
-// Un-expand: D_orig = D_exp - support(N). Apply BEFORE constructing front/back constraints.
-// hull_half = (0,0,0) means no un-expansion (raw expanded geometry).
-static void walk_clip_tree(
-	const vector<goldsrc::BSPClipNode> &clipnodes,
-	const vector<goldsrc::BSPPlane> &planes,
-	int node_index,
-	float hull_hx, float hull_hy, float hull_hz,
-	vector<HullPlane> &accumulated,
-	vector<ConvexCell> &out_cells) {
-
-	if (node_index < 0) {
-		if (node_index == goldsrc::CONTENTS_SOLID) {
-			ConvexCell cell;
-			cell.planes = accumulated;
-			out_cells.push_back(std::move(cell));
-		}
-		return;
-	}
-
-	if ((size_t)node_index >= clipnodes.size()) return;
-
-	const auto &node = clipnodes[node_index];
-	if (node.planenum < 0 || (size_t)node.planenum >= planes.size()) return;
-
-	const auto &plane = planes[node.planenum];
-
-	// Un-expand: recover original plane distance before Minkowski expansion
-	float support = fabsf(plane.normal[0]) * hull_hx
-	              + fabsf(plane.normal[1]) * hull_hy
-	              + fabsf(plane.normal[2]) * hull_hz;
-	float orig_dist = plane.dist - support;
-
-	// Front child: dot(-N, P) <= -orig_dist
-	HullPlane front_plane;
-	front_plane.normal[0] = -plane.normal[0];
-	front_plane.normal[1] = -plane.normal[1];
-	front_plane.normal[2] = -plane.normal[2];
-	front_plane.dist = -orig_dist;
-	accumulated.push_back(front_plane);
-	walk_clip_tree(clipnodes, planes, node.children[0],
-		hull_hx, hull_hy, hull_hz, accumulated, out_cells);
-	accumulated.pop_back();
-
-	// Back child: dot(N, P) <= orig_dist
-	HullPlane back_plane;
-	back_plane.normal[0] = plane.normal[0];
-	back_plane.normal[1] = plane.normal[1];
-	back_plane.normal[2] = plane.normal[2];
-	back_plane.dist = orig_dist;
-	accumulated.push_back(back_plane);
-	walk_clip_tree(clipnodes, planes, node.children[1],
-		hull_hx, hull_hy, hull_hz, accumulated, out_cells);
-	accumulated.pop_back();
-}
-
-// Precompute whether each clip node subtree is fully solid.
-// Used to identify internal BSP splits vs real brush faces.
-static void compute_fully_solid_clip(
-	const vector<goldsrc::BSPClipNode> &clipnodes,
-	int num,
-	map<int, bool> &solid_map) {
-
-	if (solid_map.count(num)) return;
-
-	if (num < 0) {
-		solid_map[num] = (num == goldsrc::CONTENTS_SOLID);
-		return;
-	}
-
-	if ((size_t)num >= clipnodes.size()) {
-		solid_map[num] = false;
-		return;
-	}
-
-	const auto &node = clipnodes[num];
-	compute_fully_solid_clip(clipnodes, node.children[0], solid_map);
-	compute_fully_solid_clip(clipnodes, node.children[1], solid_map);
-	solid_map[num] = solid_map[node.children[0]] && solid_map[node.children[1]];
-}
-
-// Walk clip tree, skipping internal BSP splits. At each node, if the child
-// we're NOT recursing into is fully solid, the splitting plane is internal
-// (between two solid regions) and not a real brush face — so we don't
-// accumulate it. Only brush-face planes (bordering empty space) are kept
-// and un-expanded. This reconstructs the original brush geometry from the
-// fragmented BSP cells.
-static void walk_clip_tree_filtered(
-	const vector<goldsrc::BSPClipNode> &clipnodes,
-	const vector<goldsrc::BSPPlane> &planes,
-	int node_index,
-	float hull_hx, float hull_hy, float hull_hz,
-	const map<int, bool> &solid_map,
-	vector<HullPlane> &accumulated,
-	vector<ConvexCell> &out_cells) {
-
-	if (node_index < 0) {
-		if (node_index == goldsrc::CONTENTS_SOLID) {
-			ConvexCell cell;
-			cell.planes = accumulated;
-			out_cells.push_back(std::move(cell));
-		}
-		return;
-	}
-
-	if ((size_t)node_index >= clipnodes.size()) return;
-
-	const auto &node = clipnodes[node_index];
-	if (node.planenum < 0 || (size_t)node.planenum >= planes.size()) return;
-
-	const auto &plane = planes[node.planenum];
-
-	// Un-expand plane distance
-	float support = fabsf(plane.normal[0]) * hull_hx
-	              + fabsf(plane.normal[1]) * hull_hy
-	              + fabsf(plane.normal[2]) * hull_hz;
-	float orig_dist = plane.dist - support;
-
-	// Check if each child's subtree is fully solid
-	auto it0 = solid_map.find(node.children[0]);
-	auto it1 = solid_map.find(node.children[1]);
-	bool front_fully_solid = it0 != solid_map.end() && it0->second;
-	bool back_fully_solid = it1 != solid_map.end() && it1->second;
-
-	// Front child: only accumulate plane if back child is NOT fully solid
-	// (if back is all solid, this plane is an internal split, not a brush face)
-	bool push_front = !back_fully_solid;
-	if (push_front) {
-		HullPlane hp;
-		hp.normal[0] = -plane.normal[0];
-		hp.normal[1] = -plane.normal[1];
-		hp.normal[2] = -plane.normal[2];
-		hp.dist = -orig_dist;
-		accumulated.push_back(hp);
-	}
-	walk_clip_tree_filtered(clipnodes, planes, node.children[0],
-		hull_hx, hull_hy, hull_hz, solid_map, accumulated, out_cells);
-	if (push_front) accumulated.pop_back();
-
-	// Back child: only accumulate plane if front child is NOT fully solid
-	bool push_back = !front_fully_solid;
-	if (push_back) {
-		HullPlane hp;
-		hp.normal[0] = plane.normal[0];
-		hp.normal[1] = plane.normal[1];
-		hp.normal[2] = plane.normal[2];
-		hp.dist = orig_dist;
-		accumulated.push_back(hp);
-	}
-	walk_clip_tree_filtered(clipnodes, planes, node.children[1],
-		hull_hx, hull_hy, hull_hz, solid_map, accumulated, out_cells);
-	if (push_back) accumulated.pop_back();
-}
-
-// Test if a point is in solid space by tracing through the BSP node tree (hull 0).
-static bool point_in_bsp_solid(
-	const vector<goldsrc::BSPNode> &nodes,
-	const vector<goldsrc::BSPLeaf> &leafs,
-	const vector<goldsrc::BSPPlane> &planes,
-	int node_index,
-	float px, float py, float pz) {
-
-	while (node_index >= 0) {
-		if ((size_t)node_index >= nodes.size()) return false;
-		const auto &node = nodes[node_index];
-		if (node.planenum < 0 || (size_t)node.planenum >= planes.size()) return false;
-		const auto &plane = planes[node.planenum];
-		float dot = plane.normal[0] * px + plane.normal[1] * py + plane.normal[2] * pz;
-		if (dot >= plane.dist)
-			node_index = node.children[0]; // front
-		else
-			node_index = node.children[1]; // back
-	}
-	int leaf_index = -(node_index + 1);
-	if (leaf_index < 0 || (size_t)leaf_index >= leafs.size()) return false;
-	return leafs[leaf_index].contents == goldsrc::CONTENTS_SOLID;
-}
-
-// Check point contents in the clip node tree (hulls 1-3).
-// Returns CONTENTS_EMPTY (-1) or CONTENTS_SOLID (-2).
-static int clip_point_contents(
-	const vector<goldsrc::BSPClipNode> &clipnodes,
-	const vector<goldsrc::BSPPlane> &planes,
-	int node_index,
-	float px, float py, float pz) {
-
-	while (node_index >= 0) {
-		if ((size_t)node_index >= clipnodes.size()) return goldsrc::CONTENTS_EMPTY;
-		const auto &node = clipnodes[node_index];
-		if (node.planenum < 0 || (size_t)node.planenum >= planes.size())
-			return goldsrc::CONTENTS_EMPTY;
-		const auto &plane = planes[node.planenum];
-		float dot = plane.normal[0] * px + plane.normal[1] * py + plane.normal[2] * pz;
-		if (dot >= plane.dist)
-			node_index = node.children[0];
-		else
-			node_index = node.children[1];
-	}
-	return node_index;
-}
-
 // Vertex with both GoldSrc and Godot coordinates, for computing faces
 // in GoldSrc space then outputting triangles in Godot space.
 struct CellVertex {
@@ -593,81 +391,6 @@ static vector<CellVertex> compute_cell_vertices(
 		}
 	}
 	return verts;
-}
-
-// Triangulate a convex cell and append triangles (Godot coords) to out_tris.
-// For each bounding plane, finds the vertices lying on it, sorts them into
-// convex polygon winding order, and fan-triangulates.
-static void triangulate_convex_cell(
-	const vector<HullPlane> &planes,
-	const vector<CellVertex> &verts,
-	float epsilon,
-	PackedVector3Array &out_tris) {
-
-	int np = (int)planes.size();
-	float face_eps = epsilon * 5.0f;
-
-	for (int p = 0; p < np; p++) {
-		const auto &plane = planes[p];
-
-		// Collect vertices on this plane
-		vector<int> on_plane;
-		for (int v = 0; v < (int)verts.size(); v++) {
-			float dot = plane.normal[0] * verts[v].gs[0]
-			          + plane.normal[1] * verts[v].gs[1]
-			          + plane.normal[2] * verts[v].gs[2];
-			if (fabsf(dot - plane.dist) < face_eps) {
-				on_plane.push_back(v);
-			}
-		}
-		if ((int)on_plane.size() < 3) continue;
-
-		// Compute centroid of face vertices (GoldSrc space)
-		float fcx = 0, fcy = 0, fcz = 0;
-		for (int idx : on_plane) {
-			fcx += verts[idx].gs[0];
-			fcy += verts[idx].gs[1];
-			fcz += verts[idx].gs[2];
-		}
-		float inv_n = 1.0f / (float)on_plane.size();
-		fcx *= inv_n; fcy *= inv_n; fcz *= inv_n;
-
-		// Build tangent axes from the plane normal for 2D projection
-		float nx = plane.normal[0], ny = plane.normal[1], nz = plane.normal[2];
-		float sx, sy, sz;
-		if (fabsf(nx) < 0.9f) { sx = 1; sy = 0; sz = 0; }
-		else                   { sx = 0; sy = 1; sz = 0; }
-		// u = cross(normal, seed)
-		float ux = ny * sz - nz * sy;
-		float uy = nz * sx - nx * sz;
-		float uz = nx * sy - ny * sx;
-		float ul = sqrtf(ux * ux + uy * uy + uz * uz);
-		if (ul < 1e-6f) continue;
-		ux /= ul; uy /= ul; uz /= ul;
-		// v = cross(normal, u)
-		float vx = ny * uz - nz * uy;
-		float vy = nz * ux - nx * uz;
-		float vz = nx * uy - ny * ux;
-
-		// Sort vertices by angle around centroid
-		vector<pair<float, int>> angles;
-		for (int idx : on_plane) {
-			float dx = verts[idx].gs[0] - fcx;
-			float dy = verts[idx].gs[1] - fcy;
-			float dz = verts[idx].gs[2] - fcz;
-			float pu = dx * ux + dy * uy + dz * uz;
-			float pv = dx * vx + dy * vy + dz * vz;
-			angles.push_back({atan2f(pv, pu), idx});
-		}
-		sort(angles.begin(), angles.end());
-
-		// Fan triangulate
-		for (int i = 2; i < (int)angles.size(); i++) {
-			out_tris.push_back(verts[angles[0].second].godot);
-			out_tris.push_back(verts[angles[i - 1].second].godot);
-			out_tris.push_back(verts[angles[i].second].godot);
-		}
-	}
 }
 
 } // anonymous namespace
@@ -1096,182 +819,29 @@ void GoldSrcBSP::build_hull_collision(Node3D *parent, int model_index,
 	const auto &bsp_data = parser->get_data();
 
 	if (model_index < 0 || model_index >= (int)bsp_data.models.size()) return;
-	if (hull_index < 0 || hull_index > 3) return;
+	if (hull_index != 0) return; // only hull 0 (face-based) is supported
 
-	const auto &bmodel = bsp_data.models[model_index];
-
-	// Bounding box planes from model (padded by 1 unit)
-	HullPlane bbox_planes[6];
-	bbox_planes[0] = {{ 1, 0, 0}, bmodel.maxs[0] + 1.0f};
-	bbox_planes[1] = {{-1, 0, 0}, -bmodel.mins[0] + 1.0f};
-	bbox_planes[2] = {{ 0, 1, 0}, bmodel.maxs[1] + 1.0f};
-	bbox_planes[3] = {{ 0,-1, 0}, -bmodel.mins[1] + 1.0f};
-	bbox_planes[4] = {{ 0, 0, 1}, bmodel.maxs[2] + 1.0f};
-	bbox_planes[5] = {{ 0, 0,-1}, -bmodel.mins[2] + 1.0f};
-
-	const float EPSILON = 0.01f;
-
-	// Hull half-extents for Minkowski un-expansion.
-	// Hull 0 = point (no expansion), hull 1 = standing (16x16x36),
-	// hull 2 = large (16x16x16), hull 3 = crouching (16x16x18).
-	static const float hull_halves[4][3] = {
-		{0, 0, 0}, {16, 16, 36}, {16, 16, 16}, {16, 16, 18}
-	};
-
-	vector<HullPlane> accumulated;
-	vector<ConvexCell> cells;
-
+	// Hull 0: use parsed face vertices directly. This gives only
+	// outward-facing surfaces — no internal BSP cell boundaries that
+	// would trap a capsule collider reaching through thin walls.
 	PackedVector3Array all_tris;
-	int cell_count = 0;
+	int face_count = 0;
 
-	if (hull_index == 0) {
-		// Hull 0: use parsed face vertices directly. This gives only
-		// outward-facing surfaces — no internal BSP cell boundaries that
-		// would trap a capsule collider reaching through thin walls.
-		for (const auto &face : bsp_data.faces) {
-			if (face.model_index != model_index) continue;
-			// Skip water/slime/lava faces (textures starting with '!')
-			if (!face.texture_name.empty() && face.texture_name[0] == '!') continue;
-			int nv = (int)face.vertices.size();
-			if (nv < 3) continue;
-			for (int i = 2; i < nv; i++) {
-				const auto &v0 = face.vertices[0];
-				const auto &v1 = face.vertices[i - 1];
-				const auto &v2 = face.vertices[i];
-				all_tris.push_back(goldsrc_to_godot(v0.pos[0], v0.pos[1], v0.pos[2]));
-				all_tris.push_back(goldsrc_to_godot(v1.pos[0], v1.pos[1], v1.pos[2]));
-				all_tris.push_back(goldsrc_to_godot(v2.pos[0], v2.pos[1], v2.pos[2]));
-			}
-			cell_count++;
+	for (const auto &face : bsp_data.faces) {
+		if (face.model_index != model_index) continue;
+		// Skip water/slime/lava faces (textures starting with '!')
+		if (!face.texture_name.empty() && face.texture_name[0] == '!') continue;
+		int nv = (int)face.vertices.size();
+		if (nv < 3) continue;
+		for (int i = 2; i < nv; i++) {
+			const auto &v0 = face.vertices[0];
+			const auto &v1 = face.vertices[i - 1];
+			const auto &v2 = face.vertices[i];
+			all_tris.push_back(goldsrc_to_godot(v0.pos[0], v0.pos[1], v0.pos[2]));
+			all_tris.push_back(goldsrc_to_godot(v1.pos[0], v1.pos[1], v1.pos[2]));
+			all_tris.push_back(goldsrc_to_godot(v2.pos[0], v2.pos[1], v2.pos[2]));
 		}
-	} else {
-		// Hulls 1-3: per-face emission.
-		// Walk the clip tree with NO un-expansion to get solid cells in
-		// expanded space (where the BSP geometry is correct). For each
-		// cell face, check if it's a surface face (adjacent to empty space
-		// in the clip tree). Surface faces are un-expanded individually —
-		// translated inward along their own normal by support(N, hull_half).
-		// This avoids chimera artifacts from combining un-expanded planes
-		// of different brushes into a single cell.
-		int root = bmodel.headnode[hull_index];
-		if (root < 0 || (size_t)root >= bsp_data.clipnodes.size()) return;
-
-		// Walk clip tree with zero un-expansion (raw expanded geometry)
-		walk_clip_tree(bsp_data.clipnodes, bsp_data.planes, root,
-			0, 0, 0, accumulated, cells);
-
-		float hx = hull_halves[hull_index][0];
-		float hy = hull_halves[hull_index][1];
-		float hz = hull_halves[hull_index][2];
-
-		int hull0_root = bmodel.headnode[0];
-
-		for (auto &cell : cells) {
-			int original_plane_count = (int)cell.planes.size();
-			for (int i = 0; i < 6; i++) {
-				cell.planes.push_back(bbox_planes[i]);
-			}
-			vector<CellVertex> verts = compute_cell_vertices(
-				cell.planes, scale_factor, EPSILON);
-			if ((int)verts.size() < 3) continue;
-
-			float face_eps = EPSILON * 5.0f;
-
-			// Only process original planes (skip bbox planes at end)
-			for (int p = 0; p < original_plane_count; p++) {
-				const auto &plane = cell.planes[p];
-
-				// Collect vertices on this plane (expanded GoldSrc space)
-				vector<int> on_plane;
-				for (int v = 0; v < (int)verts.size(); v++) {
-					float dot = plane.normal[0] * verts[v].gs[0]
-					          + plane.normal[1] * verts[v].gs[1]
-					          + plane.normal[2] * verts[v].gs[2];
-					if (fabsf(dot - plane.dist) < face_eps) {
-						on_plane.push_back(v);
-					}
-				}
-				if ((int)on_plane.size() < 3) continue;
-
-				// Face outward normal (pointing away from cell interior)
-				float nx = plane.normal[0];
-				float ny = plane.normal[1];
-				float nz = plane.normal[2];
-
-				// Face centroid in expanded GoldSrc space
-				float fcx = 0, fcy = 0, fcz = 0;
-				for (int idx : on_plane) {
-					fcx += verts[idx].gs[0];
-					fcy += verts[idx].gs[1];
-					fcz += verts[idx].gs[2];
-				}
-				float inv_n = 1.0f / (float)on_plane.size();
-				fcx *= inv_n; fcy *= inv_n; fcz *= inv_n;
-
-				// Surface test: is the point just outside this face
-				// in empty space in the clip tree?
-				float test_x = fcx + nx * 0.5f;
-				float test_y = fcy + ny * 0.5f;
-				float test_z = fcz + nz * 0.5f;
-
-				int contents = clip_point_contents(
-					bsp_data.clipnodes, bsp_data.planes,
-					root, test_x, test_y, test_z);
-				if (contents == goldsrc::CONTENTS_SOLID) continue;
-
-				// Surface face — un-expand along face normal
-				float supp = fabsf(nx) * hx + fabsf(ny) * hy + fabsf(nz) * hz;
-
-				// Clip-only test: is the un-expanded face center in
-				// hull 0 empty space? If in solid, it's already covered
-				// by visible geometry collision — skip it.
-				float ux = fcx - supp * nx;
-				float uy = fcy - supp * ny;
-				float uz = fcz - supp * nz;
-
-				bool in_solid = point_in_bsp_solid(
-					bsp_data.nodes, bsp_data.leafs, bsp_data.planes,
-					hull0_root, ux, uy, uz);
-				if (in_solid) continue;
-
-				// Sort face vertices by angle for polygon winding
-				float sx_seed, sy_seed, sz_seed;
-				if (fabsf(nx) < 0.9f) { sx_seed = 1; sy_seed = 0; sz_seed = 0; }
-				else                   { sx_seed = 0; sy_seed = 1; sz_seed = 0; }
-				float tux = ny * sz_seed - nz * sy_seed;
-				float tuy = nz * sx_seed - nx * sz_seed;
-				float tuz = nx * sy_seed - ny * sx_seed;
-				float tul = sqrtf(tux*tux + tuy*tuy + tuz*tuz);
-				if (tul < 1e-6f) continue;
-				tux /= tul; tuy /= tul; tuz /= tul;
-				float tvx = ny * tuz - nz * tuy;
-				float tvy = nz * tux - nx * tuz;
-				float tvz = nx * tuy - ny * tux;
-
-				vector<pair<float, int>> angles;
-				for (int idx : on_plane) {
-					float dx = verts[idx].gs[0] - fcx;
-					float dy = verts[idx].gs[1] - fcy;
-					float dz = verts[idx].gs[2] - fcz;
-					float pu = dx * tux + dy * tuy + dz * tuz;
-					float pv = dx * tvx + dy * tvy + dz * tvz;
-					angles.push_back({atan2f(pv, pu), idx});
-				}
-				sort(angles.begin(), angles.end());
-
-				// Fan-triangulate with un-expanded vertices
-				for (int i = 2; i < (int)angles.size(); i++) {
-					int tri[3] = {angles[0].second, angles[i-1].second, angles[i].second};
-					for (int t = 0; t < 3; t++) {
-						float gx = verts[tri[t]].gs[0] - supp * nx;
-						float gy = verts[tri[t]].gs[1] - supp * ny;
-						float gz = verts[tri[t]].gs[2] - supp * nz;
-						all_tris.push_back(goldsrc_to_godot(gx, gy, gz));
-					}
-				}
-			}
-			cell_count++;
-		}
+		face_count++;
 	}
 
 	if (all_tris.is_empty()) return;
@@ -1290,8 +860,8 @@ void GoldSrcBSP::build_hull_collision(Node3D *parent, int model_index,
 	body->add_child(col);
 
 	parent->add_child(body);
-	UtilityFunctions::print("[GoldSrc] Hull ", (int64_t)hull_index,
-		" collision: ", (int64_t)cell_count, " cells (",
+	UtilityFunctions::print("[GoldSrc] Hull 0 collision: ",
+		(int64_t)face_count, " faces (",
 		(int64_t)(all_tris.size() / 3), " tris) for model ",
 		(int64_t)model_index);
 }
