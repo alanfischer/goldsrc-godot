@@ -82,7 +82,7 @@ void WADParser::decode_texture(const WADMipTex *miptex, const uint8_t *base, siz
 		uint8_t g = palette[index * 3 + 1];
 		uint8_t b = palette[index * 3 + 2];
 
-		if (has_transparency && r == 0 && g == 0 && b == 255) {
+		if (has_transparency && index == 255) {
 			tex.data[j * 4 + 0] = 0;
 			tex.data[j * 4 + 1] = 0;
 			tex.data[j * 4 + 2] = 0;

@@ -135,6 +135,9 @@ struct ParsedFace {
 	int lightmap_offset; // into lighting lump, -1 if none
 	uint8_t styles[4] = {255, 255, 255, 255}; // lightstyle indices
 	int model_index; // which BSP model this face belongs to (0=worldspawn)
+	float normal[3] = {0, 0, 0}; // face normal (GoldSrc coords)
+	float s_axis[3] = {1, 0, 0}; // texture S axis (GoldSrc coords)
+	float t_axis[3] = {0, 1, 0}; // texture T axis (GoldSrc coords)
 };
 
 struct ParsedEntity {

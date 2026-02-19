@@ -123,7 +123,7 @@ void BSPParser::parse_textures(const uint8_t *data, size_t size) {
 				uint8_t g = palette[idx * 3 + 1];
 				uint8_t b = palette[idx * 3 + 2];
 
-				if (has_transparency && r == 0 && g == 0 && b == 255) {
+				if (has_transparency && idx == 255) {
 					tex.data[j * 4 + 0] = 0;
 					tex.data[j * 4 + 1] = 0;
 					tex.data[j * 4 + 2] = 0;
@@ -190,6 +190,9 @@ void BSPParser::parse_faces(const uint8_t *data, size_t size) {
 		pface.texture_height = tex.height > 0 ? tex.height : 1;
 		pface.lightmap_offset = face.lightofs;
 		memcpy(pface.styles, face.styles, 4);
+		pface.normal[0] = nx; pface.normal[1] = ny; pface.normal[2] = nz;
+		pface.s_axis[0] = ti.vecs[0][0]; pface.s_axis[1] = ti.vecs[0][1]; pface.s_axis[2] = ti.vecs[0][2];
+		pface.t_axis[0] = ti.vecs[1][0]; pface.t_axis[1] = ti.vecs[1][1]; pface.t_axis[2] = ti.vecs[1][2];
 
 		// Compute lightmap extents
 		float min_s = 1e30f, min_t = 1e30f;
