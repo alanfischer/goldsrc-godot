@@ -592,6 +592,17 @@ void GoldSrcBSP::build_mesh() {
 			const string &tex_name = group.first;
 			const auto &face_refs = group.second;
 
+			// Skip tool textures that should never be rendered
+			if (!tex_name.empty()) {
+				string tn = tex_name;
+				for (auto &c : tn) c = tolower(c);
+				if (tn.compare(0, 3, "aaa") == 0 ||
+					tn == "clip" || tn == "null" || tn == "origin" ||
+					tn == "bevel" || tn == "hint" || tn == "skip") {
+					continue;
+				}
+			}
+
 			int total_tris = 0;
 			for (const auto &fr : face_refs) {
 				if (fr.face->vertices.size() >= 3) {
