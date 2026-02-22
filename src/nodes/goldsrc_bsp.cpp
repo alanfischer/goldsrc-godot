@@ -14,12 +14,17 @@
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
+#include "../bsp_hull.h"
+
 #include <algorithm>
 #include <cstring>
 #include <map>
 
 using namespace godot;
 using namespace std;
+using goldsrc_hull::HullPlane;
+using goldsrc_hull::ConvexCell;
+using goldsrc_hull::CellVertex;
 
 namespace {
 
@@ -251,333 +256,9 @@ Vector3 GoldSrcBSP::goldsrc_to_godot(float x, float y, float z) const {
 
 namespace {
 
-struct HullPlane {
-	float normal[3];
-	float dist;
-	int16_t sibling_child = 0; // clip node child index on the other side of this BSP split
-};
-
-struct ConvexCell {
-	vector<HullPlane> planes;
-};
-
-// Walk the BSP node tree (hull 0) which has zero Minkowski expansion.
-// BSPNode children: >= 0 means another node index, < 0 means -(leaf_index + 1).
-// BSPLeaf contains the contents field (CONTENTS_SOLID, CONTENTS_EMPTY, etc.)
-static void walk_bsp_tree(
-	const vector<goldsrc::BSPNode> &nodes,
-	const vector<goldsrc::BSPLeaf> &leafs,
-	const vector<goldsrc::BSPPlane> &planes,
-	int node_index,
-	vector<HullPlane> &accumulated,
-	vector<ConvexCell> &out_cells,
-	int target_contents = goldsrc::CONTENTS_SOLID) {
-
-	if (node_index < 0) {
-		// Leaf node: index = -(leaf_index + 1)
-		int leaf_index = -(node_index + 1);
-		if (leaf_index < 0 || (size_t)leaf_index >= leafs.size()) return;
-		if (leafs[leaf_index].contents == target_contents) {
-			ConvexCell cell;
-			cell.planes = accumulated;
-			out_cells.push_back(std::move(cell));
-		}
-		return;
-	}
-
-	if ((size_t)node_index >= nodes.size()) return;
-
-	const auto &node = nodes[node_index];
-	if (node.planenum < 0 || (size_t)node.planenum >= planes.size()) return;
-
-	const auto &plane = planes[node.planenum];
-
-	// Front child (children[0]): positive half-space, dot(n, p) >= dist.
-	// Represent as half-space constraint: dot(-n, p) <= -dist
-	HullPlane front_plane;
-	front_plane.normal[0] = -plane.normal[0];
-	front_plane.normal[1] = -plane.normal[1];
-	front_plane.normal[2] = -plane.normal[2];
-	front_plane.dist = -plane.dist;
-	accumulated.push_back(front_plane);
-	walk_bsp_tree(nodes, leafs, planes, node.children[0], accumulated, out_cells, target_contents);
-	accumulated.pop_back();
-
-	// Back child (children[1]): negative half-space, dot(n, p) <= dist.
-	// Represent as half-space constraint: dot(n, p) <= dist
-	HullPlane back_plane;
-	back_plane.normal[0] = plane.normal[0];
-	back_plane.normal[1] = plane.normal[1];
-	back_plane.normal[2] = plane.normal[2];
-	back_plane.dist = plane.dist;
-	accumulated.push_back(back_plane);
-	walk_bsp_tree(nodes, leafs, planes, node.children[1], accumulated, out_cells, target_contents);
-	accumulated.pop_back();
-}
-
-// Walk a clip hull BSP tree (hulls 1-3) which uses BSPClipNode.
-// Unlike hull 0 (BSPNode/BSPLeaf), clip node children encode contents
-// directly when negative: -2 = CONTENTS_SOLID, -1 = CONTENTS_EMPTY, etc.
-static void walk_clip_tree(
-	const vector<goldsrc::BSPClipNode> &clipnodes,
-	const vector<goldsrc::BSPPlane> &planes,
-	int node_index,
-	vector<HullPlane> &accumulated,
-	vector<ConvexCell> &out_cells,
-	int target_contents = goldsrc::CONTENTS_SOLID) {
-
-	if (node_index < 0) {
-		// For clip nodes, negative child value IS the contents directly
-		if (node_index == target_contents) {
-			ConvexCell cell;
-			cell.planes = accumulated;
-			out_cells.push_back(std::move(cell));
-		}
-		return;
-	}
-
-	if ((size_t)node_index >= clipnodes.size()) return;
-
-	const auto &cn = clipnodes[node_index];
-	if (cn.planenum < 0 || (size_t)cn.planenum >= planes.size()) return;
-
-	const auto &plane = planes[cn.planenum];
-
-	// Front child (children[0]): positive half-space, dot(n, p) >= dist
-	// Sibling is children[1] (back child)
-	HullPlane front_plane;
-	front_plane.normal[0] = -plane.normal[0];
-	front_plane.normal[1] = -plane.normal[1];
-	front_plane.normal[2] = -plane.normal[2];
-	front_plane.dist = -plane.dist;
-	front_plane.sibling_child = cn.children[1];
-	accumulated.push_back(front_plane);
-	walk_clip_tree(clipnodes, planes, cn.children[0], accumulated, out_cells, target_contents);
-	accumulated.pop_back();
-
-	// Back child (children[1]): negative half-space, dot(n, p) <= dist
-	// Sibling is children[0] (front child)
-	HullPlane back_plane;
-	back_plane.normal[0] = plane.normal[0];
-	back_plane.normal[1] = plane.normal[1];
-	back_plane.normal[2] = plane.normal[2];
-	back_plane.dist = plane.dist;
-	back_plane.sibling_child = cn.children[0];
-	accumulated.push_back(back_plane);
-	walk_clip_tree(clipnodes, planes, cn.children[1], accumulated, out_cells, target_contents);
-	accumulated.pop_back();
-}
-
-// Minkowski support function for an AABB with half-extents (hx, hy, hz).
-// Returns the amount a half-space plane was expanded by during hull compilation.
-static float minkowski_support(const float normal[3], float hx, float hy, float hz) {
-	return fabsf(normal[0]) * hx + fabsf(normal[1]) * hy + fabsf(normal[2]) * hz;
-}
-
-// Point query against a clip hull BSP tree.
-// Returns contents at the given GoldSrc point (-1=empty, -2=solid, etc.)
-static int clip_tree_contents(
-	const vector<goldsrc::BSPClipNode> &clipnodes,
-	const vector<goldsrc::BSPPlane> &planes,
-	int root, float x, float y, float z) {
-
-	int node_index = root;
-	while (node_index >= 0) {
-		if ((size_t)node_index >= clipnodes.size()) return goldsrc::CONTENTS_EMPTY;
-		const auto &cn = clipnodes[node_index];
-		if (cn.planenum < 0 || (size_t)cn.planenum >= planes.size())
-			return goldsrc::CONTENTS_EMPTY;
-		const auto &plane = planes[cn.planenum];
-		float dot = plane.normal[0] * x + plane.normal[1] * y + plane.normal[2] * z;
-		if (dot >= plane.dist)
-			node_index = cn.children[0];
-		else
-			node_index = cn.children[1];
-	}
-	return node_index; // negative value IS the contents
-}
-
-// Vertex with both GoldSrc and Godot coordinates, for computing faces
-// in GoldSrc space then outputting triangles in Godot space.
-struct CellVertex {
-	float gs[3];   // GoldSrc coordinates
-	Vector3 godot; // Godot coordinates
-};
-
-// Compute convex hull vertices from a set of half-space planes via triple-plane
-// intersection (Cramer's rule). Returns vertices in both coordinate systems.
-static vector<CellVertex> compute_cell_vertices(
-	const vector<HullPlane> &planes, float scale_factor, float epsilon) {
-
-	vector<CellVertex> verts;
-	int np = (int)planes.size();
-
-	for (int i = 0; i < np - 2; i++) {
-		for (int j = i + 1; j < np - 1; j++) {
-			for (int k = j + 1; k < np; k++) {
-				const auto &p1 = planes[i];
-				const auto &p2 = planes[j];
-				const auto &p3 = planes[k];
-
-				// n2 x n3
-				float cx = p2.normal[1] * p3.normal[2] - p2.normal[2] * p3.normal[1];
-				float cy = p2.normal[2] * p3.normal[0] - p2.normal[0] * p3.normal[2];
-				float cz = p2.normal[0] * p3.normal[1] - p2.normal[1] * p3.normal[0];
-
-				// denom = n1 . (n2 x n3)
-				float denom = p1.normal[0] * cx + p1.normal[1] * cy + p1.normal[2] * cz;
-				if (fabsf(denom) < 1e-6f) continue;
-
-				// n3 x n1
-				float ax = p3.normal[1] * p1.normal[2] - p3.normal[2] * p1.normal[1];
-				float ay = p3.normal[2] * p1.normal[0] - p3.normal[0] * p1.normal[2];
-				float az = p3.normal[0] * p1.normal[1] - p3.normal[1] * p1.normal[0];
-
-				// n1 x n2
-				float bx = p1.normal[1] * p2.normal[2] - p1.normal[2] * p2.normal[1];
-				float by = p1.normal[2] * p2.normal[0] - p1.normal[0] * p2.normal[2];
-				float bz = p1.normal[0] * p2.normal[1] - p1.normal[1] * p2.normal[0];
-
-				float inv_denom = 1.0f / denom;
-				float px = (p1.dist * cx + p2.dist * ax + p3.dist * bx) * inv_denom;
-				float py = (p1.dist * cy + p2.dist * ay + p3.dist * by) * inv_denom;
-				float pz = (p1.dist * cz + p2.dist * az + p3.dist * bz) * inv_denom;
-
-				// Check point is inside ALL planes
-				bool inside = true;
-				for (int m = 0; m < np; m++) {
-					if (m == i || m == j || m == k) continue;
-					const auto &pp = planes[m];
-					float dot = pp.normal[0] * px + pp.normal[1] * py + pp.normal[2] * pz;
-					if (dot > pp.dist + epsilon) {
-						inside = false;
-						break;
-					}
-				}
-				if (!inside) continue;
-
-				// Deduplicate
-				Vector3 gv(-px * scale_factor, pz * scale_factor, py * scale_factor);
-				bool duplicate = false;
-				for (const auto &ev : verts) {
-					if (ev.godot.distance_to(gv) < epsilon * scale_factor) {
-						duplicate = true;
-						break;
-					}
-				}
-				if (!duplicate) {
-					CellVertex cv;
-					cv.gs[0] = px; cv.gs[1] = py; cv.gs[2] = pz;
-					cv.godot = gv;
-					verts.push_back(cv);
-				}
-			}
-		}
-	}
-	return verts;
-}
-
-// Walk the sibling subtree for a specific face of a cell. When the face
-// spans a sibling splitting plane, split the cell along that plane to create
-// two sub-cells, each with a face that borders one side of the split.
-// Recurse until each sub-cell's face borders a single leaf.
-static void split_cell_for_face(
-	ConvexCell cell, // by value — we modify and output copies
-	int face_index,
-	int sibling_node,
-	const vector<goldsrc::BSPClipNode> &clipnodes,
-	const vector<goldsrc::BSPPlane> &bsp_planes,
-	float scale_factor,
-	float epsilon,
-	vector<ConvexCell> &output) {
-
-	if (sibling_node < 0) {
-		// Leaf — record actual contents for this face
-		cell.planes[face_index].sibling_child = (int16_t)sibling_node;
-		output.push_back(std::move(cell));
-		return;
-	}
-	if ((size_t)sibling_node >= clipnodes.size()) {
-		output.push_back(std::move(cell));
-		return;
-	}
-
-	const auto &cn = clipnodes[sibling_node];
-	if (cn.planenum < 0 || (size_t)cn.planenum >= bsp_planes.size()) {
-		output.push_back(std::move(cell));
-		return;
-	}
-
-	// Compute cell vertices and find face vertices
-	auto verts = compute_cell_vertices(cell.planes, scale_factor, epsilon);
-	if ((int)verts.size() < 4) {
-		output.push_back(std::move(cell));
-		return;
-	}
-
-	const auto &fp = cell.planes[face_index];
-	vector<int> face_vert_idx;
-	for (int i = 0; i < (int)verts.size(); i++) {
-		float dot = fp.normal[0] * verts[i].gs[0]
-		          + fp.normal[1] * verts[i].gs[1]
-		          + fp.normal[2] * verts[i].gs[2];
-		if (fabsf(dot - fp.dist) < 0.5f) {
-			face_vert_idx.push_back(i);
-		}
-	}
-	if ((int)face_vert_idx.size() < 3) {
-		output.push_back(std::move(cell));
-		return;
-	}
-
-	// Classify face vertices against the sibling's splitting plane
-	const auto &splane = bsp_planes[cn.planenum];
-	bool any_front = false, any_back = false;
-	for (int idx : face_vert_idx) {
-		float dot = splane.normal[0] * verts[idx].gs[0]
-		          + splane.normal[1] * verts[idx].gs[1]
-		          + splane.normal[2] * verts[idx].gs[2];
-		float side = dot - splane.dist;
-		if (side > 0.1f) any_front = true;
-		if (side < -0.1f) any_back = true;
-	}
-
-	if (!any_back) {
-		// Entire face on front side of sibling split
-		split_cell_for_face(std::move(cell), face_index, cn.children[0],
-			clipnodes, bsp_planes, scale_factor, epsilon, output);
-		return;
-	}
-	if (!any_front) {
-		// Entire face on back side of sibling split
-		split_cell_for_face(std::move(cell), face_index, cn.children[1],
-			clipnodes, bsp_planes, scale_factor, epsilon, output);
-		return;
-	}
-
-	// Face spans the sibling split — slice the cell along the split plane.
-	ConvexCell cell_front = cell;
-	HullPlane hp_front;
-	hp_front.normal[0] = -splane.normal[0];
-	hp_front.normal[1] = -splane.normal[1];
-	hp_front.normal[2] = -splane.normal[2];
-	hp_front.dist = -splane.dist;
-	hp_front.sibling_child = (int16_t)goldsrc::CONTENTS_SOLID; // internal split
-	cell_front.planes.push_back(hp_front);
-
-	ConvexCell cell_back = cell;
-	HullPlane hp_back;
-	hp_back.normal[0] = splane.normal[0];
-	hp_back.normal[1] = splane.normal[1];
-	hp_back.normal[2] = splane.normal[2];
-	hp_back.dist = splane.dist;
-	hp_back.sibling_child = (int16_t)goldsrc::CONTENTS_SOLID; // internal split
-	cell_back.planes.push_back(hp_back);
-
-	split_cell_for_face(std::move(cell_front), face_index, cn.children[0],
-		clipnodes, bsp_planes, scale_factor, epsilon, output);
-	split_cell_for_face(std::move(cell_back), face_index, cn.children[1],
-		clipnodes, bsp_planes, scale_factor, epsilon, output);
+// Convert CellVertex GoldSrc coords to Godot Vector3
+static Vector3 cell_vert_to_godot(const CellVertex &v, float scale_factor) {
+	return Vector3(-v.gs[0] * scale_factor, v.gs[2] * scale_factor, v.gs[1] * scale_factor);
 }
 
 // Triangulate a convex cell into renderable mesh data.
@@ -586,6 +267,7 @@ static void split_cell_for_face(
 static void triangulate_convex_cell(
 	const vector<HullPlane> &planes,
 	const vector<CellVertex> &verts,
+	float scale_factor,
 	PackedVector3Array &out_vertices,
 	PackedVector3Array &out_normals,
 	PackedInt32Array &out_indices,
@@ -614,7 +296,7 @@ static void triangulate_convex_cell(
 		// Centroid in Godot coords
 		Vector3 centroid(0, 0, 0);
 		for (int idx : face_verts) {
-			centroid += verts[idx].godot;
+			centroid += cell_vert_to_godot(verts[idx], scale_factor);
 		}
 		centroid /= (float)face_verts.size();
 
@@ -631,7 +313,8 @@ static void triangulate_convex_cell(
 		};
 		vector<AngleVert> sorted;
 		for (int idx : face_verts) {
-			Vector3 rel = verts[idx].godot - centroid;
+			Vector3 gv = cell_vert_to_godot(verts[idx], scale_factor);
+			Vector3 rel = gv - centroid;
 			float u = rel.dot(local_x);
 			float v = rel.dot(local_y);
 			sorted.push_back({atan2f(v, u), idx});
@@ -644,7 +327,7 @@ static void triangulate_convex_cell(
 		// Fan-triangulate
 		int fan_base = out_vertices.size();
 		for (const auto &sv : sorted) {
-			out_vertices.push_back(verts[sv.idx].godot);
+			out_vertices.push_back(cell_vert_to_godot(verts[sv.idx], scale_factor));
 			out_normals.push_back(godot_normal);
 		}
 
@@ -1164,7 +847,7 @@ void GoldSrcBSP::build_water_volumes(Node3D *parent) {
 	int root = bmodel.headnode[0];
 	vector<HullPlane> accumulated;
 	vector<ConvexCell> cells;
-	walk_bsp_tree(bsp_data.nodes, bsp_data.leafs, bsp_data.planes,
+	goldsrc_hull::walk_bsp_tree(bsp_data.nodes, bsp_data.leafs, bsp_data.planes,
 		root, accumulated, cells, goldsrc::CONTENTS_WATER);
 
 	if (cells.empty()) return;
@@ -1182,13 +865,13 @@ void GoldSrcBSP::build_water_volumes(Node3D *parent) {
 		for (int i = 0; i < 6; i++) {
 			cell.planes.push_back(bbox_planes[i]);
 		}
-		vector<CellVertex> verts = compute_cell_vertices(
-			cell.planes, scale_factor, EPSILON);
+		vector<CellVertex> verts = goldsrc_hull::compute_cell_vertices(
+			cell.planes, EPSILON);
 		if ((int)verts.size() < 4) continue;
 
 		PackedVector3Array points;
 		for (const auto &v : verts) {
-			points.push_back(v.godot);
+			points.push_back(goldsrc_to_godot(v.gs[0], v.gs[1], v.gs[2]));
 		}
 
 		Ref<ConvexPolygonShape3D> shape;
@@ -1329,7 +1012,7 @@ void GoldSrcBSP::build_clip_hull_debug(Node3D *parent, int hull_index) {
 	// Walk clip tree collecting CONTENTS_SOLID cells
 	vector<HullPlane> accumulated;
 	vector<ConvexCell> cells;
-	walk_clip_tree(bsp_data.clipnodes, bsp_data.planes,
+	goldsrc_hull::walk_clip_tree(bsp_data.clipnodes, bsp_data.planes,
 		root, accumulated, cells, goldsrc::CONTENTS_SOLID);
 
 	if (cells.empty()) return;
@@ -1361,16 +1044,16 @@ void GoldSrcBSP::build_clip_hull_debug(Node3D *parent, int hull_index) {
 		for (int pi = 0; pi < original_plane_count; pi++) {
 			vector<ConvexCell> next;
 			for (auto &c : current) {
-				split_cell_for_face(c, pi, c.planes[pi].sibling_child,
+				goldsrc_hull::split_cell_for_face(c, pi, c.planes[pi].sibling_child,
 					bsp_data.clipnodes, bsp_data.planes,
-					scale_factor, EPSILON, next);
+					EPSILON, next);
 			}
 			current = std::move(next);
 		}
 
 		// Apply unexpansion and triangulate each resulting sub-cell
 		for (auto &c : current) {
-			auto pre_verts = compute_cell_vertices(c.planes, scale_factor, EPSILON);
+			auto pre_verts = goldsrc_hull::compute_cell_vertices(c.planes, EPSILON);
 			if ((int)pre_verts.size() < 4) continue;
 
 			// Save original distances for binary search fallback
@@ -1388,7 +1071,7 @@ void GoldSrcBSP::build_clip_hull_debug(Node3D *parent, int hull_index) {
 
 			for (int pi = 0; pi < original_plane_count; pi++) {
 				auto &hp = c.planes[pi];
-				float support = minkowski_support(hp.normal, HULL_HX, HULL_HY, HULL_HZ);
+				float support = goldsrc_hull::minkowski_support(hp.normal, HULL_HX, HULL_HY, HULL_HZ);
 				uinfo[pi].support = support;
 				uinfo[pi].clamped_support = support;
 
@@ -1416,7 +1099,7 @@ void GoldSrcBSP::build_clip_hull_debug(Node3D *parent, int hull_index) {
 						float probe_x = cx + hp.normal[0] * support;
 						float probe_y = cy + hp.normal[1] * support;
 						float probe_z = cz + hp.normal[2] * support;
-						int contents = clip_tree_contents(
+						int contents = goldsrc_hull::clip_tree_contents(
 							bsp_data.clipnodes, bsp_data.planes,
 							root, probe_x, probe_y, probe_z);
 						if (contents != goldsrc::CONTENTS_SOLID) {
@@ -1467,8 +1150,8 @@ void GoldSrcBSP::build_clip_hull_debug(Node3D *parent, int hull_index) {
 				}
 			}
 
-			vector<CellVertex> verts = compute_cell_vertices(
-				c.planes, scale_factor, EPSILON);
+			vector<CellVertex> verts = goldsrc_hull::compute_cell_vertices(
+				c.planes, EPSILON);
 
 			// Fallback: if the cell collapsed, binary search for the maximum
 			// unexpansion scale that produces valid geometry
@@ -1484,7 +1167,7 @@ void GoldSrcBSP::build_clip_hull_debug(Node3D *parent, int hull_index) {
 						if (uinfo[pi].should_unexpand)
 							test[pi].dist -= uinfo[pi].clamped_support * mid;
 					}
-					auto tv = compute_cell_vertices(test, scale_factor, EPSILON);
+					auto tv = goldsrc_hull::compute_cell_vertices(test, EPSILON);
 					if ((int)tv.size() >= 4) lo = mid;
 					else hi = mid;
 				}
@@ -1494,7 +1177,7 @@ void GoldSrcBSP::build_clip_hull_debug(Node3D *parent, int hull_index) {
 						if (uinfo[pi].should_unexpand)
 							c.planes[pi].dist -= uinfo[pi].clamped_support * lo;
 					}
-					verts = compute_cell_vertices(c.planes, scale_factor, EPSILON);
+					verts = goldsrc_hull::compute_cell_vertices(c.planes, EPSILON);
 				}
 			}
 
@@ -1519,7 +1202,7 @@ void GoldSrcBSP::build_clip_hull_debug(Node3D *parent, int hull_index) {
 			{
 				PackedVector3Array points;
 				for (const auto &v : verts) {
-					points.push_back(v.godot);
+					points.push_back(goldsrc_to_godot(v.gs[0], v.gs[1], v.gs[2]));
 				}
 				Ref<ConvexPolygonShape3D> shape;
 				shape.instantiate();
@@ -1532,7 +1215,7 @@ void GoldSrcBSP::build_clip_hull_debug(Node3D *parent, int hull_index) {
 				shape_count++;
 			}
 
-			triangulate_convex_cell(c.planes, verts,
+			triangulate_convex_cell(c.planes, verts, scale_factor,
 				all_verts, all_normals, all_indices);
 		}
 	}
