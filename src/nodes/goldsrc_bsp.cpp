@@ -52,9 +52,6 @@ void GoldSrcBSP::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("point_contents", "position"), &GoldSrcBSP::point_contents);
 	ClassDB::bind_method(D_METHOD("get_texture", "name"), &GoldSrcBSP::get_texture);
 	ClassDB::bind_method(D_METHOD("get_face_axes", "position", "normal"), &GoldSrcBSP::get_face_axes);
-	ClassDB::bind_method(D_METHOD("build_hull_shapes", "hull_index", "collision_layer", "debug_visual"),
-		&GoldSrcBSP::build_hull_shapes);
-
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "scale_factor"), "set_scale_factor", "get_scale_factor");
 }
 
@@ -317,6 +314,55 @@ static void walk_bsp_tree(
 	accumulated.pop_back();
 }
 
+// Walk a clip hull BSP tree (hulls 1-3) which uses BSPClipNode.
+// Unlike hull 0 (BSPNode/BSPLeaf), clip node children encode contents
+// directly when negative: -2 = CONTENTS_SOLID, -1 = CONTENTS_EMPTY, etc.
+static void walk_clip_tree(
+	const vector<goldsrc::BSPClipNode> &clipnodes,
+	const vector<goldsrc::BSPPlane> &planes,
+	int node_index,
+	vector<HullPlane> &accumulated,
+	vector<ConvexCell> &out_cells,
+	int target_contents = goldsrc::CONTENTS_SOLID) {
+
+	if (node_index < 0) {
+		// For clip nodes, negative child value IS the contents directly
+		if (node_index == target_contents) {
+			ConvexCell cell;
+			cell.planes = accumulated;
+			out_cells.push_back(std::move(cell));
+		}
+		return;
+	}
+
+	if ((size_t)node_index >= clipnodes.size()) return;
+
+	const auto &cn = clipnodes[node_index];
+	if (cn.planenum < 0 || (size_t)cn.planenum >= planes.size()) return;
+
+	const auto &plane = planes[cn.planenum];
+
+	// Front child (children[0]): positive half-space, dot(n, p) >= dist
+	HullPlane front_plane;
+	front_plane.normal[0] = -plane.normal[0];
+	front_plane.normal[1] = -plane.normal[1];
+	front_plane.normal[2] = -plane.normal[2];
+	front_plane.dist = -plane.dist;
+	accumulated.push_back(front_plane);
+	walk_clip_tree(clipnodes, planes, cn.children[0], accumulated, out_cells, target_contents);
+	accumulated.pop_back();
+
+	// Back child (children[1]): negative half-space, dot(n, p) <= dist
+	HullPlane back_plane;
+	back_plane.normal[0] = plane.normal[0];
+	back_plane.normal[1] = plane.normal[1];
+	back_plane.normal[2] = plane.normal[2];
+	back_plane.dist = plane.dist;
+	accumulated.push_back(back_plane);
+	walk_clip_tree(clipnodes, planes, cn.children[1], accumulated, out_cells, target_contents);
+	accumulated.pop_back();
+}
+
 // Vertex with both GoldSrc and Godot coordinates, for computing faces
 // in GoldSrc space then outputting triangles in Godot space.
 struct CellVertex {
@@ -397,139 +443,81 @@ static vector<CellVertex> compute_cell_vertices(
 	return verts;
 }
 
-// Walk a BSPClipNode tree (hulls 1-3). ClipNode children < 0 are contents
-// values directly (CONTENTS_SOLID = -2, CONTENTS_EMPTY = -1, etc.), not
-// leaf indices.
-static void walk_clipnode_tree(
-	const vector<goldsrc::BSPClipNode> &clipnodes,
-	const vector<goldsrc::BSPPlane> &planes,
-	int node_index,
-	vector<HullPlane> &accumulated,
-	vector<ConvexCell> &out_cells,
-	int target_contents = goldsrc::CONTENTS_SOLID) {
+// Triangulate a convex cell into renderable mesh data.
+// For each defining plane, finds vertices on that plane, sorts them by angle,
+// and fan-triangulates. Appends to the output arrays.
+static void triangulate_convex_cell(
+	const vector<HullPlane> &planes,
+	const vector<CellVertex> &verts,
+	PackedVector3Array &out_vertices,
+	PackedVector3Array &out_normals,
+	PackedInt32Array &out_indices,
+	float on_plane_epsilon = 0.5f) {
 
-	if (node_index < 0) {
-		// Leaf: the node_index value IS the contents
-		if (node_index == target_contents) {
-			ConvexCell cell;
-			cell.planes = accumulated;
-			out_cells.push_back(std::move(cell));
-		}
-		return;
-	}
-
-	if ((size_t)node_index >= clipnodes.size()) return;
-
-	const auto &node = clipnodes[node_index];
-	if (node.planenum < 0 || (size_t)node.planenum >= planes.size()) return;
-
-	const auto &plane = planes[node.planenum];
-
-	// Front child (children[0]): positive half-space
-	HullPlane front_plane;
-	front_plane.normal[0] = -plane.normal[0];
-	front_plane.normal[1] = -plane.normal[1];
-	front_plane.normal[2] = -plane.normal[2];
-	front_plane.dist = -plane.dist;
-	accumulated.push_back(front_plane);
-	walk_clipnode_tree(clipnodes, planes, node.children[0], accumulated, out_cells, target_contents);
-	accumulated.pop_back();
-
-	// Back child (children[1]): negative half-space
-	HullPlane back_plane;
-	back_plane.normal[0] = plane.normal[0];
-	back_plane.normal[1] = plane.normal[1];
-	back_plane.normal[2] = plane.normal[2];
-	back_plane.dist = plane.dist;
-	accumulated.push_back(back_plane);
-	walk_clipnode_tree(clipnodes, planes, node.children[1], accumulated, out_cells, target_contents);
-	accumulated.pop_back();
-}
-
-// Build a purple transparent debug mesh from convex cell vertices
-static MeshInstance3D *build_debug_convex_mesh(const vector<CellVertex> &verts) {
-	if ((int)verts.size() < 4) return nullptr;
-
-	// Compute centroid
-	Vector3 centroid(0, 0, 0);
-	for (const auto &v : verts) centroid += v.godot;
-	centroid /= (float)verts.size();
-
-	// Build triangles from centroid to each pair of adjacent vertices
-	// (convex hull fan triangulation)
-	PackedVector3Array tri_verts;
-	PackedVector3Array tri_normals;
-
-	// For each pair of vertices, create a triangle with the centroid
-	// This is a simple fan that works for convex shapes
-	int nv = (int)verts.size();
-
-	// Sort vertices by angle around centroid for each face of the convex hull
-	// Simple approach: create triangles for all unique face triplets
-	for (int i = 0; i < nv - 2; i++) {
-		for (int j = i + 1; j < nv - 1; j++) {
-			for (int k = j + 1; k < nv; k++) {
-				Vector3 a = verts[j].godot - verts[i].godot;
-				Vector3 b = verts[k].godot - verts[i].godot;
-				Vector3 n = a.cross(b);
-				if (n.length_squared() < 1e-10f) continue;
-				n.normalize();
-
-				// Check if all other verts are on one side
-				bool all_front = true, all_back = true;
-				float plane_d = n.dot(verts[i].godot);
-				for (int m = 0; m < nv; m++) {
-					if (m == i || m == j || m == k) continue;
-					float d = n.dot(verts[m].godot) - plane_d;
-					if (d > 0.01f) all_back = false;
-					if (d < -0.01f) all_front = false;
-				}
-				if (!all_front && !all_back) continue;
-
-				// Orient normal outward (away from centroid)
-				if (n.dot(verts[i].godot - centroid) < 0) n = -n;
-
-				// Add triangle (with correct winding for outward normal)
-				Vector3 test_cross = (verts[j].godot - verts[i].godot).cross(verts[k].godot - verts[i].godot);
-				if (test_cross.dot(n) < 0) {
-					tri_verts.push_back(verts[i].godot);
-					tri_verts.push_back(verts[k].godot);
-					tri_verts.push_back(verts[j].godot);
-				} else {
-					tri_verts.push_back(verts[i].godot);
-					tri_verts.push_back(verts[j].godot);
-					tri_verts.push_back(verts[k].godot);
-				}
-				tri_normals.push_back(n);
-				tri_normals.push_back(n);
-				tri_normals.push_back(n);
+	for (const auto &plane : planes) {
+		// Find vertices on this plane (in GoldSrc coords)
+		vector<int> face_verts;
+		for (int i = 0; i < (int)verts.size(); i++) {
+			float dot = plane.normal[0] * verts[i].gs[0]
+			          + plane.normal[1] * verts[i].gs[1]
+			          + plane.normal[2] * verts[i].gs[2];
+			if (fabsf(dot - plane.dist) < on_plane_epsilon) {
+				face_verts.push_back(i);
 			}
 		}
+
+		if ((int)face_verts.size() < 3) continue;
+
+		// Outward-facing normal in Godot coords.
+		// Half-space: dot(n, p) <= dist = inside solid.
+		// Outward = -n in GoldSrc. GS direction to Godot: (-nx,-ny,-nz) -> (nx, -nz, -ny)
+		Vector3 godot_normal(plane.normal[0], -plane.normal[2], -plane.normal[1]);
+		godot_normal.normalize();
+
+		// Centroid in Godot coords
+		Vector3 centroid(0, 0, 0);
+		for (int idx : face_verts) {
+			centroid += verts[idx].godot;
+		}
+		centroid /= (float)face_verts.size();
+
+		// Build 2D basis on face plane
+		Vector3 ref = (fabsf(godot_normal.y) < 0.9f)
+			? Vector3(0, 1, 0) : Vector3(1, 0, 0);
+		Vector3 local_x = ref.cross(godot_normal).normalized();
+		Vector3 local_y = godot_normal.cross(local_x).normalized();
+
+		// Project to 2D and sort by angle
+		struct AngleVert {
+			float angle;
+			int idx;
+		};
+		vector<AngleVert> sorted;
+		for (int idx : face_verts) {
+			Vector3 rel = verts[idx].godot - centroid;
+			float u = rel.dot(local_x);
+			float v = rel.dot(local_y);
+			sorted.push_back({atan2f(v, u), idx});
+		}
+		sort(sorted.begin(), sorted.end(),
+			[](const AngleVert &a, const AngleVert &b) {
+				return a.angle < b.angle;
+			});
+
+		// Fan-triangulate
+		int fan_base = out_vertices.size();
+		for (const auto &sv : sorted) {
+			out_vertices.push_back(verts[sv.idx].godot);
+			out_normals.push_back(godot_normal);
+		}
+
+		int nv = (int)sorted.size();
+		for (int i = 2; i < nv; i++) {
+			out_indices.push_back(fan_base);
+			out_indices.push_back(fan_base + i - 1);
+			out_indices.push_back(fan_base + i);
+		}
 	}
-
-	if (tri_verts.is_empty()) return nullptr;
-
-	Ref<ArrayMesh> mesh;
-	mesh.instantiate();
-
-	Array arrays;
-	arrays.resize(ArrayMesh::ARRAY_MAX);
-	arrays[ArrayMesh::ARRAY_VERTEX] = tri_verts;
-	arrays[ArrayMesh::ARRAY_NORMAL] = tri_normals;
-	mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
-
-	// Purple transparent material
-	Ref<StandardMaterial3D> mat;
-	mat.instantiate();
-	mat->set_albedo(Color(0.7f, 0.0f, 1.0f, 0.35f));
-	mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-	mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
-	mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
-	mesh->surface_set_material(0, mat);
-
-	MeshInstance3D *mi = memnew(MeshInstance3D);
-	mi->set_mesh(mesh);
-	return mi;
 }
 
 } // anonymous namespace
@@ -952,6 +940,7 @@ void GoldSrcBSP::build_mesh() {
 			build_hull_collision(model_node, m, 0, "WorldCollision", 1);
 			build_water_volumes(model_node);
 			build_occluders(model_node);
+			build_clip_hull_debug(model_node, 3); // hull 3 = crouching
 		} else {
 			// Brush entities: hull 0 collision on layer 1 (GDScript converts
 			// to Area3D for triggers/ladders by reparenting the CollisionShape3D)
@@ -1176,6 +1165,88 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 	UtilityFunctions::print("[GoldSrc] Built ", (int64_t)count, " occluders");
 }
 
+void GoldSrcBSP::build_clip_hull_debug(Node3D *parent, int hull_index) {
+	const auto &bsp_data = parser->get_data();
+	if (bsp_data.models.empty()) return;
+	if (hull_index < 1 || hull_index > 3) return;
+	if (bsp_data.clipnodes.empty()) return;
+
+	const auto &bmodel = bsp_data.models[0]; // worldspawn
+	int root = bmodel.headnode[hull_index];
+	if (root < 0 || (size_t)root >= bsp_data.clipnodes.size()) return;
+
+	// Bounding box planes to cap exterior cells
+	HullPlane bbox_planes[6];
+	bbox_planes[0] = {{ 1, 0, 0}, bmodel.maxs[0] + 1.0f};
+	bbox_planes[1] = {{-1, 0, 0}, -bmodel.mins[0] + 1.0f};
+	bbox_planes[2] = {{ 0, 1, 0}, bmodel.maxs[1] + 1.0f};
+	bbox_planes[3] = {{ 0,-1, 0}, -bmodel.mins[1] + 1.0f};
+	bbox_planes[4] = {{ 0, 0, 1}, bmodel.maxs[2] + 1.0f};
+	bbox_planes[5] = {{ 0, 0,-1}, -bmodel.mins[2] + 1.0f};
+
+	const float EPSILON = 0.1f;
+
+	// Walk clip tree collecting CONTENTS_SOLID cells
+	vector<HullPlane> accumulated;
+	vector<ConvexCell> cells;
+	walk_clip_tree(bsp_data.clipnodes, bsp_data.planes,
+		root, accumulated, cells, goldsrc::CONTENTS_SOLID);
+
+	if (cells.empty()) return;
+
+	// Build triangulated debug mesh from all cells
+	PackedVector3Array all_verts;
+	PackedVector3Array all_normals;
+	PackedInt32Array all_indices;
+
+	for (auto &cell : cells) {
+		// Add bounding box planes to cap unbounded exterior cells
+		for (int i = 0; i < 6; i++) {
+			cell.planes.push_back(bbox_planes[i]);
+		}
+
+		vector<CellVertex> verts = compute_cell_vertices(
+			cell.planes, scale_factor, EPSILON);
+		if ((int)verts.size() < 4) continue;
+
+		triangulate_convex_cell(cell.planes, verts,
+			all_verts, all_normals, all_indices);
+	}
+
+	if (all_verts.is_empty()) return;
+
+	// Create ArrayMesh
+	Ref<ArrayMesh> mesh;
+	mesh.instantiate();
+
+	Array arrays;
+	arrays.resize(ArrayMesh::ARRAY_MAX);
+	arrays[ArrayMesh::ARRAY_VERTEX] = all_verts;
+	arrays[ArrayMesh::ARRAY_NORMAL] = all_normals;
+	arrays[ArrayMesh::ARRAY_INDEX] = all_indices;
+	mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
+
+	// Semi-transparent purple material
+	Ref<StandardMaterial3D> material;
+	material.instantiate();
+	material->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+	material->set_albedo(Color(0.6f, 0.0f, 0.8f, 0.3f));
+	material->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+	material->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
+	material->set_depth_draw_mode(BaseMaterial3D::DEPTH_DRAW_DISABLED);
+
+	mesh->surface_set_material(0, material);
+
+	MeshInstance3D *mesh_instance = memnew(MeshInstance3D);
+	mesh_instance->set_name(String("ClipHull") + String::num_int64(hull_index) + "_Debug");
+	mesh_instance->set_mesh(mesh);
+	parent->add_child(mesh_instance);
+
+	UtilityFunctions::print("[GoldSrc] Clip hull ", (int64_t)hull_index,
+		" debug: ", (int64_t)cells.size(), " cells, ",
+		(int64_t)(all_indices.size() / 3), " tris");
+}
+
 void GoldSrcBSP::set_lightstyle(int style_index, float brightness) {
 	if (style_index < 0 || style_index >= 64) return;
 	if (lightstyle_values[style_index] == brightness) return;
@@ -1229,133 +1300,3 @@ void GoldSrcBSP::rebake_lightstyle(int style_index) {
 	}
 }
 
-void GoldSrcBSP::build_hull_shapes(int hull_index, int collision_layer, bool debug_visual) {
-	if (!parser) return;
-	if (hull_index < 0 || hull_index > 3) return;
-
-	const auto &bsp_data = parser->get_data();
-	if (bsp_data.models.empty()) return;
-
-	const auto &bmodel = bsp_data.models[0]; // worldspawn only
-
-	// Bounding box planes (padded) to close unbounded cells at map edges
-	HullPlane bbox_planes[6];
-	bbox_planes[0] = {{ 1, 0, 0}, bmodel.maxs[0] + 1.0f};
-	bbox_planes[1] = {{-1, 0, 0}, -bmodel.mins[0] + 1.0f};
-	bbox_planes[2] = {{ 0, 1, 0}, bmodel.maxs[1] + 1.0f};
-	bbox_planes[3] = {{ 0,-1, 0}, -bmodel.mins[1] + 1.0f};
-	bbox_planes[4] = {{ 0, 0, 1}, bmodel.maxs[2] + 1.0f};
-	bbox_planes[5] = {{ 0, 0,-1}, -bmodel.mins[2] + 1.0f};
-
-	const float EPSILON = 0.1f;
-	const float INFLATE_GS = 0.1f; // small inflate to close hairline gaps
-
-	// Collect solid cells from the appropriate hull tree
-	vector<HullPlane> accumulated;
-	vector<ConvexCell> cells;
-
-	int root = bmodel.headnode[hull_index];
-
-	if (hull_index == 0) {
-		// Hull 0 uses BSPNode/BSPLeaf tree
-		walk_bsp_tree(bsp_data.nodes, bsp_data.leafs, bsp_data.planes,
-			root, accumulated, cells, goldsrc::CONTENTS_SOLID);
-	} else {
-		// Hulls 1-3 use BSPClipNode tree
-		if (bsp_data.clipnodes.empty()) return;
-		walk_clipnode_tree(bsp_data.clipnodes, bsp_data.planes,
-			root, accumulated, cells, goldsrc::CONTENTS_SOLID);
-	}
-
-	if (cells.empty()) return;
-
-	// Create parent node for the hull shapes
-	Node3D *hull_parent = memnew(Node3D);
-	hull_parent->set_name(String("Hull") + String::num_int64(hull_index) + "_Shapes");
-	add_child(hull_parent);
-
-	StaticBody3D *body = memnew(StaticBody3D);
-	body->set_name(String("Hull") + String::num_int64(hull_index) + "_Collision");
-	body->set_collision_layer(collision_layer);
-	body->set_collision_mask(0); // no outgoing queries
-	hull_parent->add_child(body);
-
-	int shape_count = 0;
-	int skipped = 0;
-
-	for (auto &cell : cells) {
-		// Add bounding box planes to close unbounded cells
-		for (int i = 0; i < 6; i++) {
-			cell.planes.push_back(bbox_planes[i]);
-		}
-
-		// Inflate planes slightly to close hairline gaps
-		for (auto &hp : cell.planes) {
-			hp.dist += INFLATE_GS;
-		}
-
-		vector<CellVertex> verts = compute_cell_vertices(
-			cell.planes, scale_factor, EPSILON);
-		if ((int)verts.size() < 4) {
-			skipped++;
-			continue;
-		}
-
-		// Skip paper-thin cells: check thickness along each plane normal
-		// in GoldSrc units. If span < 0.1 along any normal, discard.
-		{
-			const float MIN_THICKNESS_GS = 0.5f;
-			bool too_thin = false;
-			for (const auto &hp : cell.planes) {
-				float lo = 1e30f, hi = -1e30f;
-				for (const auto &v : verts) {
-					float d = hp.normal[0] * v.gs[0]
-					        + hp.normal[1] * v.gs[1]
-					        + hp.normal[2] * v.gs[2];
-					if (d < lo) lo = d;
-					if (d > hi) hi = d;
-				}
-				if (hi - lo < MIN_THICKNESS_GS) {
-					too_thin = true;
-					break;
-				}
-			}
-			if (too_thin) {
-				skipped++;
-				continue;
-			}
-		}
-
-		// Build collision shape
-		PackedVector3Array points;
-		for (const auto &v : verts) {
-			points.push_back(v.godot);
-		}
-
-		Ref<ConvexPolygonShape3D> shape;
-		shape.instantiate();
-		shape->set_points(points);
-
-		CollisionShape3D *col = memnew(CollisionShape3D);
-		col->set_name(String("HullShape_") + String::num_int64(shape_count));
-		col->set_shape(shape);
-		body->add_child(col);
-
-		// Debug visual: purple transparent mesh
-		if (debug_visual) {
-			MeshInstance3D *mi = build_debug_convex_mesh(verts);
-			if (mi) {
-				mi->set_name(String("HullDebug_") + String::num_int64(shape_count));
-				hull_parent->add_child(mi);
-			}
-		}
-
-		shape_count++;
-	}
-
-	UtilityFunctions::print("[GoldSrc] Hull ", (int64_t)hull_index,
-		" shapes: ", (int64_t)shape_count,
-		" convex shapes from ", (int64_t)cells.size(),
-		" cells (", (int64_t)skipped, " degenerate, layer ",
-		(int64_t)collision_layer, ")");
-}
