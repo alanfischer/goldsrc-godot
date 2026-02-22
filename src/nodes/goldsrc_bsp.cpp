@@ -1253,6 +1253,7 @@ void GoldSrcBSP::build_clip_hull_debug(Node3D *parent, int hull_index) {
 	MeshInstance3D *mesh_instance = memnew(MeshInstance3D);
 	mesh_instance->set_name(String("ClipHull") + String::num_int64(hull_index) + "_Debug");
 	mesh_instance->set_mesh(mesh);
+	mesh_instance->set_visible(false);
 	parent->add_child(mesh_instance);
 
 	UtilityFunctions::print("[GoldSrc] Clip hull ", (int64_t)hull_index,
