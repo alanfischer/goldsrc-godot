@@ -43,6 +43,13 @@ public:
 	// Returns Array [s_axis: Vector3, t_axis: Vector3] in Godot coords, or empty if not found.
 	godot::Array get_face_axes(godot::Vector3 godot_pos, godot::Vector3 godot_normal) const;
 
+	// Build collision shapes from any BSP hull (0-3) on the given collision layer.
+	// Hull 0 = point hull (exact geometry), 1 = standing (32x32x72 Minkowski-expanded),
+	// 2 = large (64x64x64), 3 = crouching (32x32x36).
+	// Shapes are placed as children of this node.  If debug_visual is true, purple
+	// transparent meshes are also created for visualisation.
+	void build_hull_shapes(int hull_index, int collision_layer, bool debug_visual);
+
 private:
 	godot::Ref<godot::ImageTexture> find_texture(const std::string &name) const;
 	godot::Vector3 goldsrc_to_godot(float x, float y, float z) const;
