@@ -252,96 +252,6 @@ Vector3 GoldSrcBSP::goldsrc_to_godot(float x, float y, float z) const {
 	return Vector3(-x * scale_factor, z * scale_factor, y * scale_factor);
 }
 
-// --- Hull collision helpers ---
-
-namespace {
-
-// Convert CellVertex GoldSrc coords to Godot Vector3
-static Vector3 cell_vert_to_godot(const CellVertex &v, float scale_factor) {
-	return Vector3(-v.gs[0] * scale_factor, v.gs[2] * scale_factor, v.gs[1] * scale_factor);
-}
-
-// Triangulate a convex cell into renderable mesh data.
-// For each defining plane, finds vertices on that plane, sorts them by angle,
-// and fan-triangulates. Appends to the output arrays.
-static void triangulate_convex_cell(
-	const vector<HullPlane> &planes,
-	const vector<CellVertex> &verts,
-	float scale_factor,
-	PackedVector3Array &out_vertices,
-	PackedVector3Array &out_normals,
-	PackedInt32Array &out_indices,
-	float on_plane_epsilon = 0.5f) {
-
-	for (const auto &plane : planes) {
-		// Find vertices on this plane (in GoldSrc coords)
-		vector<int> face_verts;
-		for (int i = 0; i < (int)verts.size(); i++) {
-			float dot = plane.normal[0] * verts[i].gs[0]
-			          + plane.normal[1] * verts[i].gs[1]
-			          + plane.normal[2] * verts[i].gs[2];
-			if (fabsf(dot - plane.dist) < on_plane_epsilon) {
-				face_verts.push_back(i);
-			}
-		}
-
-		if ((int)face_verts.size() < 3) continue;
-
-		// Outward-facing normal in Godot coords.
-		// Half-space: dot(n, p) <= dist = inside solid.
-		// Outward = -n in GoldSrc. GS direction to Godot: (-nx,-ny,-nz) -> (nx, -nz, -ny)
-		Vector3 godot_normal(plane.normal[0], -plane.normal[2], -plane.normal[1]);
-		godot_normal.normalize();
-
-		// Centroid in Godot coords
-		Vector3 centroid(0, 0, 0);
-		for (int idx : face_verts) {
-			centroid += cell_vert_to_godot(verts[idx], scale_factor);
-		}
-		centroid /= (float)face_verts.size();
-
-		// Build 2D basis on face plane
-		Vector3 ref = (fabsf(godot_normal.y) < 0.9f)
-			? Vector3(0, 1, 0) : Vector3(1, 0, 0);
-		Vector3 local_x = ref.cross(godot_normal).normalized();
-		Vector3 local_y = godot_normal.cross(local_x).normalized();
-
-		// Project to 2D and sort by angle
-		struct AngleVert {
-			float angle;
-			int idx;
-		};
-		vector<AngleVert> sorted;
-		for (int idx : face_verts) {
-			Vector3 gv = cell_vert_to_godot(verts[idx], scale_factor);
-			Vector3 rel = gv - centroid;
-			float u = rel.dot(local_x);
-			float v = rel.dot(local_y);
-			sorted.push_back({atan2f(v, u), idx});
-		}
-		sort(sorted.begin(), sorted.end(),
-			[](const AngleVert &a, const AngleVert &b) {
-				return a.angle < b.angle;
-			});
-
-		// Fan-triangulate
-		int fan_base = out_vertices.size();
-		for (const auto &sv : sorted) {
-			out_vertices.push_back(cell_vert_to_godot(verts[sv.idx], scale_factor));
-			out_normals.push_back(godot_normal);
-		}
-
-		int nv = (int)sorted.size();
-		for (int i = 2; i < nv; i++) {
-			out_indices.push_back(fan_base);
-			out_indices.push_back(fan_base + i - 1);
-			out_indices.push_back(fan_base + i);
-		}
-	}
-}
-
-} // anonymous namespace
-
 // --- Shelf-based lightmap atlas packer ---
 
 namespace {
@@ -1024,11 +934,6 @@ void GoldSrcBSP::build_clip_hull_debug(Node3D *parent, int hull_index) {
 	clip_body->set_collision_mask(0);
 	int shape_count = 0;
 
-	// Build triangulated debug mesh from all cells
-	PackedVector3Array all_verts;
-	PackedVector3Array all_normals;
-	PackedInt32Array all_indices;
-
 	for (auto &cell : cells) {
 		int original_plane_count = (int)cell.planes.size();
 
@@ -1214,51 +1119,16 @@ void GoldSrcBSP::build_clip_hull_debug(Node3D *parent, int hull_index) {
 				clip_body->add_child(col);
 				shape_count++;
 			}
-
-			triangulate_convex_cell(c.planes, verts, scale_factor,
-				all_verts, all_normals, all_indices);
 		}
 	}
 
 	if (shape_count > 0) {
 		parent->add_child(clip_body);
+		UtilityFunctions::print("[GoldSrc] Clip hull ", (int64_t)hull_index,
+			": ", (int64_t)shape_count, " collision shapes");
 	} else {
 		memdelete(clip_body);
 	}
-
-	if (all_verts.is_empty()) return;
-
-	// Create ArrayMesh
-	Ref<ArrayMesh> mesh;
-	mesh.instantiate();
-
-	Array arrays;
-	arrays.resize(ArrayMesh::ARRAY_MAX);
-	arrays[ArrayMesh::ARRAY_VERTEX] = all_verts;
-	arrays[ArrayMesh::ARRAY_NORMAL] = all_normals;
-	arrays[ArrayMesh::ARRAY_INDEX] = all_indices;
-	mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
-
-	// Semi-transparent purple material
-	Ref<StandardMaterial3D> material;
-	material.instantiate();
-	material->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
-	material->set_albedo(Color(0.6f, 0.0f, 0.8f, 0.3f));
-	material->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-	material->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
-	material->set_depth_draw_mode(BaseMaterial3D::DEPTH_DRAW_DISABLED);
-
-	mesh->surface_set_material(0, material);
-
-	MeshInstance3D *mesh_instance = memnew(MeshInstance3D);
-	mesh_instance->set_name(String("ClipHull") + String::num_int64(hull_index) + "_Debug");
-	mesh_instance->set_mesh(mesh);
-	mesh_instance->set_visible(false);
-	parent->add_child(mesh_instance);
-
-	UtilityFunctions::print("[GoldSrc] Clip hull ", (int64_t)hull_index,
-		": ", (int64_t)shape_count, " collision shapes, ",
-		(int64_t)(all_indices.size() / 3), " debug tris");
 }
 
 void GoldSrcBSP::set_lightstyle(int style_index, float brightness) {
