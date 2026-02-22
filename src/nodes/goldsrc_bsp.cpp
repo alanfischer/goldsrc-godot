@@ -1334,6 +1334,13 @@ void GoldSrcBSP::build_clip_hull_debug(Node3D *parent, int hull_index) {
 
 	if (cells.empty()) return;
 
+	// Collision body for all clip hull shapes
+	StaticBody3D *clip_body = memnew(StaticBody3D);
+	clip_body->set_name(String("ClipHull") + String::num_int64(hull_index) + "_Collision");
+	clip_body->set_collision_layer(1);
+	clip_body->set_collision_mask(0);
+	int shape_count = 0;
+
 	// Build triangulated debug mesh from all cells
 	PackedVector3Array all_verts;
 	PackedVector3Array all_normals;
@@ -1366,20 +1373,30 @@ void GoldSrcBSP::build_clip_hull_debug(Node3D *parent, int hull_index) {
 			auto pre_verts = compute_cell_vertices(c.planes, scale_factor, EPSILON);
 			if ((int)pre_verts.size() < 4) continue;
 
+			// Save original distances for binary search fallback
+			vector<float> orig_dist(original_plane_count);
+			for (int pi = 0; pi < original_plane_count; pi++)
+				orig_dist[pi] = c.planes[pi].dist;
+
+			// First pass: determine which planes to unexpand and their support
+			struct UnexpandInfo {
+				bool should_unexpand = false;
+				float support = 0;
+				float clamped_support = 0;
+			};
+			vector<UnexpandInfo> uinfo(original_plane_count);
+
 			for (int pi = 0; pi < original_plane_count; pi++) {
 				auto &hp = c.planes[pi];
 				float support = minkowski_support(hp.normal, HULL_HX, HULL_HY, HULL_HZ);
-
-				bool should_unexpand = false;
+				uinfo[pi].support = support;
+				uinfo[pi].clamped_support = support;
 
 				if (hp.sibling_child != (int16_t)goldsrc::CONTENTS_SOLID) {
-					// Sibling resolved to non-solid leaf — unexpand
-					should_unexpand = true;
+					uinfo[pi].should_unexpand = true;
 				} else {
-					// Sibling resolved to solid. Probe to check for thin
-					// BSP artifact layers: if the space one support distance
-					// outside the face is empty, the solid is just an artifact.
-					// Only probe if cell is thick enough along this normal.
+					// Probe check: for thick cells, probe one support distance
+					// outside the face to detect thin BSP artifact layers
 					float min_dot = hp.dist;
 					float cx = 0, cy = 0, cz = 0;
 					int face_count = 0;
@@ -1403,23 +1420,127 @@ void GoldSrcBSP::build_clip_hull_debug(Node3D *parent, int hull_index) {
 							bsp_data.clipnodes, bsp_data.planes,
 							root, probe_x, probe_y, probe_z);
 						if (contents != goldsrc::CONTENTS_SOLID) {
-							should_unexpand = true;
+							uinfo[pi].should_unexpand = true;
 						}
 					}
 				}
+			}
 
-				if (should_unexpand) {
-					hp.dist -= support;
+			// Second pass: for nearly-antiparallel plane pairs that are both
+			// being unexpanded, check if the slab between them is thinner than
+			// the combined support. If so, clamp proportionally.
+			// Slab gap = di + dj (for nj ≈ -ni), the direct plane-distance gap.
+			for (int i = 0; i < original_plane_count; i++) {
+				if (!uinfo[i].should_unexpand) continue;
+				const auto &pi_plane = c.planes[i];
+
+				for (int j = i + 1; j < original_plane_count; j++) {
+					if (!uinfo[j].should_unexpand) continue;
+					const auto &pj_plane = c.planes[j];
+
+					float dot_normals =
+						pi_plane.normal[0] * pj_plane.normal[0] +
+						pi_plane.normal[1] * pj_plane.normal[1] +
+						pi_plane.normal[2] * pj_plane.normal[2];
+					if (dot_normals > -0.8f) continue;
+
+					float slab_gap = pi_plane.dist + pj_plane.dist;
+					float total_support = uinfo[i].support + uinfo[j].support;
+					if (total_support > slab_gap) {
+						float available = fmaxf(0.0f, slab_gap - 8.0f);
+						float ratio = (total_support > 0) ?
+							available / total_support : 0.0f;
+						uinfo[i].clamped_support = fminf(
+							uinfo[i].clamped_support,
+							uinfo[i].support * ratio);
+						uinfo[j].clamped_support = fminf(
+							uinfo[j].clamped_support,
+							uinfo[j].support * ratio);
+					}
+				}
+			}
+
+			// Third pass: apply (clamped) unexpansion
+			for (int pi = 0; pi < original_plane_count; pi++) {
+				if (uinfo[pi].should_unexpand) {
+					c.planes[pi].dist -= uinfo[pi].clamped_support;
 				}
 			}
 
 			vector<CellVertex> verts = compute_cell_vertices(
 				c.planes, scale_factor, EPSILON);
+
+			// Fallback: if the cell collapsed, binary search for the maximum
+			// unexpansion scale that produces valid geometry
+			if ((int)verts.size() < 4) {
+				for (int pi = 0; pi < original_plane_count; pi++)
+					c.planes[pi].dist = orig_dist[pi];
+
+				float lo = 0.0f, hi = 1.0f;
+				for (int iter = 0; iter < 12; iter++) {
+					float mid = (lo + hi) * 0.5f;
+					auto test = c.planes;
+					for (int pi = 0; pi < original_plane_count; pi++) {
+						if (uinfo[pi].should_unexpand)
+							test[pi].dist -= uinfo[pi].clamped_support * mid;
+					}
+					auto tv = compute_cell_vertices(test, scale_factor, EPSILON);
+					if ((int)tv.size() >= 4) lo = mid;
+					else hi = mid;
+				}
+
+				if (lo > 0.01f) {
+					for (int pi = 0; pi < original_plane_count; pi++) {
+						if (uinfo[pi].should_unexpand)
+							c.planes[pi].dist -= uinfo[pi].clamped_support * lo;
+					}
+					verts = compute_cell_vertices(c.planes, scale_factor, EPSILON);
+				}
+			}
+
 			if ((int)verts.size() < 4) continue;
+
+			// Skip BSP splitting artifacts: cells thinner than 4 GS
+			// units along any axis are degenerate slivers from tree splits
+			{
+				float mn[3] = {1e9f, 1e9f, 1e9f};
+				float mx[3] = {-1e9f, -1e9f, -1e9f};
+				for (const auto &v : verts) {
+					for (int a = 0; a < 3; a++) {
+						if (v.gs[a] < mn[a]) mn[a] = v.gs[a];
+						if (v.gs[a] > mx[a]) mx[a] = v.gs[a];
+					}
+				}
+				float min_dim = fminf(fminf(mx[0]-mn[0], mx[1]-mn[1]), mx[2]-mn[2]);
+				if (min_dim < 4.0f) continue;
+			}
+
+			// Create collision shape from vertex point cloud
+			{
+				PackedVector3Array points;
+				for (const auto &v : verts) {
+					points.push_back(v.godot);
+				}
+				Ref<ConvexPolygonShape3D> shape;
+				shape.instantiate();
+				shape->set_points(points);
+
+				CollisionShape3D *col = memnew(CollisionShape3D);
+				col->set_name(String("ClipShape_") + String::num_int64(shape_count));
+				col->set_shape(shape);
+				clip_body->add_child(col);
+				shape_count++;
+			}
 
 			triangulate_convex_cell(c.planes, verts,
 				all_verts, all_normals, all_indices);
 		}
+	}
+
+	if (shape_count > 0) {
+		parent->add_child(clip_body);
+	} else {
+		memdelete(clip_body);
 	}
 
 	if (all_verts.is_empty()) return;
@@ -1452,8 +1573,8 @@ void GoldSrcBSP::build_clip_hull_debug(Node3D *parent, int hull_index) {
 	parent->add_child(mesh_instance);
 
 	UtilityFunctions::print("[GoldSrc] Clip hull ", (int64_t)hull_index,
-		" debug: ", (int64_t)cells.size(), " cells, ",
-		(int64_t)(all_indices.size() / 3), " tris");
+		": ", (int64_t)shape_count, " collision shapes, ",
+		(int64_t)(all_indices.size() / 3), " debug tris");
 }
 
 void GoldSrcBSP::set_lightstyle(int style_index, float brightness) {
