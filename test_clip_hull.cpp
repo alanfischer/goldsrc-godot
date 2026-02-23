@@ -32,177 +32,12 @@
 #include "src/bsp_hull.h"
 #include "src/parsers/bsp_parser.h"
 #include <cstdio>
-#include <cmath>
 #include <cstring>
 #include <vector>
-#include <algorithm>
 #include <fstream>
 
 using std::vector;
-using goldsrc_hull::HullPlane;
-using goldsrc_hull::ConvexCell;
-using goldsrc_hull::CellVertex;
-
-// ---------- The full unexpansion pipeline (mirrors goldsrc_bsp.cpp) ----------
-// Returns all surviving cells after unexpansion + thin filter.
-
-struct ProcessedCell {
-	vector<CellVertex> verts;
-	float mins[3], maxs[3];
-	float min_dim;
-};
-
-static vector<ProcessedCell> process_all_cells(
-	const goldsrc::BSPData &bsp, int hull_index,
-	float hull_hx, float hull_hy, float hull_hz,
-	float min_dim_threshold) {
-
-	const auto &bmodel = bsp.models[0];
-	int root = bmodel.headnode[hull_index];
-	const float EPSILON = 0.1f;
-
-	HullPlane bbox_planes[6];
-	bbox_planes[0] = {{ 1, 0, 0}, bmodel.maxs[0] + 1.0f};
-	bbox_planes[1] = {{-1, 0, 0}, -bmodel.mins[0] + 1.0f};
-	bbox_planes[2] = {{ 0, 1, 0}, bmodel.maxs[1] + 1.0f};
-	bbox_planes[3] = {{ 0,-1, 0}, -bmodel.mins[1] + 1.0f};
-	bbox_planes[4] = {{ 0, 0, 1}, bmodel.maxs[2] + 1.0f};
-	bbox_planes[5] = {{ 0, 0,-1}, -bmodel.mins[2] + 1.0f};
-
-	vector<HullPlane> accumulated;
-	vector<ConvexCell> cells;
-	goldsrc_hull::walk_clip_tree(bsp.clipnodes, bsp.planes, root, accumulated, cells);
-
-	vector<ProcessedCell> result;
-
-	for (auto &cell : cells) {
-		int opc = (int)cell.planes.size();
-		for (int i = 0; i < 6; i++) cell.planes.push_back(bbox_planes[i]);
-
-		// Split cells per face
-		vector<ConvexCell> current = {cell};
-		for (int pi = 0; pi < opc; pi++) {
-			vector<ConvexCell> next;
-			for (auto &c : current) {
-				goldsrc_hull::split_cell_for_face(c, pi, c.planes[pi].sibling_child,
-					bsp.clipnodes, bsp.planes, EPSILON, next);
-			}
-			current = std::move(next);
-		}
-
-		for (auto &c : current) {
-			auto pre_verts = goldsrc_hull::compute_cell_vertices(c.planes, EPSILON);
-			if ((int)pre_verts.size() < 4) continue;
-
-			vector<float> orig_dist(opc);
-			for (int pi = 0; pi < opc; pi++) orig_dist[pi] = c.planes[pi].dist;
-
-			// Pass 1: determine what to unexpand
-			struct UI { bool unexpand = false; float support = 0; float clamped = 0; };
-			vector<UI> u(opc);
-			for (int pi = 0; pi < opc; pi++) {
-				auto &hp = c.planes[pi];
-				float sup = goldsrc_hull::minkowski_support(hp.normal, hull_hx, hull_hy, hull_hz);
-				u[pi].support = sup;
-				u[pi].clamped = sup;
-				if (hp.sibling_child != (int16_t)goldsrc::CONTENTS_SOLID) {
-					u[pi].unexpand = true;
-				} else {
-					float min_dot = hp.dist;
-					float cx = 0, cy = 0, cz = 0;
-					int fc = 0;
-					for (const auto &v : pre_verts) {
-						float d = hp.normal[0]*v.gs[0] + hp.normal[1]*v.gs[1] + hp.normal[2]*v.gs[2];
-						if (d < min_dot) min_dot = d;
-						if (fabsf(d - hp.dist) < 0.5f) {
-							cx += v.gs[0]; cy += v.gs[1]; cz += v.gs[2]; fc++;
-						}
-					}
-					float thickness = hp.dist - min_dot;
-					if (fc >= 3 && thickness > sup) {
-						cx /= fc; cy /= fc; cz /= fc;
-						int ct = goldsrc_hull::clip_tree_contents(bsp.clipnodes, bsp.planes, root,
-							cx + hp.normal[0]*sup, cy + hp.normal[1]*sup, cz + hp.normal[2]*sup);
-						if (ct != goldsrc::CONTENTS_SOLID) u[pi].unexpand = true;
-					}
-				}
-			}
-
-			// Pass 2: antiparallel slab clamping
-			for (int i = 0; i < opc; i++) {
-				if (!u[i].unexpand) continue;
-				for (int j = i + 1; j < opc; j++) {
-					if (!u[j].unexpand) continue;
-					float dn = c.planes[i].normal[0]*c.planes[j].normal[0]
-					         + c.planes[i].normal[1]*c.planes[j].normal[1]
-					         + c.planes[i].normal[2]*c.planes[j].normal[2];
-					if (dn > -0.8f) continue;
-					float sg = c.planes[i].dist + c.planes[j].dist;
-					float ts = u[i].support + u[j].support;
-					if (ts > sg) {
-						float avail = fmaxf(0.0f, sg - 8.0f);
-						float r = (ts > 0) ? avail / ts : 0.0f;
-						u[i].clamped = fminf(u[i].clamped, u[i].support * r);
-						u[j].clamped = fminf(u[j].clamped, u[j].support * r);
-					}
-				}
-			}
-
-			// Pass 3: apply unexpansion
-			for (int pi = 0; pi < opc; pi++) {
-				if (u[pi].unexpand) c.planes[pi].dist -= u[pi].clamped;
-			}
-
-			auto post_verts = goldsrc_hull::compute_cell_vertices(c.planes, EPSILON);
-
-			// Binary search fallback if collapsed
-			if ((int)post_verts.size() < 4) {
-				for (int pi = 0; pi < opc; pi++) c.planes[pi].dist = orig_dist[pi];
-				float lo = 0.0f, hi = 1.0f;
-				for (int iter = 0; iter < 12; iter++) {
-					float mid = (lo + hi) * 0.5f;
-					auto test = c.planes;
-					for (int pi = 0; pi < opc; pi++) {
-						if (u[pi].unexpand) test[pi].dist -= u[pi].clamped * mid;
-					}
-					auto tv = goldsrc_hull::compute_cell_vertices(test, EPSILON);
-					if ((int)tv.size() >= 4) lo = mid;
-					else hi = mid;
-				}
-				if (lo > 0.01f) {
-					for (int pi = 0; pi < opc; pi++) {
-						if (u[pi].unexpand) c.planes[pi].dist -= u[pi].clamped * lo;
-					}
-					post_verts = goldsrc_hull::compute_cell_vertices(c.planes, EPSILON);
-				}
-			}
-
-			if ((int)post_verts.size() < 4) continue;
-
-			// Compute AABB
-			float mn[3] = {1e9f, 1e9f, 1e9f};
-			float mx[3] = {-1e9f, -1e9f, -1e9f};
-			for (const auto &v : post_verts) {
-				for (int a = 0; a < 3; a++) {
-					if (v.gs[a] < mn[a]) mn[a] = v.gs[a];
-					if (v.gs[a] > mx[a]) mx[a] = v.gs[a];
-				}
-			}
-			float md = fminf(fminf(mx[0]-mn[0], mx[1]-mn[1]), mx[2]-mn[2]);
-
-			// Thin-cell filter
-			if (md < min_dim_threshold) continue;
-
-			ProcessedCell pc;
-			pc.verts = std::move(post_verts);
-			for (int a = 0; a < 3; a++) { pc.mins[a] = mn[a]; pc.maxs[a] = mx[a]; }
-			pc.min_dim = md;
-			result.push_back(std::move(pc));
-		}
-	}
-
-	return result;
-}
+using goldsrc_hull::ProcessedCell;
 
 // Check if a GS point is inside any surviving cell's AABB (conservative)
 // and vertex hull (precise).
@@ -385,7 +220,7 @@ int main(int argc, char **argv) {
 
 	// Run the full pipeline (hull 3, 4 GS min dim threshold)
 	printf("Processing clip hull 3...\n");
-	g_cells = process_all_cells(*g_bsp, 3, 16.0f, 16.0f, 18.0f, 4.0f);
+	g_cells = goldsrc_hull::unexpand_clip_hull(*g_bsp, 3, 16.0f, 16.0f, 18.0f, 4.0f);
 	printf("Surviving cells: %d\n\n", (int)g_cells.size());
 
 	// Run tests

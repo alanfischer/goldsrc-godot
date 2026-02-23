@@ -111,6 +111,12 @@ struct BSPLeaf {
 	uint8_t ambient_level[4];
 };
 
+#pragma pack(pop)
+
+inline constexpr int CONTENTS_EMPTY = -1;
+inline constexpr int CONTENTS_SOLID = -2;
+inline constexpr int CONTENTS_WATER = -3;
+
 // Tool textures that have no visible geometry at runtime
 inline bool is_tool_texture(const std::string &name) {
 	if (name.empty()) return false;
@@ -120,12 +126,6 @@ inline bool is_tool_texture(const std::string &name) {
 	return lower == "clip" || lower == "null" || lower == "origin" ||
 	       lower == "bevel" || lower == "hint" || lower == "skip";
 }
-
-inline constexpr int CONTENTS_EMPTY = -1;
-inline constexpr int CONTENTS_SOLID = -2;
-inline constexpr int CONTENTS_WATER = -3;
-
-#pragma pack(pop)
 
 // Parsed face data ready for mesh building
 struct ParsedVertex {

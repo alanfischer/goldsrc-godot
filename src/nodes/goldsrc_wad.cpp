@@ -4,10 +4,18 @@
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
+#include <algorithm>
 #include <cstring>
 
 using namespace godot;
 using namespace std;
+
+static string str_to_lower(const string &s) {
+	string result = s;
+	transform(result.begin(), result.end(), result.begin(),
+		[](unsigned char c) { return tolower(c); });
+	return result;
+}
 
 void GoldSrcWAD::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("load_wad", "path"), &GoldSrcWAD::load_wad);
@@ -42,7 +50,7 @@ Error GoldSrcWAD::load_wad(const String &path) {
 Ref<ImageTexture> GoldSrcWAD::get_texture(const String &name) const {
 	if (!parser) return Ref<ImageTexture>();
 
-	string sname = name.utf8().get_data();
+	string sname = str_to_lower(string(name.utf8().get_data()));
 
 	// Check cache
 	auto it = texture_cache.find(sname);

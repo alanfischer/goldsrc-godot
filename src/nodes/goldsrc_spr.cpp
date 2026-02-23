@@ -13,6 +13,7 @@ void GoldSrcSPR::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("load_spr", "path"), &GoldSrcSPR::load_spr);
 	ClassDB::bind_method(D_METHOD("get_frame_count"), &GoldSrcSPR::get_frame_count);
 	ClassDB::bind_method(D_METHOD("get_frame_texture", "index"), &GoldSrcSPR::get_frame_texture);
+	ClassDB::bind_method(D_METHOD("get_frame_origin", "index"), &GoldSrcSPR::get_frame_origin);
 	ClassDB::bind_method(D_METHOD("get_type"), &GoldSrcSPR::get_type);
 	ClassDB::bind_method(D_METHOD("get_texture_format"), &GoldSrcSPR::get_texture_format);
 }
@@ -66,6 +67,14 @@ Ref<ImageTexture> GoldSrcSPR::get_frame_texture(int index) const {
 	Ref<ImageTexture> texture = ImageTexture::create_from_image(image);
 	frame_cache[index] = texture;
 	return texture;
+}
+
+Vector2i GoldSrcSPR::get_frame_origin(int index) const {
+	if (!parser || index < 0 || index >= get_frame_count()) {
+		return Vector2i(0, 0);
+	}
+	const goldsrc::SPRFrame &frame = parser->get_data().frames[index];
+	return Vector2i(frame.origin_x, frame.origin_y);
 }
 
 int GoldSrcSPR::get_type() const {

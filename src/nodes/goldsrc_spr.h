@@ -3,6 +3,7 @@
 #include <godot_cpp/classes/resource.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/variant/string.hpp>
+#include <godot_cpp/variant/vector2i.hpp>
 
 #include "../parsers/spr_parser.h"
 #include <memory>
@@ -20,6 +21,7 @@ public:
 	godot::Error load_spr(const godot::String &path);
 	int get_frame_count() const;
 	godot::Ref<godot::ImageTexture> get_frame_texture(int index) const;
+	godot::Vector2i get_frame_origin(int index) const;
 	int get_type() const;
 	int get_texture_format() const;
 

@@ -221,7 +221,7 @@ void split_cell_for_face(
 		float dot = fp.normal[0] * verts[i].gs[0]
 		          + fp.normal[1] * verts[i].gs[1]
 		          + fp.normal[2] * verts[i].gs[2];
-		if (fabsf(dot - fp.dist) < 0.5f) {
+		if (fabsf(dot - fp.dist) < FACE_VERTEX_TOLERANCE) {
 			face_vert_idx.push_back(i);
 		}
 	}
@@ -282,6 +282,210 @@ bool point_inside(const vector<HullPlane> &planes, const float p[3], float toler
 		if (dot > hp.dist + tolerance) return false;
 	}
 	return true;
+}
+
+vector<ProcessedCell> unexpand_clip_hull(
+	const goldsrc::BSPData &bsp, int hull_index,
+	float hull_hx, float hull_hy, float hull_hz,
+	float min_dim_threshold) {
+
+	if (bsp.models.empty()) return {};
+	if (hull_index < 1 || hull_index > 3) return {};
+	if (bsp.clipnodes.empty()) return {};
+
+	const auto &bmodel = bsp.models[0];
+	int root = bmodel.headnode[hull_index];
+	if (root < 0 || (size_t)root >= bsp.clipnodes.size()) return {};
+
+	// Bounding box planes to cap exterior cells
+	HullPlane bbox_planes[6];
+	bbox_planes[0] = {{ 1, 0, 0}, bmodel.maxs[0] + 1.0f};
+	bbox_planes[1] = {{-1, 0, 0}, -bmodel.mins[0] + 1.0f};
+	bbox_planes[2] = {{ 0, 1, 0}, bmodel.maxs[1] + 1.0f};
+	bbox_planes[3] = {{ 0,-1, 0}, -bmodel.mins[1] + 1.0f};
+	bbox_planes[4] = {{ 0, 0, 1}, bmodel.maxs[2] + 1.0f};
+	bbox_planes[5] = {{ 0, 0,-1}, -bmodel.mins[2] + 1.0f};
+
+	// Walk clip tree collecting CONTENTS_SOLID cells
+	vector<HullPlane> accumulated;
+	vector<ConvexCell> cells;
+	walk_clip_tree(bsp.clipnodes, bsp.planes, root, accumulated, cells, goldsrc::CONTENTS_SOLID);
+
+	if (cells.empty()) return {};
+
+	vector<ProcessedCell> result;
+
+	for (auto &cell : cells) {
+		int original_plane_count = (int)cell.planes.size();
+
+		for (int i = 0; i < 6; i++) {
+			cell.planes.push_back(bbox_planes[i]);
+		}
+
+		// Split cells per face for sibling resolution
+		vector<ConvexCell> current = {cell};
+		for (int pi = 0; pi < original_plane_count; pi++) {
+			vector<ConvexCell> next;
+			for (auto &c : current) {
+				split_cell_for_face(c, pi, c.planes[pi].sibling_child,
+					bsp.clipnodes, bsp.planes, CELL_EPSILON, next);
+			}
+			current = std::move(next);
+		}
+
+		for (auto &c : current) {
+			auto pre_verts = compute_cell_vertices(c.planes, CELL_EPSILON);
+			if ((int)pre_verts.size() < 4) continue;
+
+			// Save original distances for binary search fallback
+			vector<float> orig_dist(original_plane_count);
+			for (int pi = 0; pi < original_plane_count; pi++)
+				orig_dist[pi] = c.planes[pi].dist;
+
+			// First pass: determine which planes to unexpand and their support
+			struct UnexpandInfo {
+				bool should_unexpand = false;
+				float support = 0;
+				float clamped_support = 0;
+			};
+			vector<UnexpandInfo> uinfo(original_plane_count);
+
+			for (int pi = 0; pi < original_plane_count; pi++) {
+				auto &hp = c.planes[pi];
+				float support = minkowski_support(hp.normal, hull_hx, hull_hy, hull_hz);
+				uinfo[pi].support = support;
+				uinfo[pi].clamped_support = support;
+
+				if (hp.sibling_child != (int16_t)goldsrc::CONTENTS_SOLID) {
+					uinfo[pi].should_unexpand = true;
+				} else {
+					// Probe check: for thick cells, probe one support distance
+					// outside the face to detect thin BSP artifact layers
+					float min_dot = hp.dist;
+					float cx = 0, cy = 0, cz = 0;
+					int face_count = 0;
+					for (const auto &v : pre_verts) {
+						float dot = hp.normal[0] * v.gs[0]
+						          + hp.normal[1] * v.gs[1]
+						          + hp.normal[2] * v.gs[2];
+						if (dot < min_dot) min_dot = dot;
+						if (fabsf(dot - hp.dist) < FACE_VERTEX_TOLERANCE) {
+							cx += v.gs[0]; cy += v.gs[1]; cz += v.gs[2];
+							face_count++;
+						}
+					}
+					float thickness = hp.dist - min_dot;
+					if (face_count >= 3 && thickness > support) {
+						cx /= face_count; cy /= face_count; cz /= face_count;
+						float probe_x = cx + hp.normal[0] * support;
+						float probe_y = cy + hp.normal[1] * support;
+						float probe_z = cz + hp.normal[2] * support;
+						int contents = clip_tree_contents(
+							bsp.clipnodes, bsp.planes,
+							root, probe_x, probe_y, probe_z);
+						if (contents != goldsrc::CONTENTS_SOLID) {
+							uinfo[pi].should_unexpand = true;
+						}
+					}
+				}
+			}
+
+			// Second pass: antiparallel slab clamping
+			for (int i = 0; i < original_plane_count; i++) {
+				if (!uinfo[i].should_unexpand) continue;
+				const auto &pi_plane = c.planes[i];
+
+				for (int j = i + 1; j < original_plane_count; j++) {
+					if (!uinfo[j].should_unexpand) continue;
+					const auto &pj_plane = c.planes[j];
+
+					float dot_normals =
+						pi_plane.normal[0] * pj_plane.normal[0] +
+						pi_plane.normal[1] * pj_plane.normal[1] +
+						pi_plane.normal[2] * pj_plane.normal[2];
+					if (dot_normals > ANTIPARALLEL_THRESHOLD) continue;
+
+					float slab_gap = pi_plane.dist + pj_plane.dist;
+					float total_support = uinfo[i].support + uinfo[j].support;
+					if (total_support > slab_gap) {
+						float available = fmaxf(0.0f, slab_gap - MIN_WALL_PRESERVE);
+						float ratio = (total_support > 0) ?
+							available / total_support : 0.0f;
+						uinfo[i].clamped_support = fminf(
+							uinfo[i].clamped_support,
+							uinfo[i].support * ratio);
+						uinfo[j].clamped_support = fminf(
+							uinfo[j].clamped_support,
+							uinfo[j].support * ratio);
+					}
+				}
+			}
+
+			// Third pass: apply (clamped) unexpansion
+			for (int pi = 0; pi < original_plane_count; pi++) {
+				if (uinfo[pi].should_unexpand) {
+					c.planes[pi].dist -= uinfo[pi].clamped_support;
+				}
+			}
+
+			vector<CellVertex> verts = compute_cell_vertices(c.planes, CELL_EPSILON);
+
+			// Fallback: if the cell collapsed, binary search for the maximum
+			// unexpansion scale that produces valid geometry
+			if ((int)verts.size() < 4) {
+				for (int pi = 0; pi < original_plane_count; pi++)
+					c.planes[pi].dist = orig_dist[pi];
+
+				float lo = 0.0f, hi = 1.0f;
+				for (int iter = 0; iter < BINARY_SEARCH_ITERS; iter++) {
+					float mid = (lo + hi) * 0.5f;
+					auto test = c.planes;
+					for (int pi = 0; pi < original_plane_count; pi++) {
+						if (uinfo[pi].should_unexpand)
+							test[pi].dist -= uinfo[pi].clamped_support * mid;
+					}
+					auto tv = compute_cell_vertices(test, CELL_EPSILON);
+					if ((int)tv.size() >= 4) lo = mid;
+					else hi = mid;
+				}
+
+				if (lo > BINARY_SEARCH_MIN) {
+					for (int pi = 0; pi < original_plane_count; pi++) {
+						if (uinfo[pi].should_unexpand)
+							c.planes[pi].dist -= uinfo[pi].clamped_support * lo;
+					}
+					verts = compute_cell_vertices(c.planes, CELL_EPSILON);
+				}
+			}
+
+			if ((int)verts.size() < 4) continue;
+
+			// Compute AABB and min dimension
+			float mn[3] = {1e9f, 1e9f, 1e9f};
+			float mx[3] = {-1e9f, -1e9f, -1e9f};
+			for (const auto &v : verts) {
+				for (int a = 0; a < 3; a++) {
+					if (v.gs[a] < mn[a]) mn[a] = v.gs[a];
+					if (v.gs[a] > mx[a]) mx[a] = v.gs[a];
+				}
+			}
+			float min_dim = fminf(fminf(mx[0]-mn[0], mx[1]-mn[1]), mx[2]-mn[2]);
+
+			// Skip BSP splitting artifacts: cells thinner than threshold
+			if (min_dim < min_dim_threshold) continue;
+
+			ProcessedCell pc;
+			pc.verts = std::move(verts);
+			for (int a = 0; a < 3; a++) {
+				pc.mins[a] = mn[a];
+				pc.maxs[a] = mx[a];
+			}
+			pc.min_dim = min_dim;
+			result.push_back(std::move(pc));
+		}
+	}
+
+	return result;
 }
 
 } // namespace goldsrc_hull

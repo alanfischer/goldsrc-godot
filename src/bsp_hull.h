@@ -7,6 +7,14 @@
 
 namespace goldsrc_hull {
 
+// --- Tuning constants for clip hull unexpansion ---
+constexpr float CELL_EPSILON = 0.1f;           // tolerance for vertex computation & dedup
+constexpr float FACE_VERTEX_TOLERANCE = 0.5f;   // how close a vertex must be to a face plane
+constexpr float ANTIPARALLEL_THRESHOLD = -0.8f;  // normal dot product for antiparallel detection
+constexpr float MIN_WALL_PRESERVE = 8.0f;        // minimum GS units preserved in thin slabs
+constexpr float BINARY_SEARCH_MIN = 0.01f;       // minimum useful binary search result
+constexpr int   BINARY_SEARCH_ITERS = 12;        // iterations for collapse recovery
+
 struct HullPlane {
 	float normal[3];
 	float dist;
@@ -19,6 +27,13 @@ struct ConvexCell {
 
 struct CellVertex {
 	float gs[3]; // GoldSrc coordinates only
+};
+
+// Result of the full unexpansion pipeline for a single convex cell.
+struct ProcessedCell {
+	std::vector<CellVertex> verts;
+	float mins[3], maxs[3];
+	float min_dim;
 };
 
 // Walk the BSP node tree (hull 0) collecting cells with the given contents.
@@ -68,5 +83,14 @@ void split_cell_for_face(
 
 // Check if a point is inside all half-space planes (within tolerance).
 bool point_inside(const std::vector<HullPlane> &planes, const float p[3], float tolerance = 1.0f);
+
+// Full clip hull unexpansion pipeline: walk clip tree, split cells per face,
+// apply 3-pass Minkowski un-expansion with antiparallel clamping, binary search
+// fallback for collapsed cells, and thin-cell filtering.
+// Returns surviving ProcessedCells with vertices and AABB bounds.
+std::vector<ProcessedCell> unexpand_clip_hull(
+	const goldsrc::BSPData &bsp, int hull_index,
+	float hull_hx, float hull_hy, float hull_hz,
+	float min_dim_threshold);
 
 } // namespace goldsrc_hull
