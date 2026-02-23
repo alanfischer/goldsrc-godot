@@ -7,6 +7,16 @@
 
 namespace goldsrc_hull {
 
+// --- GoldSrc hull half-extents (maxs) in GoldSrc units ---
+// Hull 0 = point (no expansion), Hull 1 = standing, Hull 2 = large, Hull 3 = crouching
+struct HullExtents { float hx, hy, hz; };
+constexpr HullExtents HULL_EXTENTS[4] = {
+	{  0.0f,  0.0f,  0.0f },  // hull 0: point hull (no Minkowski expansion)
+	{ 16.0f, 16.0f, 36.0f },  // hull 1: standing (32x32x72)
+	{ 32.0f, 32.0f, 32.0f },  // hull 2: large (64x64x64)
+	{ 16.0f, 16.0f, 18.0f },  // hull 3: crouching (32x32x36)
+};
+
 // --- Tuning constants for clip hull unexpansion ---
 constexpr float CELL_EPSILON = 0.1f;           // tolerance for vertex computation & dedup
 constexpr float FACE_VERTEX_TOLERANCE = 0.5f;   // how close a vertex must be to a face plane
