@@ -4,6 +4,8 @@
 #include <godot_cpp/classes/mesh_instance3d.hpp>
 #include <godot_cpp/classes/array_mesh.hpp>
 #include <godot_cpp/classes/standard_material3d.hpp>
+#include <godot_cpp/classes/shader_material.hpp>
+#include <godot_cpp/classes/shader.hpp>
 #include <godot_cpp/classes/static_body3d.hpp>
 #include <godot_cpp/classes/area3d.hpp>
 #include <godot_cpp/classes/concave_polygon_shape3d.hpp>
@@ -13,6 +15,7 @@
 #include <godot_cpp/classes/polygon_occluder3d.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
+#include <godot_cpp/classes/time.hpp>
 
 #include "../bsp_hull.h"
 
@@ -35,6 +38,107 @@ string str_to_lower(const string &s) {
 	return result;
 }
 
+// Shader source for lightstyle blending (opaque variant)
+static const char *LIGHTSTYLE_SHADER_CODE = R"(
+shader_type spatial;
+render_mode unshaded;
+
+uniform sampler2D albedo_texture : source_color;
+uniform sampler2D lm_layer0 : filter_linear;
+uniform sampler2D lm_layer1 : filter_linear;
+uniform sampler2D lm_layer2 : filter_linear;
+uniform sampler2D lm_layer3 : filter_linear;
+uniform sampler2D lightstyle_tex : filter_nearest;
+uniform float overbright = 2.0;
+
+varying vec4 style_coords;
+
+void vertex() {
+	style_coords = COLOR;
+}
+
+void fragment() {
+	vec4 albedo = texture(albedo_texture, UV);
+
+	float b0 = texture(lightstyle_tex, vec2(style_coords.r, 0.5)).r;
+	float b1 = texture(lightstyle_tex, vec2(style_coords.g, 0.5)).r;
+	float b2 = texture(lightstyle_tex, vec2(style_coords.b, 0.5)).r;
+	float b3 = texture(lightstyle_tex, vec2(style_coords.a, 0.5)).r;
+
+	vec3 lm = texture(lm_layer0, UV2).rgb * b0
+	         + texture(lm_layer1, UV2).rgb * b1
+	         + texture(lm_layer2, UV2).rgb * b2
+	         + texture(lm_layer3, UV2).rgb * b3;
+
+	ALBEDO = albedo.rgb * lm * overbright;
+}
+)";
+
+// Alpha-scissor variant for '{' textures (fences, grates)
+static const char *LIGHTSTYLE_SHADER_ALPHA_CODE = R"(
+shader_type spatial;
+render_mode unshaded;
+
+uniform sampler2D albedo_texture : source_color;
+uniform sampler2D lm_layer0 : filter_linear;
+uniform sampler2D lm_layer1 : filter_linear;
+uniform sampler2D lm_layer2 : filter_linear;
+uniform sampler2D lm_layer3 : filter_linear;
+uniform sampler2D lightstyle_tex : filter_nearest;
+uniform float overbright = 2.0;
+uniform float alpha_scissor_threshold : hint_range(0, 1) = 0.5;
+
+varying vec4 style_coords;
+
+void vertex() {
+	style_coords = COLOR;
+}
+
+void fragment() {
+	vec4 albedo = texture(albedo_texture, UV);
+
+	float b0 = texture(lightstyle_tex, vec2(style_coords.r, 0.5)).r;
+	float b1 = texture(lightstyle_tex, vec2(style_coords.g, 0.5)).r;
+	float b2 = texture(lightstyle_tex, vec2(style_coords.b, 0.5)).r;
+	float b3 = texture(lightstyle_tex, vec2(style_coords.a, 0.5)).r;
+
+	vec3 lm = texture(lm_layer0, UV2).rgb * b0
+	         + texture(lm_layer1, UV2).rgb * b1
+	         + texture(lm_layer2, UV2).rgb * b2
+	         + texture(lm_layer3, UV2).rgb * b3;
+
+	ALBEDO = albedo.rgb * lm * overbright;
+	ALPHA = albedo.a;
+	ALPHA_SCISSOR_THRESHOLD = alpha_scissor_threshold;
+}
+)";
+
+// Write raw (unweighted) lightmap data for a single layer into an atlas
+static void write_layer_pixels(
+	int layer_index, const uint8_t styles[4],
+	int lightmap_offset, int lm_width, int lm_height,
+	int atlas_x, int atlas_y, int atlas_width,
+	uint8_t *dest, const vector<uint8_t> &lighting) {
+
+	// Find which style slot this layer corresponds to
+	if (layer_index >= 4 || styles[layer_index] >= 64) return;
+
+	size_t pixel_count = (size_t)lm_width * lm_height;
+	size_t layer_ofs = (size_t)lightmap_offset + (size_t)layer_index * pixel_count * 3;
+
+	for (size_t p = 0; p < pixel_count; p++) {
+		size_t src = layer_ofs + p * 3;
+		if (src + 2 >= lighting.size()) break;
+		int px = atlas_x + (int)(p % lm_width);
+		int py = atlas_y + (int)(p / lm_width);
+		if (px >= atlas_width || py < 0) continue;
+		size_t dst = ((size_t)py * atlas_width + px) * 3;
+		dest[dst + 0] = lighting[src + 0];
+		dest[dst + 1] = lighting[src + 1];
+		dest[dst + 2] = lighting[src + 2];
+	}
+}
+
 } // anonymous namespace
 
 GoldSrcBSP::GoldSrcBSP() {
@@ -54,10 +158,15 @@ void GoldSrcBSP::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("set_lightstyle", "index", "brightness"), &GoldSrcBSP::set_lightstyle);
 	ClassDB::bind_method(D_METHOD("get_lightstyle", "index"), &GoldSrcBSP::get_lightstyle);
+	ClassDB::bind_method(D_METHOD("get_lightstyle_image"), &GoldSrcBSP::get_lightstyle_image);
+	ClassDB::bind_method(D_METHOD("get_lightstyle_texture"), &GoldSrcBSP::get_lightstyle_texture);
 	ClassDB::bind_method(D_METHOD("point_contents", "position"), &GoldSrcBSP::point_contents);
 	ClassDB::bind_method(D_METHOD("get_texture", "name"), &GoldSrcBSP::get_texture);
 	ClassDB::bind_method(D_METHOD("get_face_axes", "position", "normal"), &GoldSrcBSP::get_face_axes);
+	ClassDB::bind_method(D_METHOD("set_shader_lightstyles", "enabled"), &GoldSrcBSP::set_shader_lightstyles);
+	ClassDB::bind_method(D_METHOD("get_shader_lightstyles"), &GoldSrcBSP::get_shader_lightstyles);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "scale_factor"), "set_scale_factor", "get_scale_factor");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "shader_lightstyles"), "set_shader_lightstyles", "get_shader_lightstyles");
 }
 
 Error GoldSrcBSP::load_bsp(const String &path) {
@@ -103,6 +212,14 @@ void GoldSrcBSP::set_scale_factor(float scale) {
 
 float GoldSrcBSP::get_scale_factor() const {
 	return scale_factor;
+}
+
+void GoldSrcBSP::set_shader_lightstyles(bool enabled) {
+	shader_lightstyles = enabled;
+}
+
+bool GoldSrcBSP::get_shader_lightstyles() const {
+	return shader_lightstyles;
 }
 
 int GoldSrcBSP::point_contents(Vector3 godot_pos) const {
@@ -185,13 +302,14 @@ Array GoldSrcBSP::get_face_axes(Vector3 godot_pos, Vector3 godot_normal) const {
 	const auto &faces = parser->get_data().faces;
 
 	// Convert Godot position/normal back to GoldSrc coords
-	// Godot (x, y, z) -> GoldSrc (x/sf, -z/sf, y/sf)
+	// Forward: GS(x,y,z) -> Godot(-x*sf, z*sf, y*sf)
+	// Inverse: Godot(x,y,z) -> GS(-x/sf, z/sf, y/sf)
 	float sf = scale_factor;
-	float gx = godot_pos.x / sf;
-	float gy = -godot_pos.z / sf;
+	float gx = -godot_pos.x / sf;
+	float gy = godot_pos.z / sf;
 	float gz = godot_pos.y / sf;
-	float gnx = godot_normal.x;
-	float gny = -godot_normal.z;
+	float gnx = -godot_normal.x;
+	float gny = godot_normal.z;
 	float gnz = godot_normal.y;
 
 	// Find the worldspawn face closest to this position with matching normal
@@ -223,9 +341,9 @@ Array GoldSrcBSP::get_face_axes(Vector3 godot_pos, Vector3 godot_normal) const {
 	if (!best_face) return Array();
 
 	// GoldSrc decals use the surface's texinfo S/T axes (normalized, no scale).
-	// Convert from GoldSrc (x,y,z) to Godot (x, z, -y) for directions.
-	Vector3 s_godot(best_face->s_axis[0], best_face->s_axis[2], -best_face->s_axis[1]);
-	Vector3 t_godot(best_face->t_axis[0], best_face->t_axis[2], -best_face->t_axis[1]);
+	// Convert from GoldSrc (x,y,z) to Godot (-x, z, y) for directions.
+	Vector3 s_godot(-best_face->s_axis[0], best_face->s_axis[2], best_face->s_axis[1]);
+	Vector3 t_godot(-best_face->t_axis[0], best_face->t_axis[2], best_face->t_axis[1]);
 
 	Array result;
 	result.push_back(s_godot.normalized());
@@ -325,21 +443,22 @@ static void bake_lightmap_pixels(
 	int atlas_x, int atlas_y, int atlas_width,
 	uint8_t *dest, const vector<uint8_t> &lighting, const float *lightstyle_values) {
 
-	int pixel_count = lm_width * lm_height;
-	for (int p = 0; p < pixel_count; p++) {
+	size_t pixel_count = (size_t)lm_width * lm_height;
+	for (size_t p = 0; p < pixel_count; p++) {
 		float r = 0, g = 0, b = 0;
 		for (int s = 0; s < 4; s++) {
 			if (styles[s] >= 64) break;
 			float brightness = lightstyle_values[styles[s]];
-			size_t ofs = (size_t)lightmap_offset + (size_t)s * pixel_count * 3 + (size_t)p * 3;
+			size_t ofs = (size_t)lightmap_offset + (size_t)s * pixel_count * 3 + p * 3;
 			if (ofs + 2 >= lighting.size()) break;
 			r += lighting[ofs + 0] * brightness;
 			g += lighting[ofs + 1] * brightness;
 			b += lighting[ofs + 2] * brightness;
 		}
-		int px = atlas_x + (p % lm_width);
-		int py = atlas_y + (p / lm_width);
-		int dst = (py * atlas_width + px) * 3;
+		int px = atlas_x + (int)(p % lm_width);
+		int py = atlas_y + (int)(p / lm_width);
+		if (px >= atlas_width || py < 0) continue;
+		size_t dst = ((size_t)py * atlas_width + px) * 3;
 		dest[dst + 0] = (uint8_t)clamp(r, 0.0f, 255.0f);
 		dest[dst + 1] = (uint8_t)clamp(g, 0.0f, 255.0f);
 		dest[dst + 2] = (uint8_t)clamp(b, 0.0f, 255.0f);
@@ -354,9 +473,42 @@ void GoldSrcBSP::build_mesh() {
 	mesh_built = true;
 
 	const auto &bsp_data = parser->get_data();
+	uint64_t t0 = Time::get_singleton()->get_ticks_msec();
+	uint64_t t_last = t0;
+	auto log_timing = [&](const char *label) {
+		uint64_t now = Time::get_singleton()->get_ticks_msec();
+		UtilityFunctions::print("[GoldSrc] ", label, ": ",
+			(int64_t)(now - t_last), "ms (total ",
+			(int64_t)(now - t0), "ms)");
+		t_last = now;
+	};
 
-	// Initialize face_lm_info to match bsp_data.faces
-	face_lm_info.resize(bsp_data.faces.size());
+	// Initialize face_lm_info for legacy path
+	if (!shader_lightstyles) {
+		face_lm_info.resize(bsp_data.faces.size());
+	}
+
+	// Create shared lightstyle brightness texture for shader path
+	Ref<Shader> opaque_shader;
+	Ref<Shader> alpha_shader;
+	Ref<ImageTexture> black_1x1;  // shared black texture for unused layers
+	if (shader_lightstyles) {
+		lightstyle_image = Image::create(64, 1, false, Image::FORMAT_RF);
+		for (int i = 0; i < 64; i++) {
+			lightstyle_image->set_pixel(i, 0, Color(lightstyle_values[i], 0, 0, 1));
+		}
+		lightstyle_texture = ImageTexture::create_from_image(lightstyle_image);
+
+		opaque_shader.instantiate();
+		opaque_shader->set_code(LIGHTSTYLE_SHADER_CODE);
+		alpha_shader.instantiate();
+		alpha_shader->set_code(LIGHTSTYLE_SHADER_ALPHA_CODE);
+
+		Ref<Image> black_img = Image::create(1, 1, false, Image::FORMAT_RGB8);
+		black_img->set_pixel(0, 0, Color(0, 0, 0));
+		black_1x1 = ImageTexture::create_from_image(black_img);
+		log_timing("shader setup");
+	}
 
 	// Build entity lookup: "*N" → entity properties
 	map<string, const goldsrc::ParsedEntity *> model_entities;
@@ -448,15 +600,7 @@ void GoldSrcBSP::build_mesh() {
 			const auto &face_refs = group.second;
 
 			// Skip tool textures that should never be rendered
-			if (!tex_name.empty()) {
-				string tn = tex_name;
-				for (auto &c : tn) c = tolower(c);
-				if (tn.compare(0, 3, "aaa") == 0 ||
-					tn == "clip" || tn == "null" || tn == "origin" ||
-					tn == "bevel" || tn == "hint" || tn == "skip") {
-					continue;
-				}
-			}
+			if (goldsrc::is_tool_texture(tex_name)) continue;
 
 			int total_tris = 0;
 			for (const auto &fr : face_refs) {
@@ -475,6 +619,7 @@ void GoldSrcBSP::build_mesh() {
 				int global_idx;
 				int atlas_x, atlas_y;
 				bool has_lightmap;
+				int n_styles;
 			};
 			vector<FacePack> face_packs;
 			face_packs.reserve(face_refs.size());
@@ -484,36 +629,38 @@ void GoldSrcBSP::build_mesh() {
 				FacePack fp;
 				fp.global_idx = fr.global_index;
 				fp.has_lightmap = false;
+				fp.n_styles = 0;
 
 				if (face->lightmap_offset >= 0 && face->lightmap_width > 0 &&
 					face->lightmap_height > 0 && !bsp_data.lighting.empty()) {
 
 					// Count active styles
-					int n_styles = 0;
 					for (int s = 0; s < 4; s++) {
 						if (face->styles[s] == 255) break;
-						n_styles++;
+						fp.n_styles++;
 					}
 
-					int lm_size = face->lightmap_width * face->lightmap_height * 3;
-					int total_data = n_styles * lm_size;
+					size_t lm_size = (size_t)face->lightmap_width * face->lightmap_height * 3;
+					size_t total_data = (size_t)fp.n_styles * lm_size;
 
-					if (n_styles > 0 &&
-						face->lightmap_offset + total_data <= (int)bsp_data.lighting.size()) {
+					if (fp.n_styles > 0 &&
+						(size_t)face->lightmap_offset + total_data <= bsp_data.lighting.size()) {
 						if (packer.pack(face->lightmap_width, face->lightmap_height,
 							fp.atlas_x, fp.atlas_y)) {
 							fp.has_lightmap = true;
 							has_any_lightmap = true;
 
-							// Record in face_lm_info for rebaking
-							auto &info = face_lm_info[fr.global_index];
-							info.atlas_index = (int)lm_atlases.size(); // will be set after atlas creation
-							info.atlas_x = fp.atlas_x;
-							info.atlas_y = fp.atlas_y;
-							info.lm_width = face->lightmap_width;
-							info.lm_height = face->lightmap_height;
-							memcpy(info.styles, face->styles, 4);
-							info.lightmap_offset = face->lightmap_offset;
+							// Record in face_lm_info for legacy rebaking path
+							if (!shader_lightstyles) {
+								auto &info = face_lm_info[fr.global_index];
+								info.atlas_index = (int)lm_atlases.size();
+								info.atlas_x = fp.atlas_x;
+								info.atlas_y = fp.atlas_y;
+								info.lm_width = face->lightmap_width;
+								info.lm_height = face->lightmap_height;
+								memcpy(info.styles, face->styles, 4);
+								info.lightmap_offset = face->lightmap_offset;
+							}
 						}
 					}
 				}
@@ -521,8 +668,9 @@ void GoldSrcBSP::build_mesh() {
 				face_packs.push_back(fp);
 			}
 
-			// Create atlas image and bake lightmaps
-			Ref<ImageTexture> atlas_texture;
+			// Create atlas images and bake lightmaps
+			Ref<ImageTexture> atlas_texture;   // legacy: single blended atlas
+			Ref<ImageTexture> layer_textures[4]; // shader: per-layer atlases
 			int atlas_w = 0, atlas_h = 0;
 
 			if (has_any_lightmap) {
@@ -530,51 +678,85 @@ void GoldSrcBSP::build_mesh() {
 				atlas_h = packer.used_height();
 				if (atlas_h < 1) atlas_h = 1;
 
-				// Create white-filled RGB image
-				PackedByteArray atlas_pixels;
-				atlas_pixels.resize(atlas_w * atlas_h * 3);
-				memset(atlas_pixels.ptrw(), 255, atlas_pixels.size());
+				if (shader_lightstyles) {
+					// Shader path: only create full atlas for layers that have data
+					int max_styles = 0;
+					for (const auto &fp : face_packs) {
+						if (fp.has_lightmap && fp.n_styles > max_styles)
+							max_styles = fp.n_styles;
+					}
 
-				// Bake each face's combined lightmap into the atlas
-				uint8_t *atlas_ptr = atlas_pixels.ptrw();
-				for (size_t fi = 0; fi < face_packs.size(); fi++) {
-					const auto &fp = face_packs[fi];
-					if (!fp.has_lightmap) continue;
+					PackedByteArray layer_pixels[4];
+					for (int l = 0; l < max_styles; l++) {
+						layer_pixels[l].resize(atlas_w * atlas_h * 3);
+						memset(layer_pixels[l].ptrw(), 0, layer_pixels[l].size());
+					}
 
-					const auto *face = face_refs[fi].face;
-					bake_lightmap_pixels(face->styles, face->lightmap_offset,
-						face->lightmap_width, face->lightmap_height,
-						fp.atlas_x, fp.atlas_y, atlas_w,
-						atlas_ptr, bsp_data.lighting, lightstyle_values);
-				}
+					for (size_t fi = 0; fi < face_packs.size(); fi++) {
+						const auto &fp = face_packs[fi];
+						if (!fp.has_lightmap) continue;
+						const auto *face = face_refs[fi].face;
 
-				Ref<Image> atlas_img = Image::create_from_data(
-					atlas_w, atlas_h, false, Image::FORMAT_RGB8, atlas_pixels);
-				atlas_texture = ImageTexture::create_from_image(atlas_img);
+						for (int l = 0; l < fp.n_styles; l++) {
+							write_layer_pixels(l, face->styles,
+								face->lightmap_offset,
+								face->lightmap_width, face->lightmap_height,
+								fp.atlas_x, fp.atlas_y, atlas_w,
+								layer_pixels[l].ptrw(), bsp_data.lighting);
+						}
+					}
 
-				// Store atlas state for rebaking
-				int atlas_idx = (int)lm_atlases.size();
-				LightmapAtlasState state;
-				state.image = atlas_img;
-				state.texture = atlas_texture;
-				state.width = atlas_w;
-				state.height = atlas_h;
-				lm_atlases.push_back(state);
+					for (int l = 0; l < max_styles; l++) {
+						Ref<Image> img = Image::create_from_data(
+							atlas_w, atlas_h, false, Image::FORMAT_RGB8, layer_pixels[l]);
+						layer_textures[l] = ImageTexture::create_from_image(img);
+					}
+					// Unused layers stay null — will get black_1x1 below
+				} else {
+					// Legacy path: single blended atlas
+					PackedByteArray atlas_pixels;
+					atlas_pixels.resize(atlas_w * atlas_h * 3);
+					memset(atlas_pixels.ptrw(), 255, atlas_pixels.size());
 
-				// Fix up atlas_index in face_lm_info (was set to lm_atlases.size() before push)
-				for (const auto &fp : face_packs) {
-					if (fp.has_lightmap) {
-						face_lm_info[fp.global_idx].atlas_index = atlas_idx;
+					uint8_t *atlas_ptr = atlas_pixels.ptrw();
+					for (size_t fi = 0; fi < face_packs.size(); fi++) {
+						const auto &fp = face_packs[fi];
+						if (!fp.has_lightmap) continue;
+
+						const auto *face = face_refs[fi].face;
+						bake_lightmap_pixels(face->styles, face->lightmap_offset,
+							face->lightmap_width, face->lightmap_height,
+							fp.atlas_x, fp.atlas_y, atlas_w,
+							atlas_ptr, bsp_data.lighting, lightstyle_values);
+					}
+
+					Ref<Image> atlas_img = Image::create_from_data(
+						atlas_w, atlas_h, false, Image::FORMAT_RGB8, atlas_pixels);
+					atlas_texture = ImageTexture::create_from_image(atlas_img);
+
+					int atlas_idx = (int)lm_atlases.size();
+					LightmapAtlasState state;
+					state.image = atlas_img;
+					state.texture = atlas_texture;
+					state.width = atlas_w;
+					state.height = atlas_h;
+					lm_atlases.push_back(state);
+
+					for (const auto &fp : face_packs) {
+						if (fp.has_lightmap) {
+							face_lm_info[fp.global_idx].atlas_index = atlas_idx;
+						}
 					}
 				}
 			}
 
-			// --- Build mesh arrays with UV2 ---
+			// --- Build mesh arrays with UV2 (and COLOR for shader path) ---
 			PackedVector3Array vertices;
 			PackedVector3Array normals;
 			PackedFloat32Array tangents;
 			PackedVector2Array uvs;
 			PackedVector2Array uv2s;
+			PackedColorArray colors; // shader path: style indices
 			PackedInt32Array indices;
 			int vert_offset = 0;
 
@@ -583,6 +765,22 @@ void GoldSrcBSP::build_mesh() {
 				const auto &fp = face_packs[fi];
 				int nv = (int)face->vertices.size();
 				if (nv < 3) continue;
+
+				// Compute style color for this face (same for all vertices)
+				Color style_color(0, 0, 0, 0);
+				if (shader_lightstyles) {
+					for (int s = 0; s < 4; s++) {
+						float val = (face->styles[s] < 64)
+							? (face->styles[s] + 0.5f) / 64.0f
+							: 0.0f; // unused slot: maps to style 0 (brightness 1.0), paired with black layer
+						switch (s) {
+							case 0: style_color.r = val; break;
+							case 1: style_color.g = val; break;
+							case 2: style_color.b = val; break;
+							case 3: style_color.a = val; break;
+						}
+					}
+				}
 
 				for (int i = 2; i < nv; i++) {
 					const int tri_indices[3] = {0, i - 1, i};
@@ -606,6 +804,10 @@ void GoldSrcBSP::build_mesh() {
 							uv2s.push_back(Vector2(0, 0));
 						}
 
+						if (shader_lightstyles) {
+							colors.push_back(style_color);
+						}
+
 						tangents.push_back(1.0f);
 						tangents.push_back(0.0f);
 						tangents.push_back(0.0f);
@@ -627,34 +829,65 @@ void GoldSrcBSP::build_mesh() {
 			arrays[ArrayMesh::ARRAY_TEX_UV] = uvs;
 			arrays[ArrayMesh::ARRAY_TEX_UV2] = uv2s;
 			arrays[ArrayMesh::ARRAY_INDEX] = indices;
+			if (shader_lightstyles) {
+				arrays[ArrayMesh::ARRAY_COLOR] = colors;
+			}
 
 			arr_mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
 
-			Ref<StandardMaterial3D> material;
-			material.instantiate();
-			material->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
-
 			Ref<ImageTexture> texture = find_texture(tex_name);
-			if (texture.is_valid()) {
-				material->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, texture);
-				material->set_texture_filter(BaseMaterial3D::TEXTURE_FILTER_LINEAR_WITH_MIPMAPS);
+			bool is_alpha_scissor = tex_name.size() > 0 && tex_name[0] == '{';
+
+			if (shader_lightstyles) {
+				// Shader path: ShaderMaterial with 4-layer lightmap blending
+				Ref<ShaderMaterial> material;
+				material.instantiate();
+				material->set_shader(is_alpha_scissor ? alpha_shader : opaque_shader);
+
+				if (texture.is_valid()) {
+					material->set_shader_parameter("albedo_texture", texture);
+				}
+
+				// Assign layer textures (use black_1x1 for layers without data)
+				for (int l = 0; l < 4; l++) {
+					String param = String("lm_layer") + String::num_int64(l);
+					if (has_any_lightmap && layer_textures[l].is_valid()) {
+						material->set_shader_parameter(param, layer_textures[l]);
+					} else {
+						material->set_shader_parameter(param, black_1x1);
+					}
+				}
+
+				material->set_shader_parameter("lightstyle_tex", lightstyle_texture);
+				material->set_shader_parameter("overbright", 2.0f);
+
+				arr_mesh->surface_set_material(0, material);
 			} else {
-				material->set_albedo(Color(0.5f, 0.5f, 0.5f));
-			}
+				// Legacy path: StandardMaterial3D with detail texture multiply
+				Ref<StandardMaterial3D> material;
+				material.instantiate();
+				material->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
 
-			if (tex_name.size() > 0 && tex_name[0] == '{') {
-				material->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA_SCISSOR);
-			}
+				if (texture.is_valid()) {
+					material->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, texture);
+					material->set_texture_filter(BaseMaterial3D::TEXTURE_FILTER_LINEAR_WITH_MIPMAPS);
+				} else {
+					material->set_albedo(Color(0.5f, 0.5f, 0.5f));
+				}
 
-			// Configure lightmap detail texture
-			if (has_any_lightmap && atlas_texture.is_valid()) {
-				material->set_feature(BaseMaterial3D::FEATURE_DETAIL, true);
-				material->set_texture(BaseMaterial3D::TEXTURE_DETAIL_ALBEDO, atlas_texture);
-				material->set_detail_blend_mode(BaseMaterial3D::BLEND_MODE_MUL);
-				material->set_detail_uv(BaseMaterial3D::DETAIL_UV_2);
-			}
+				if (is_alpha_scissor) {
+					material->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA_SCISSOR);
+				}
 
-			arr_mesh->surface_set_material(0, material);
+				if (has_any_lightmap && atlas_texture.is_valid()) {
+					material->set_feature(BaseMaterial3D::FEATURE_DETAIL, true);
+					material->set_texture(BaseMaterial3D::TEXTURE_DETAIL_ALBEDO, atlas_texture);
+					material->set_detail_blend_mode(BaseMaterial3D::BLEND_MODE_MUL);
+					material->set_detail_uv(BaseMaterial3D::DETAIL_UV_2);
+				}
+
+				arr_mesh->surface_set_material(0, material);
+			}
 
 			MeshInstance3D *mesh_instance = memnew(MeshInstance3D);
 			mesh_instance->set_name(String(tex_name.c_str()));
@@ -664,19 +897,24 @@ void GoldSrcBSP::build_mesh() {
 
 		// Build collision for this model
 		if (m == 0) {
+			log_timing("worldspawn meshes");
 			// Hull 0: face-based collision (exact visible geometry).
 			// Hull 1: clip brushes, un-expanded with internal-split filtering
 			// to reconstruct original brush geometry.
 			build_hull_collision(model_node, m, 0, "WorldCollision", 1);
+			log_timing("hull 0 collision");
 			build_water_volumes(model_node);
 			build_occluders(model_node);
+			log_timing("water + occluders");
 			build_clip_hull_debug(model_node, 3); // hull 3 = crouching
+			log_timing("clip hull collision");
 		} else {
 			// Brush entities: hull 0 collision on layer 1 (GDScript converts
 			// to Area3D for triggers/ladders by reparenting the CollisionShape3D)
 			build_hull_collision(model_node, m, 0, "StaticBody3D", 1);
 		}
 	}
+	log_timing("brush entity meshes + collision");
 
 	UtilityFunctions::print("[GoldSrc] Built BSP: ",
 		(int64_t)num_models, " models, ",
@@ -824,7 +1062,7 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 		if (tn[0] == '{') continue;   // alpha-tested (fences, grates)
 		if (tn[0] == '!') continue;   // water/slime/lava
 		if (tn.compare(0, 3, "sky") == 0) continue;
-		if (tn == "aaatrigger" || tn == "clip" || tn == "null") continue;
+		if (goldsrc::is_tool_texture(tn)) continue;
 
 		int nv = (int)face.vertices.size();
 		if (nv < 3) continue;
@@ -1135,12 +1373,27 @@ void GoldSrcBSP::set_lightstyle(int style_index, float brightness) {
 	if (style_index < 0 || style_index >= 64) return;
 	if (lightstyle_values[style_index] == brightness) return;
 	lightstyle_values[style_index] = brightness;
-	rebake_lightstyle(style_index);
+	if (shader_lightstyles && lightstyle_image.is_valid()) {
+		// Shader path: update one pixel in the 64×1 brightness texture
+		lightstyle_image->set_pixel(style_index, 0, Color(brightness, 0, 0, 1));
+		lightstyle_texture->update(lightstyle_image);
+	} else {
+		// Legacy path: CPU rebake
+		rebake_lightstyle(style_index);
+	}
 }
 
 float GoldSrcBSP::get_lightstyle(int style_index) const {
 	if (style_index < 0 || style_index >= 64) return 0.0f;
 	return lightstyle_values[style_index];
+}
+
+Ref<Image> GoldSrcBSP::get_lightstyle_image() const {
+	return lightstyle_image;
+}
+
+Ref<ImageTexture> GoldSrcBSP::get_lightstyle_texture() const {
+	return lightstyle_texture;
 }
 
 void GoldSrcBSP::rebake_lightstyle(int style_index) {

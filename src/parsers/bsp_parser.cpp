@@ -1,4 +1,5 @@
 #include "bsp_parser.h"
+#include "texture_decode.h"
 #include <cstring>
 #include <cmath>
 
@@ -115,26 +116,7 @@ void BSPParser::parse_textures(const uint8_t *data, size_t size) {
 			const uint8_t *palette = tex_base + pixel_start + datasize + 2;
 
 			bool has_transparency = (miptex->name[0] == '{');
-
-			tex.data.resize(pixels * 4);
-			for (uint32_t j = 0; j < pixels; j++) {
-				uint8_t idx = pixel_data[j];
-				uint8_t r = palette[idx * 3 + 0];
-				uint8_t g = palette[idx * 3 + 1];
-				uint8_t b = palette[idx * 3 + 2];
-
-				if (has_transparency && idx == 255) {
-					tex.data[j * 4 + 0] = 0;
-					tex.data[j * 4 + 1] = 0;
-					tex.data[j * 4 + 2] = 0;
-					tex.data[j * 4 + 3] = 0;
-				} else {
-					tex.data[j * 4 + 0] = r;
-					tex.data[j * 4 + 1] = g;
-					tex.data[j * 4 + 2] = b;
-					tex.data[j * 4 + 3] = 255;
-				}
-			}
+			decode_palette_pixels(pixel_data, palette, pixels, has_transparency, tex.data);
 			tex.has_data = true;
 		}
 	}
@@ -168,9 +150,7 @@ void BSPParser::parse_faces(const uint8_t *data, size_t size) {
 
 		// Skip tool textures on worldspawn (they have no visible geometry or
 		// face-based collision). Keep them on brush entities (e.g. func_ladder).
-		bool is_tool = (tex.name == "aaatrigger" || tex.name == "clip" ||
-			tex.name == "origin" || tex.name == "null");
-		if (is_tool && face_to_model[f] == 0) continue;
+		if (is_tool_texture(tex.name) && face_to_model[f] == 0) continue;
 
 		// Bounds check plane index
 		if (face.planenum < 0 || (size_t)face.planenum >= planes.size()) continue;

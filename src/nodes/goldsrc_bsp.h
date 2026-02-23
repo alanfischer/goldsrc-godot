@@ -30,8 +30,14 @@ public:
 	void set_scale_factor(float scale);
 	float get_scale_factor() const;
 
+	void set_shader_lightstyles(bool enabled);
+	bool get_shader_lightstyles() const;
+
 	void set_lightstyle(int style_index, float brightness);
 	float get_lightstyle(int style_index) const;
+
+	godot::Ref<godot::Image> get_lightstyle_image() const;
+	godot::Ref<godot::ImageTexture> get_lightstyle_texture() const;
 
 	// Debug: check what the BSP thinks a point is (returns contents: -1=empty, -2=solid, -3=water)
 	int point_contents(godot::Vector3 godot_pos) const;
@@ -73,6 +79,11 @@ private:
 	std::vector<FaceLightmapInfo> face_lm_info;
 	std::vector<LightmapAtlasState> lm_atlases;
 	float lightstyle_values[64];
+
+	// Shader-based lightstyle members
+	bool shader_lightstyles = true;
+	godot::Ref<godot::Image> lightstyle_image;         // 64×1 FORMAT_RF
+	godot::Ref<godot::ImageTexture> lightstyle_texture; // shared across all materials
 
 	std::unique_ptr<goldsrc::BSPParser> parser;
 	std::vector<godot::Ref<GoldSrcWAD>> wads;

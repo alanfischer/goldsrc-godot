@@ -1,4 +1,5 @@
 #include "wad_parser.h"
+#include "texture_decode.h"
 #include <cstring>
 
 using namespace std;
@@ -74,26 +75,7 @@ void WADParser::decode_texture(const WADMipTex *miptex, const uint8_t *base, siz
 	tex.width = w;
 	tex.height = h;
 	tex.has_transparency = has_transparency;
-	tex.data.resize(pixels * 4);
-
-	for (size_t j = 0; j < pixels; j++) {
-		uint8_t index = src[j];
-		uint8_t r = palette[index * 3 + 0];
-		uint8_t g = palette[index * 3 + 1];
-		uint8_t b = palette[index * 3 + 2];
-
-		if (has_transparency && index == 255) {
-			tex.data[j * 4 + 0] = 0;
-			tex.data[j * 4 + 1] = 0;
-			tex.data[j * 4 + 2] = 0;
-			tex.data[j * 4 + 3] = 0;
-		} else {
-			tex.data[j * 4 + 0] = r;
-			tex.data[j * 4 + 1] = g;
-			tex.data[j * 4 + 2] = b;
-			tex.data[j * 4 + 3] = 255;
-		}
-	}
+	decode_palette_pixels(src, palette, pixels, has_transparency, tex.data);
 
 	string lower_name = to_lower(tex.name);
 	texture_names.push_back(tex.name);
