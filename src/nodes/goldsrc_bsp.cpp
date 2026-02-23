@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstring>
 #include <map>
+#include <set>
 
 using namespace godot;
 using namespace std;
@@ -796,10 +797,10 @@ void GoldSrcBSP::build_mesh() {
 
 		// Build collision for this model
 		if (m == 0) {
-			// Hull 0: face-based collision (exact visible geometry).
-			// Hull 1: clip brushes, un-expanded with internal-split filtering
-			// to reconstruct original brush geometry.
+			// Hull 0: face-based collision (exact visible geometry)
 			build_hull_collision(model_node, m, 0, "WorldCollision", 1);
+			// Hull 1: clip brushes on layer 8 (point-probe collision in GDScript)
+			build_clip_collision(model_node);
 			build_water_volumes(model_node);
 		} else {
 			// Brush entities: hull 0 collision on layer 1 (GDScript converts
@@ -932,6 +933,297 @@ void GoldSrcBSP::build_water_volumes(Node3D *parent) {
 			(int64_t)cells.size(), " BSP leaves");
 	} else {
 		memdelete(water_area);
+	}
+}
+
+// --- Clip collision (hull 1) ---
+
+namespace {
+
+// Walk the clipnode tree (hull 1+) collecting raw expanded planes.
+// No Minkowski un-expansion — planes stay at their original BSP distances.
+// Front child pushes (-N, -d), back child pushes (N, d).
+static void walk_clipnode_tree_raw(
+	const vector<goldsrc::BSPClipNode> &clipnodes,
+	const vector<goldsrc::BSPPlane> &planes,
+	int node_index,
+	vector<HullPlane> &accumulated,
+	vector<ConvexCell> &out_cells) {
+
+	if (node_index < 0) {
+		// Leaf: negative values are contents
+		if (node_index == goldsrc::CONTENTS_SOLID) {
+			ConvexCell cell;
+			cell.planes = accumulated;
+			out_cells.push_back(std::move(cell));
+		}
+		return;
+	}
+
+	if ((size_t)node_index >= clipnodes.size()) return;
+
+	const auto &cn = clipnodes[node_index];
+	if (cn.planenum < 0 || (size_t)cn.planenum >= planes.size()) return;
+
+	const auto &plane = planes[cn.planenum];
+
+	// Front child: positive half-space → constraint dot(-n, p) <= -dist
+	HullPlane front_plane;
+	front_plane.normal[0] = -plane.normal[0];
+	front_plane.normal[1] = -plane.normal[1];
+	front_plane.normal[2] = -plane.normal[2];
+	front_plane.dist = -plane.dist;
+	accumulated.push_back(front_plane);
+	walk_clipnode_tree_raw(clipnodes, planes, cn.children[0], accumulated, out_cells);
+	accumulated.pop_back();
+
+	// Back child: negative half-space → constraint dot(n, p) <= dist
+	HullPlane back_plane;
+	back_plane.normal[0] = plane.normal[0];
+	back_plane.normal[1] = plane.normal[1];
+	back_plane.normal[2] = plane.normal[2];
+	back_plane.dist = plane.dist;
+	accumulated.push_back(back_plane);
+	walk_clipnode_tree_raw(clipnodes, planes, cn.children[1], accumulated, out_cells);
+	accumulated.pop_back();
+}
+
+// Collect all plane indices used by the hull 0 BSP node tree (for is_clip marking).
+static void collect_node_plane_indices(
+	const vector<goldsrc::BSPNode> &nodes,
+	const vector<goldsrc::BSPLeaf> &leafs,
+	int node_index,
+	std::set<int> &out_indices) {
+
+	if (node_index < 0) return; // leaf
+
+	if ((size_t)node_index >= nodes.size()) return;
+	const auto &node = nodes[node_index];
+	out_indices.insert(node.planenum);
+	collect_node_plane_indices(nodes, leafs, node.children[0], out_indices);
+	collect_node_plane_indices(nodes, leafs, node.children[1], out_indices);
+}
+
+// Test if a point is SOLID in hull 0 BSP tree (GoldSrc coordinates).
+static int point_contents_gs(
+	const vector<goldsrc::BSPNode> &nodes,
+	const vector<goldsrc::BSPLeaf> &leafs,
+	const vector<goldsrc::BSPPlane> &planes,
+	int root_node, float x, float y, float z) {
+
+	int node_index = root_node;
+	while (node_index >= 0) {
+		if ((size_t)node_index >= nodes.size()) return goldsrc::CONTENTS_EMPTY;
+		const auto &node = nodes[node_index];
+		if (node.planenum < 0 || (size_t)node.planenum >= planes.size())
+			return goldsrc::CONTENTS_EMPTY;
+		const auto &plane = planes[node.planenum];
+		float dot = plane.normal[0] * x + plane.normal[1] * y + plane.normal[2] * z;
+		if (dot >= plane.dist)
+			node_index = node.children[0];
+		else
+			node_index = node.children[1];
+	}
+	int leaf_index = -(node_index + 1);
+	if (leaf_index < 0 || (size_t)leaf_index >= leafs.size())
+		return goldsrc::CONTENTS_EMPTY;
+	return leafs[leaf_index].contents;
+}
+
+// Test if any corner of the player's hull box (±16, ±16, ±36) centered at
+// a GoldSrc point is SOLID in hull 0. If so, the point is within the
+// Minkowski expansion shell of world geometry.
+static bool point_in_hull0_expanded(
+	const vector<goldsrc::BSPNode> &nodes,
+	const vector<goldsrc::BSPLeaf> &leafs,
+	const vector<goldsrc::BSPPlane> &planes,
+	int root_node, float cx, float cy, float cz) {
+
+	// Hull 1 half-extents: (16, 16, 36)
+	static const float hx = 16.0f, hy = 16.0f, hz = 36.0f;
+
+	for (int sx = -1; sx <= 1; sx += 2) {
+		for (int sy = -1; sy <= 1; sy += 2) {
+			for (int sz = -1; sz <= 1; sz += 2) {
+				float px = cx + sx * hx;
+				float py = cy + sy * hy;
+				float pz = cz + sz * hz;
+				if (point_contents_gs(nodes, leafs, planes, root_node, px, py, pz)
+					== goldsrc::CONTENTS_SOLID) {
+					return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
+} // anonymous namespace
+
+void GoldSrcBSP::build_clip_collision(Node3D *parent) {
+	const auto &bsp_data = parser->get_data();
+	if (bsp_data.models.empty()) return;
+
+	const auto &bmodel = bsp_data.models[0]; // worldspawn
+
+	// Hull 1 root clipnode
+	int hull1_root = bmodel.headnode[1];
+	if (hull1_root < 0 || (size_t)hull1_root >= bsp_data.clipnodes.size()) {
+		UtilityFunctions::print("[GoldSrc] No hull 1 clipnodes for worldspawn");
+		return;
+	}
+
+	// Walk hull 1 clipnode tree — raw expanded planes (no un-expansion)
+	vector<HullPlane> accumulated;
+	vector<ConvexCell> cells;
+	walk_clipnode_tree_raw(bsp_data.clipnodes, bsp_data.planes,
+		hull1_root, accumulated, cells);
+
+	if (cells.empty()) {
+		UtilityFunctions::print("[GoldSrc] Hull 1: no solid cells");
+		return;
+	}
+
+	// Collect hull 0 plane indices for is_clip marking
+	std::set<int> hull0_planes;
+	collect_node_plane_indices(bsp_data.nodes, bsp_data.leafs,
+		bmodel.headnode[0], hull0_planes);
+
+	// Bounding box planes (padded) for vertex computation
+	HullPlane bbox_planes[6];
+	bbox_planes[0] = {{ 1, 0, 0}, bmodel.maxs[0] + 64.0f};
+	bbox_planes[1] = {{-1, 0, 0}, -bmodel.mins[0] + 64.0f};
+	bbox_planes[2] = {{ 0, 1, 0}, bmodel.maxs[1] + 64.0f};
+	bbox_planes[3] = {{ 0,-1, 0}, -bmodel.mins[1] + 64.0f};
+	bbox_planes[4] = {{ 0, 0, 1}, bmodel.maxs[2] + 64.0f};
+	bbox_planes[5] = {{ 0, 0,-1}, -bmodel.mins[2] + 64.0f};
+
+	const float EPSILON = 0.5f;
+	const float INFLATE = 0.1f; // GoldSrc units, close hairline gaps
+
+	int hull0_root = bmodel.headnode[0];
+	int total_cells = (int)cells.size();
+	int skipped_no_clip = 0;
+	int skipped_degenerate = 0;
+	int skipped_expanded_hull0 = 0;
+	int shape_count = 0;
+
+	// Create a single StaticBody3D on layer 8 for all clip shapes
+	StaticBody3D *body = memnew(StaticBody3D);
+	body->set_name("ClipCollision");
+	body->set_collision_layer(1 << 7); // layer 8
+	body->set_collision_mask(0);
+
+	for (auto &cell : cells) {
+		// Check if cell has at least one clip-only plane (not in hull 0)
+		bool has_clip_plane = false;
+		for (const auto &hp : cell.planes) {
+			// Find matching BSP plane by normal/dist
+			bool found_in_hull0 = false;
+			for (size_t pi = 0; pi < bsp_data.planes.size(); pi++) {
+				const auto &bp = bsp_data.planes[pi];
+				// Check both orientations (front/back plane from BSP walk)
+				float dn = fabsf(hp.normal[0] - bp.normal[0])
+					+ fabsf(hp.normal[1] - bp.normal[1])
+					+ fabsf(hp.normal[2] - bp.normal[2]);
+				float dd = fabsf(hp.dist - bp.dist);
+				float dn_neg = fabsf(hp.normal[0] + bp.normal[0])
+					+ fabsf(hp.normal[1] + bp.normal[1])
+					+ fabsf(hp.normal[2] + bp.normal[2]);
+				float dd_neg = fabsf(hp.dist + bp.dist);
+				if ((dn < 0.01f && dd < 0.1f) || (dn_neg < 0.01f && dd_neg < 0.1f)) {
+					if (hull0_planes.count((int)pi)) {
+						found_in_hull0 = true;
+						break;
+					}
+				}
+			}
+			if (!found_in_hull0) {
+				has_clip_plane = true;
+				break;
+			}
+		}
+
+		if (!has_clip_plane) {
+			skipped_no_clip++;
+			continue;
+		}
+
+		// Add bounding box planes for vertex computation
+		for (int i = 0; i < 6; i++) {
+			cell.planes.push_back(bbox_planes[i]);
+		}
+
+		// Compute vertices
+		vector<CellVertex> verts = compute_cell_vertices(
+			cell.planes, scale_factor, EPSILON);
+
+		if ((int)verts.size() < 4) {
+			skipped_degenerate++;
+			continue;
+		}
+
+		// Compute centroid in GoldSrc coords
+		float cx = 0, cy = 0, cz = 0;
+		for (const auto &v : verts) {
+			cx += v.gs[0]; cy += v.gs[1]; cz += v.gs[2];
+		}
+		cx /= (float)verts.size();
+		cy /= (float)verts.size();
+		cz /= (float)verts.size();
+
+		// Expanded hull 0 test: if any corner of the player hull box at the
+		// centroid hits hull 0 solid, this cell is in the world expansion shell
+		if (point_in_hull0_expanded(bsp_data.nodes, bsp_data.leafs,
+			bsp_data.planes, hull0_root, cx, cy, cz)) {
+			skipped_expanded_hull0++;
+			continue;
+		}
+
+		// Inflate slightly to close hairline gaps between adjacent cells
+		if (INFLATE > 0) {
+			// Remove bbox planes before inflating (they were added for vertex computation)
+			cell.planes.resize(cell.planes.size() - 6);
+			for (auto &hp : cell.planes) {
+				hp.dist += INFLATE;
+			}
+			// Re-add bbox and recompute
+			for (int i = 0; i < 6; i++) {
+				cell.planes.push_back(bbox_planes[i]);
+			}
+			verts = compute_cell_vertices(cell.planes, scale_factor, EPSILON);
+			if ((int)verts.size() < 4) continue;
+		}
+
+		// Build ConvexPolygonShape3D from vertex cloud
+		PackedVector3Array points;
+		for (const auto &v : verts) {
+			points.push_back(v.godot);
+		}
+
+		Ref<ConvexPolygonShape3D> shape;
+		shape.instantiate();
+		shape->set_points(points);
+
+		CollisionShape3D *col = memnew(CollisionShape3D);
+		col->set_name(String("ClipShape_") + String::num_int64(shape_count));
+		col->set_shape(shape);
+		body->add_child(col);
+		shape_count++;
+	}
+
+	if (shape_count > 0) {
+		parent->add_child(body);
+		UtilityFunctions::print("[GoldSrc] Clip collision: ",
+			(int64_t)shape_count, " clip shapes from ",
+			(int64_t)total_cells, " hull 1 cells (no_clip=",
+			(int64_t)skipped_no_clip, " degenerate=",
+			(int64_t)skipped_degenerate, " expanded_hull0=",
+			(int64_t)skipped_expanded_hull0, ")");
+	} else {
+		memdelete(body);
+		UtilityFunctions::print("[GoldSrc] Clip collision: 0 clip shapes from ",
+			(int64_t)total_cells, " hull 1 cells (all filtered)");
 	}
 }
 

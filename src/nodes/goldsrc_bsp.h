@@ -50,6 +50,7 @@ private:
 		int hull_index, const godot::String &body_name,
 		uint32_t collision_layer);
 	void build_water_volumes(godot::Node3D *parent);
+	void build_clip_collision(godot::Node3D *parent);
 	void rebake_lightstyle(int style_index);
 
 	// Per-face lightmap placement info (for rebaking)
