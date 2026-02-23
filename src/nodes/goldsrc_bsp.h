@@ -58,6 +58,7 @@ private:
 	void build_water_volumes(godot::Node3D *parent);
 	void build_occluders(godot::Node3D *parent);
 	void build_clip_hull_collision(godot::Node3D *parent, int hull_index);
+	void build_clip_collision(godot::Node3D *parent);
 	void rebake_lightstyle(int style_index);
 
 	// Per-face lightmap placement info (for rebaking)
