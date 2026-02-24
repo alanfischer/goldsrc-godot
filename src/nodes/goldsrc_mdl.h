@@ -24,6 +24,8 @@ public:
 	void build_model();
 	int get_sequence_count() const;
 	godot::String get_sequence_name(int index) const;
+	float get_sequence_fps(int index) const;
+	int get_sequence_num_frames(int index) const;
 	int get_bodypart_count() const;
 	godot::String get_bodypart_name(int index) const;
 	int get_bone_count() const;

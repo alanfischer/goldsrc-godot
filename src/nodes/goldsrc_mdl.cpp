@@ -23,6 +23,8 @@ void GoldSrcMDL::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("build_model"), &GoldSrcMDL::build_model);
 	ClassDB::bind_method(D_METHOD("get_sequence_count"), &GoldSrcMDL::get_sequence_count);
 	ClassDB::bind_method(D_METHOD("get_sequence_name", "index"), &GoldSrcMDL::get_sequence_name);
+	ClassDB::bind_method(D_METHOD("get_sequence_fps", "index"), &GoldSrcMDL::get_sequence_fps);
+	ClassDB::bind_method(D_METHOD("get_sequence_num_frames", "index"), &GoldSrcMDL::get_sequence_num_frames);
 	ClassDB::bind_method(D_METHOD("get_bodypart_count"), &GoldSrcMDL::get_bodypart_count);
 	ClassDB::bind_method(D_METHOD("get_bodypart_name", "index"), &GoldSrcMDL::get_bodypart_name);
 	ClassDB::bind_method(D_METHOD("get_bone_count"), &GoldSrcMDL::get_bone_count);
@@ -74,6 +76,16 @@ int GoldSrcMDL::get_sequence_count() const {
 String GoldSrcMDL::get_sequence_name(int index) const {
 	if (!parser || index < 0 || index >= get_sequence_count()) return "";
 	return String(parser->get_data().sequences[index].name.c_str());
+}
+
+float GoldSrcMDL::get_sequence_fps(int index) const {
+	if (!parser || index < 0 || index >= get_sequence_count()) return 0.0f;
+	return parser->get_data().sequences[index].fps;
+}
+
+int GoldSrcMDL::get_sequence_num_frames(int index) const {
+	if (!parser || index < 0 || index >= get_sequence_count()) return 0;
+	return parser->get_data().sequences[index].num_frames;
 }
 
 int GoldSrcMDL::get_bodypart_count() const {
