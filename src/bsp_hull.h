@@ -24,6 +24,8 @@ constexpr float ANTIPARALLEL_THRESHOLD = -0.8f;  // normal dot product for antip
 constexpr float MIN_WALL_PRESERVE = 8.0f;        // minimum GS units preserved in thin slabs
 constexpr float BINARY_SEARCH_MIN = 0.01f;       // minimum useful binary search result
 constexpr int   BINARY_SEARCH_ITERS = 12;        // iterations for collapse recovery
+constexpr int   MAX_SPLIT_DEPTH = 16;             // max recursion depth for sibling resolution
+constexpr int   MAX_CELLS_PER_SOLID = 256;        // max sub-cells per original solid cell
 
 struct HullPlane {
 	float normal[3];
@@ -82,6 +84,7 @@ std::vector<CellVertex> compute_cell_vertices(
 
 // Walk the sibling subtree for a cell face, splitting the cell when the face
 // spans a sibling splitting plane. Appends resulting sub-cells to output.
+// depth limits recursion to prevent exponential blowup on complex maps.
 void split_cell_for_face(
 	ConvexCell cell,
 	int face_index,
@@ -89,7 +92,8 @@ void split_cell_for_face(
 	const std::vector<goldsrc::BSPClipNode> &clipnodes,
 	const std::vector<goldsrc::BSPPlane> &bsp_planes,
 	float epsilon,
-	std::vector<ConvexCell> &output);
+	std::vector<ConvexCell> &output,
+	int depth = 0);
 
 // Check if a point is inside all half-space planes (within tolerance).
 bool point_inside(const std::vector<HullPlane> &planes, const float p[3], float tolerance = 1.0f);

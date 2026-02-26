@@ -191,10 +191,17 @@ void split_cell_for_face(
 	const vector<goldsrc::BSPClipNode> &clipnodes,
 	const vector<goldsrc::BSPPlane> &bsp_planes,
 	float epsilon,
-	vector<ConvexCell> &output) {
+	vector<ConvexCell> &output,
+	int depth) {
 
 	if (sibling_node < 0) {
 		cell.planes[face_index].sibling_child = (int16_t)sibling_node;
+		output.push_back(std::move(cell));
+		return;
+	}
+	if (depth >= MAX_SPLIT_DEPTH) {
+		// Treat as solid boundary to prevent exponential blowup
+		cell.planes[face_index].sibling_child = (int16_t)goldsrc::CONTENTS_SOLID;
 		output.push_back(std::move(cell));
 		return;
 	}
@@ -243,12 +250,12 @@ void split_cell_for_face(
 
 	if (!any_back) {
 		split_cell_for_face(std::move(cell), face_index, cn.children[0],
-			clipnodes, bsp_planes, epsilon, output);
+			clipnodes, bsp_planes, epsilon, output, depth + 1);
 		return;
 	}
 	if (!any_front) {
 		split_cell_for_face(std::move(cell), face_index, cn.children[1],
-			clipnodes, bsp_planes, epsilon, output);
+			clipnodes, bsp_planes, epsilon, output, depth + 1);
 		return;
 	}
 
@@ -271,9 +278,9 @@ void split_cell_for_face(
 	cell_back.planes.push_back(hp_back);
 
 	split_cell_for_face(std::move(cell_front), face_index, cn.children[0],
-		clipnodes, bsp_planes, epsilon, output);
+		clipnodes, bsp_planes, epsilon, output, depth + 1);
 	split_cell_for_face(std::move(cell_back), face_index, cn.children[1],
-		clipnodes, bsp_planes, epsilon, output);
+		clipnodes, bsp_planes, epsilon, output, depth + 1);
 }
 
 bool point_inside(const vector<HullPlane> &planes, const float p[3], float tolerance) {
@@ -331,6 +338,7 @@ vector<ProcessedCell> unexpand_clip_hull(
 					bsp.clipnodes, bsp.planes, CELL_EPSILON, next);
 			}
 			current = std::move(next);
+			if ((int)current.size() > MAX_CELLS_PER_SOLID) break;
 		}
 
 		for (auto &c : current) {

@@ -165,8 +165,11 @@ void GoldSrcBSP::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_face_axes", "position", "normal"), &GoldSrcBSP::get_face_axes);
 	ClassDB::bind_method(D_METHOD("set_shader_lightstyles", "enabled"), &GoldSrcBSP::set_shader_lightstyles);
 	ClassDB::bind_method(D_METHOD("get_shader_lightstyles"), &GoldSrcBSP::get_shader_lightstyles);
+	ClassDB::bind_method(D_METHOD("set_build_clip_hulls", "enabled"), &GoldSrcBSP::set_build_clip_hulls);
+	ClassDB::bind_method(D_METHOD("get_build_clip_hulls"), &GoldSrcBSP::get_build_clip_hulls);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "scale_factor"), "set_scale_factor", "get_scale_factor");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "shader_lightstyles"), "set_shader_lightstyles", "get_shader_lightstyles");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "build_clip_hulls"), "set_build_clip_hulls", "get_build_clip_hulls");
 }
 
 Error GoldSrcBSP::load_bsp(const String &path) {
@@ -220,6 +223,14 @@ void GoldSrcBSP::set_shader_lightstyles(bool enabled) {
 
 bool GoldSrcBSP::get_shader_lightstyles() const {
 	return shader_lightstyles;
+}
+
+void GoldSrcBSP::set_build_clip_hulls(bool enabled) {
+	build_clip_hulls_flag = enabled;
+}
+
+bool GoldSrcBSP::get_build_clip_hulls() const {
+	return build_clip_hulls_flag;
 }
 
 int GoldSrcBSP::point_contents(Vector3 godot_pos) const {
@@ -904,8 +915,10 @@ void GoldSrcBSP::build_mesh() {
 			build_water_volumes(model_node);
 			build_occluders(model_node);
 			log_timing("water + occluders");
-			build_clip_hull_collision(model_node, 3); // hull 3 = crouching
-			log_timing("clip hull collision");
+			if (build_clip_hulls_flag) {
+				build_clip_hull_collision(model_node, 3); // hull 3 = crouching
+				log_timing("clip hull collision");
+			}
 		} else {
 			// Brush entities: hull 0 collision on layer 1 (GDScript converts
 			// to Area3D for triggers/ladders by reparenting the CollisionShape3D)
