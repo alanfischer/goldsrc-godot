@@ -33,10 +33,6 @@ public:
 	void set_shader_lightstyles(bool enabled);
 	bool get_shader_lightstyles() const;
 
-	void set_build_clip_hulls(bool enabled);
-	bool get_build_clip_hulls() const;
-
-
 	void set_lightstyle(int style_index, float brightness);
 	float get_lightstyle(int style_index) const;
 
@@ -61,7 +57,6 @@ private:
 		uint32_t collision_layer);
 	void build_water_volumes(godot::Node3D *parent);
 	void build_occluders(godot::Node3D *parent);
-	void build_clip_hull_collision(godot::Node3D *parent, int hull_index);
 	void rebake_lightstyle(int style_index);
 
 	// Per-face lightmap placement info (for rebaking)
@@ -86,7 +81,6 @@ private:
 
 	// Shader-based lightstyle members
 	bool shader_lightstyles = true;
-	bool build_clip_hulls_flag = true;
 	godot::Ref<godot::Image> lightstyle_image;         // 64×1 FORMAT_RF
 	godot::Ref<godot::ImageTexture> lightstyle_texture; // shared across all materials
 

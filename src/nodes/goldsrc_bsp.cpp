@@ -165,11 +165,8 @@ void GoldSrcBSP::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_face_axes", "position", "normal"), &GoldSrcBSP::get_face_axes);
 	ClassDB::bind_method(D_METHOD("set_shader_lightstyles", "enabled"), &GoldSrcBSP::set_shader_lightstyles);
 	ClassDB::bind_method(D_METHOD("get_shader_lightstyles"), &GoldSrcBSP::get_shader_lightstyles);
-	ClassDB::bind_method(D_METHOD("set_build_clip_hulls", "enabled"), &GoldSrcBSP::set_build_clip_hulls);
-	ClassDB::bind_method(D_METHOD("get_build_clip_hulls"), &GoldSrcBSP::get_build_clip_hulls);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "scale_factor"), "set_scale_factor", "get_scale_factor");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "shader_lightstyles"), "set_shader_lightstyles", "get_shader_lightstyles");
-	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "build_clip_hulls"), "set_build_clip_hulls", "get_build_clip_hulls");
 }
 
 Error GoldSrcBSP::load_bsp(const String &path) {
@@ -223,14 +220,6 @@ void GoldSrcBSP::set_shader_lightstyles(bool enabled) {
 
 bool GoldSrcBSP::get_shader_lightstyles() const {
 	return shader_lightstyles;
-}
-
-void GoldSrcBSP::set_build_clip_hulls(bool enabled) {
-	build_clip_hulls_flag = enabled;
-}
-
-bool GoldSrcBSP::get_build_clip_hulls() const {
-	return build_clip_hulls_flag;
 }
 
 int GoldSrcBSP::point_contents(Vector3 godot_pos) const {
@@ -915,10 +904,6 @@ void GoldSrcBSP::build_mesh() {
 			build_water_volumes(model_node);
 			build_occluders(model_node);
 			log_timing("water + occluders");
-			if (build_clip_hulls_flag) {
-				build_clip_hull_collision(model_node, 3); // hull 3 = crouching
-				log_timing("clip hull collision");
-			}
 		} else {
 			// Brush entities: hull 0 collision on layer 1 (GDScript converts
 			// to Area3D for triggers/ladders by reparenting the CollisionShape3D)
@@ -1142,50 +1127,6 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 	}
 
 	UtilityFunctions::print("[GoldSrc] Built ", (int64_t)count, " occluders");
-}
-
-void GoldSrcBSP::build_clip_hull_collision(Node3D *parent, int hull_index) {
-	const auto &bsp_data = parser->get_data();
-
-	if (hull_index < 1 || hull_index > 3) return;
-	const auto &he = goldsrc_hull::HULL_EXTENTS[hull_index];
-	const float MIN_DIM = 4.0f; // thin-cell filter threshold
-
-	auto processed = goldsrc_hull::unexpand_clip_hull(
-		bsp_data, hull_index, he.hx, he.hy, he.hz, MIN_DIM);
-	if (processed.empty()) return;
-
-	// Create collision body and shapes from processed cells
-	StaticBody3D *clip_body = memnew(StaticBody3D);
-	clip_body->set_name(String("ClipHull") + String::num_int64(hull_index) + "_Collision");
-	clip_body->set_collision_layer(1);
-	clip_body->set_collision_mask(0);
-	int shape_count = 0;
-
-	for (const auto &pc : processed) {
-		PackedVector3Array points;
-		for (const auto &v : pc.verts) {
-			points.push_back(goldsrc_to_godot(v.gs[0], v.gs[1], v.gs[2]));
-		}
-
-		Ref<ConvexPolygonShape3D> shape;
-		shape.instantiate();
-		shape->set_points(points);
-
-		CollisionShape3D *col = memnew(CollisionShape3D);
-		col->set_name(String("ClipShape_") + String::num_int64(shape_count));
-		col->set_shape(shape);
-		clip_body->add_child(col);
-		shape_count++;
-	}
-
-	if (shape_count > 0) {
-		parent->add_child(clip_body);
-		UtilityFunctions::print("[GoldSrc] Clip hull ", (int64_t)hull_index,
-			": ", (int64_t)shape_count, " collision shapes");
-	} else {
-		memdelete(clip_body);
-	}
 }
 
 void GoldSrcBSP::set_lightstyle(int style_index, float brightness) {
