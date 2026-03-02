@@ -1362,10 +1362,12 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 		// h1 filter: check for growth artifacts
 		bool any_h1_empty = false;
 		bool has_clip_indicator = false;
+		int h1_empty_count = 0;
 		for (const auto &v : verts) {
 			int h1c = classify_h1(v.gs);
 			if (h1c != goldsrc::CONTENTS_SOLID) {
 				any_h1_empty = true;
+				h1_empty_count++;
 			} else if (!has_clip_indicator && !vert_near_wall(v.gs)) {
 				has_clip_indicator = true;
 			}
@@ -1414,13 +1416,21 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 		bool impossibly_thin = verts.size() >= 6 &&
 			((dim[0] < he[0]) || (dim[1] < he[1]) || (dim[2] < he[2]));
 		if (impossibly_thin) continue;
+		// Degenerate small cells: 2+ dims < he and max dim too small to be real
+		{	int degen_count = 0;
+			float max_dim_val = fmaxf(dim[0], fmaxf(dim[1], dim[2]));
+			for (int a = 0; a < 3; a++) { if (dim[a] < he[a]) degen_count++; }
+			if (degen_count >= 2 && max_dim_val < 2.0f * max_he) continue;
+		}
 		if (!big_per_he) {
 			int cent_h1 = classify_h1(cpt);
 			if (any_h1_empty || cent_h1 != goldsrc::CONTENTS_SOLID) continue;
 		} else if (!big_per_axis) {
 			// Between he and 2*he on some axis: need centroid h1 SOLID
+			// and majority of verts h1 SOLID (half or more empty = artifact)
 			int cent_h1 = classify_h1(cpt);
-			if (any_h1_empty && cent_h1 != goldsrc::CONTENTS_SOLID) continue;
+			if (cent_h1 != goldsrc::CONTENTS_SOLID ||
+				h1_empty_count >= (int)verts.size()/2) continue;
 		}
 		result_cells.push_back(std::move(cell));
 	}

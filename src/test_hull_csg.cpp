@@ -116,6 +116,10 @@ static const TestPoint ww_hunt_points[] = {
 	{{1920.0f, 724.2f, 158.3f}, "artifact_8", false},
 	// Player-reported artifact cells (batch 3)
 	{{-3520.0f, 1838.9f, 431.6f}, "artifact_9", false},
+	// Player-reported artifact cells (batch 4)
+	{{1440.0f, 593.1f, 149.4f}, "artifact_10", false},
+	{{286.3f, 995.0f, 124.3f}, "artifact_11", false},
+	{{-2888.6f, 3376.0f, 578.3f}, "artifact_12", false},
 };
 
 static const MapTestData all_maps[] = {
@@ -317,12 +321,14 @@ static PipelineResult run_pipeline(const goldsrc::BSPData &bsp, const char *map_
 		bool any_h1_empty = false;
 		bool has_clip_indicator = false;
 		int nw_count = 0;
+		int h1_empty_count = 0;
 		for (const auto &v : verts) {
 			int h1c = classify_h1(v.gs);
 			bool nw = vert_near_wall(v.gs);
 			if (nw) nw_count++;
 			if (h1c != goldsrc::CONTENTS_SOLID) {
 				any_h1_empty = true;
+				h1_empty_count++;
 			} else if (!has_clip_indicator && !nw) {
 				has_clip_indicator = true;
 			}
@@ -378,6 +384,12 @@ static PipelineResult run_pipeline(const goldsrc::BSPData &bsp, const char *map_
 		// 2) Any dim < 2*he[i] with weak evidence: likely expansion artifact.
 		bool impossibly_thin = verts.size() >= 6 && ((dim[0] < he[0]) || (dim[1] < he[1]) || (dim[2] < he[2]));
 		if (impossibly_thin) { h1_filtered++; continue; }
+		// Degenerate small cells: 2+ dims < he and max dim too small to be real
+		{	int degen_count = 0;
+			float max_dim_val = fmaxf(dim[0], fmaxf(dim[1], dim[2]));
+			for (int a = 0; a < 3; a++) { if (dim[a] < he[a]) degen_count++; }
+			if (degen_count >= 2 && max_dim_val < 2.0f * max_he) { h1_filtered++; continue; }
+		}
 		if (!big_per_he) {
 			int cent_h1 = classify_h1(cpt);
 			if (any_h1_empty || cent_h1 != goldsrc::CONTENTS_SOLID) {
@@ -386,8 +398,10 @@ static PipelineResult run_pipeline(const goldsrc::BSPData &bsp, const char *map_
 			}
 		} else if (!big_per_axis) {
 			// Between he and 2*he on some axis: need centroid h1 SOLID
+			// and majority of verts h1 SOLID (half or more empty = artifact)
 			int cent_h1 = classify_h1(cpt);
-			if (any_h1_empty && cent_h1 != goldsrc::CONTENTS_SOLID) {
+			if (cent_h1 != goldsrc::CONTENTS_SOLID ||
+				h1_empty_count >= (int)verts.size()/2) {
 				h1_filtered++;
 				continue;
 			}
@@ -528,16 +542,19 @@ static void run_tests(const PipelineResult &pipeline, const goldsrc::BSPData &bs
 					float ccp[3]={ccx,ccy,ccz};
 					int dch1_0 = classify_h1(ccp, 0);
 					bool dany_h1e=false, dhas_clip=false;
+					int dh1e_cnt=0;
 					int dnw_cnt=0;
 					for (const auto &v : cverts) {
 						int h1c = classify_h1(v.gs);
-						if (h1c != goldsrc::CONTENTS_SOLID) dany_h1e=true;
+						if (h1c != goldsrc::CONTENTS_SOLID) { dany_h1e=true; dh1e_cnt++; }
 						if (h1c == goldsrc::CONTENTS_SOLID && !vert_near_wall(v.gs)) dhas_clip=true;
 						if (vert_near_wall(v.gs)) dnw_cnt++;
 					}
 					bool cent_nw = vert_near_wall(ccp);
-					printf("       centroid=(%.1f,%.1f,%.1f) h1=%d any_h1e=%d clip_ind=%d near=%d/%zu cent_nw=%d\n",
-						ccx,ccy,ccz, dch1_0, dany_h1e, dhas_clip, dnw_cnt, cverts.size(), cent_nw);
+					int dch0 = goldsrc_hull::classify_hull0_tree(
+						bsp.nodes, bsp.leafs, bsp.planes, hull0_root, ccp);
+					printf("       centroid=(%.1f,%.1f,%.1f) h1=%d h0=%d h1e=%d/%zu clip=%d near=%d/%zu cnw=%d\n",
+						ccx,ccy,ccz, dch1_0, dch0, dh1e_cnt, cverts.size(), dhas_clip, dnw_cnt, cverts.size(), cent_nw);
 				}
 			}
 			bool ok = overlaps == 0;
