@@ -1371,26 +1371,29 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 			}
 		}
 		if (any_h1_empty && !has_clip_indicator) {
-			// Primary rescue: centroid is h1 SOLID (exact) and not near wall
+			// Both rescues require minimum cell size to reject thin
+			// expansion ring slivers.
+			float mn[3]={1e9f,1e9f,1e9f}, mx[3]={-1e9f,-1e9f,-1e9f};
+			for (const auto &v : verts) {
+				for(int a=0;a<3;a++){if(v.gs[a]<mn[a])mn[a]=v.gs[a]; if(v.gs[a]>mx[a])mx[a]=v.gs[a];}
+			}
+			float min_dim = fminf(mx[0]-mn[0], fminf(mx[1]-mn[1], mx[2]-mn[2]));
+			float max_he = fmaxf(he[0], fmaxf(he[1], he[2]));
+			// Primary rescue: centroid is h1 SOLID (exact), not near wall,
+			// and cell is large enough
 			int ch1 = classify_h1(cpt);
-			if (ch1 == goldsrc::CONTENTS_SOLID && !vert_near_wall(cpt)) {
+			if (ch1 == goldsrc::CONTENTS_SOLID && !vert_near_wall(cpt)
+					&& min_dim >= 2.0f * max_he) {
 				result_cells.push_back(std::move(cell));
 			} else {
 				// Secondary rescue: centroid h1 SOLID within 8-unit tolerance
-				// AND cell is large (min dim >= 2*max_hull_extent).
-				// Expansion ring slivers are thin, real clip brushes are thick.
+				// AND cell is large. Handles ceiling clip brushes where
+				// centroid barely straddles the h1 boundary.
 				if (ch1 != goldsrc::CONTENTS_SOLID) {
 					int ch1_tol = classify_h1(cpt, 8.0f);
-					if (ch1_tol == goldsrc::CONTENTS_SOLID) {
-						float mn[3]={1e9f,1e9f,1e9f}, mx[3]={-1e9f,-1e9f,-1e9f};
-						for (const auto &v : verts) {
-							for(int a=0;a<3;a++){if(v.gs[a]<mn[a])mn[a]=v.gs[a]; if(v.gs[a]>mx[a])mx[a]=v.gs[a];}
-						}
-						float min_dim = fminf(mx[0]-mn[0], fminf(mx[1]-mn[1], mx[2]-mn[2]));
-						float max_he = fmaxf(he[0], fmaxf(he[1], he[2]));
-						if (min_dim >= 2.0f * max_he) {
-							result_cells.push_back(std::move(cell));
-						}
+					if (ch1_tol == goldsrc::CONTENTS_SOLID
+							&& min_dim >= 2.0f * max_he) {
+						result_cells.push_back(std::move(cell));
 					}
 				}
 			}

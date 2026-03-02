@@ -308,9 +308,17 @@ int main(int argc, char **argv) {
 			// Primary rescue: centroid is h1 SOLID (exact) and not near wall.
 			int ch1 = classify_h1(cpt);
 			if (ch1 == goldsrc::CONTENTS_SOLID && !vert_near_wall(cpt)) {
-				result_cells.push_back(std::move(cell));
-
-				h1_rescued++;
+				// Size check: expansion ring slivers are thin.
+				float mn[3]={1e9,1e9,1e9}, mx[3]={-1e9,-1e9,-1e9};
+				for (const auto &v : verts) { for(int a=0;a<3;a++){if(v.gs[a]<mn[a])mn[a]=v.gs[a]; if(v.gs[a]>mx[a])mx[a]=v.gs[a];}}
+				float min_dim = fminf(mx[0]-mn[0], fminf(mx[1]-mn[1], mx[2]-mn[2]));
+				float max_he = fmaxf(he[0], fmaxf(he[1], he[2]));
+				if (min_dim >= 2.0f * max_he) {
+					result_cells.push_back(std::move(cell));
+					h1_rescued++;
+				} else {
+					h1_filtered++;
+				}
 			} else {
 				// Secondary rescue: centroid is h1 SOLID within 8-unit tolerance
 				// AND cell is large (min dimension >= 2*max_hull_extent).
@@ -401,6 +409,12 @@ int main(int argc, char **argv) {
 		{{1541.1f, 486.1f, 844.4f}, "missing_9", true},
 		{{1639.3f, -984.8f, 844.1f}, "missing_10", true},
 		{{1829.8f, -3616.8f, 140.2f}, "missing_11", true},
+		// New artifact
+		{{-1872.0f, 455.1f, 478.8f}, "artifact_7", false},
+		// New missing points (batch 3)
+		{{1621.4f, -1808.9f, 215.9f}, "missing_12", true},
+		{{1198.4f, -2474.9f, 174.8f}, "missing_13", true},
+		{{-1741.2f, -2386.1f, 243.1f}, "missing_14", true},
 		// All info_player_start / info_player_teamspawn entities
 		{{529.0f, -2490.0f, 152.0f}, "info_player_start", false},
 		{{-1872.0f, 624.0f, 736.0f}, "teamspawn_1", false},
