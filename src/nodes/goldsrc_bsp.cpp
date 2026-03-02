@@ -161,8 +161,10 @@ void GoldSrcBSP::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_lightstyle_image"), &GoldSrcBSP::get_lightstyle_image);
 	ClassDB::bind_method(D_METHOD("get_lightstyle_texture"), &GoldSrcBSP::get_lightstyle_texture);
 	ClassDB::bind_method(D_METHOD("point_contents", "position"), &GoldSrcBSP::point_contents);
+	ClassDB::bind_method(D_METHOD("classify_point_hull", "position", "hull_index"), &GoldSrcBSP::classify_point_hull);
 	ClassDB::bind_method(D_METHOD("get_texture", "name"), &GoldSrcBSP::get_texture);
 	ClassDB::bind_method(D_METHOD("get_face_axes", "position", "normal"), &GoldSrcBSP::get_face_axes);
+	ClassDB::bind_method(D_METHOD("build_debug_hull_meshes", "hull_index"), &GoldSrcBSP::build_debug_hull_meshes);
 	ClassDB::bind_method(D_METHOD("set_shader_lightstyles", "enabled"), &GoldSrcBSP::set_shader_lightstyles);
 	ClassDB::bind_method(D_METHOD("get_shader_lightstyles"), &GoldSrcBSP::get_shader_lightstyles);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "scale_factor"), "set_scale_factor", "get_scale_factor");
@@ -250,6 +252,29 @@ int GoldSrcBSP::point_contents(Vector3 godot_pos) const {
 	if (leaf_index < 0 || (size_t)leaf_index >= bsp_data.leafs.size())
 		return goldsrc::CONTENTS_EMPTY;
 	return bsp_data.leafs[leaf_index].contents;
+}
+
+int GoldSrcBSP::classify_point_hull(Vector3 godot_pos, int hull_index) const {
+	if (!parser) return goldsrc::CONTENTS_EMPTY;
+	const auto &bsp_data = parser->get_data();
+	if (bsp_data.models.empty() || bsp_data.clipnodes.empty()) return goldsrc::CONTENTS_EMPTY;
+	if (hull_index < 1 || hull_index > 3) return goldsrc::CONTENTS_EMPTY;
+
+	float gs_x = -godot_pos.x / scale_factor;
+	float gs_y = godot_pos.z / scale_factor;
+	float gs_z = godot_pos.y / scale_factor;
+
+	int idx = bsp_data.models[0].headnode[hull_index];
+	while (idx >= 0) {
+		if ((size_t)idx >= bsp_data.clipnodes.size()) return goldsrc::CONTENTS_EMPTY;
+		const auto &node = bsp_data.clipnodes[idx];
+		if (node.planenum < 0 || (size_t)node.planenum >= bsp_data.planes.size())
+			return goldsrc::CONTENTS_EMPTY;
+		const auto &plane = bsp_data.planes[node.planenum];
+		float dot = plane.normal[0] * gs_x + plane.normal[1] * gs_y + plane.normal[2] * gs_z;
+		idx = (dot >= plane.dist) ? node.children[0] : node.children[1];
+	}
+	return idx; // negative = contents
 }
 
 Ref<ImageTexture> GoldSrcBSP::find_texture(const string &name) const {
@@ -1127,6 +1152,335 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 	}
 
 	UtilityFunctions::print("[GoldSrc] Built ", (int64_t)count, " occluders");
+}
+
+void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
+	if (!parser) return;
+	if (hull_index < 1 || hull_index > 3) {
+		UtilityFunctions::printerr("[GoldSrc] build_debug_hull_meshes: hull_index must be 1-3");
+		return;
+	}
+
+	const auto &bsp_data = parser->get_data();
+	if (bsp_data.models.empty()) return;
+	const auto &bmodel = bsp_data.models[0];
+
+	int root = bmodel.headnode[hull_index];
+	if (root < 0) {
+		UtilityFunctions::print("[GoldSrc] Hull ", (int64_t)hull_index, " headnode is empty");
+		return;
+	}
+
+	// Bounding box planes (padded) to cap infinite cells. Not from hull tree.
+	HullPlane bbox_planes[6];
+	bbox_planes[0] = {{ 1, 0, 0}, bmodel.maxs[0] + 1.0f, false};
+	bbox_planes[1] = {{-1, 0, 0}, -bmodel.mins[0] + 1.0f, false};
+	bbox_planes[2] = {{ 0, 1, 0}, bmodel.maxs[1] + 1.0f, false};
+	bbox_planes[3] = {{ 0,-1, 0}, -bmodel.mins[1] + 1.0f, false};
+	bbox_planes[4] = {{ 0, 0, 1}, bmodel.maxs[2] + 1.0f, false};
+	bbox_planes[5] = {{ 0, 0,-1}, -bmodel.mins[2] + 1.0f, false};
+
+	const float EPSILON = 0.1f;
+
+	// Hull half-extents (GoldSrc coords): [1]=(16,16,36), [2]=(32,32,32), [3]=(16,16,18)
+	float hull_half_extents[4][3] = {
+		{0, 0, 0},      // hull 0 (unused here)
+		{16, 16, 36},   // hull 1 standing
+		{32, 32, 32},   // hull 2 large
+		{16, 16, 18},   // hull 3 crouching
+	};
+
+	// Walk clip tree for expanded solid cells (all planes tagged from_hull1=true)
+	vector<HullPlane> accumulated;
+	vector<ConvexCell> solid_cells;
+	goldsrc_hull::walk_clip_tree(bsp_data.clipnodes, bsp_data.planes,
+		root, accumulated, solid_cells, goldsrc::CONTENTS_SOLID);
+
+	UtilityFunctions::print("[GoldSrc] Hull ", (int64_t)hull_index,
+		": ", (int64_t)solid_cells.size(), " expanded solid cells");
+
+	// Cap with bbox
+	for (auto &cell : solid_cells) {
+		for (int i = 0; i < 6; i++)
+			cell.planes.push_back(bbox_planes[i]);
+	}
+
+	// Un-expand ALL hull 1 planes by the Minkowski support function.
+	// This collapses world brush planes back to hull 0 surface positions and
+	// shrinks clip brush planes to their original (pre-expansion) positions.
+	float *he = hull_half_extents[hull_index];
+	vector<ConvexCell> unexpanded_cells;
+	for (auto &cell : solid_cells) {
+		ConvexCell ue;
+		for (const auto &hp : cell.planes) {
+			HullPlane p = hp;
+			if (p.from_hull1) {
+				float support = fabsf(p.normal[0]) * he[0]
+				              + fabsf(p.normal[1]) * he[1]
+				              + fabsf(p.normal[2]) * he[2];
+				p.dist -= support * hp.unexpand_sign;
+			}
+			ue.planes.push_back(p);
+		}
+		auto verts = goldsrc_hull::compute_cell_vertices(ue.planes, EPSILON);
+		if (verts.size() < 4) continue;
+		unexpanded_cells.push_back(std::move(ue));
+	}
+
+	UtilityFunctions::print("[GoldSrc] After un-expansion: ",
+		(int64_t)unexpanded_cells.size(), " cells (from ",
+		(int64_t)solid_cells.size(), " expanded)");
+
+	// Clip un-expanded cells against hull 0 BSP tree.
+	// World brush parts overlap hull 0 SOLID and get filtered out.
+	// Clip brush parts are in hull 0 EMPTY and survive.
+	int hull0_root = bmodel.headnode[0];
+	vector<ConvexCell> clipped_cells;
+	for (const auto &cell : unexpanded_cells) {
+		goldsrc_hull::clip_cell_by_hull0(cell, bsp_data.nodes, bsp_data.leafs,
+			bsp_data.planes, hull0_root, EPSILON, clipped_cells);
+	}
+
+	UtilityFunctions::print("[GoldSrc] After hull 0 clip: ",
+		(int64_t)clipped_cells.size(), " cells in hull 0 empty space");
+
+	// Helpers for vertex filtering
+	auto classify_h1 = [&](const float p[3]) -> int {
+		int idx = root;
+		while (idx >= 0) {
+			if ((size_t)idx >= bsp_data.clipnodes.size()) return 0;
+			const auto &node = bsp_data.clipnodes[idx];
+			if (node.planenum < 0 || (size_t)node.planenum >= bsp_data.planes.size()) return 0;
+			const auto &plane = bsp_data.planes[node.planenum];
+			float dot = plane.normal[0]*p[0] + plane.normal[1]*p[1] + plane.normal[2]*p[2];
+			idx = (dot >= plane.dist) ? node.children[0] : node.children[1];
+		}
+		return idx;
+	};
+
+	auto vert_near_wall = [&](const float v[3]) -> bool {
+		for (int sx = -1; sx <= 1; sx += 2) {
+			for (int sy = -1; sy <= 1; sy += 2) {
+				for (int sz = -1; sz <= 1; sz += 2) {
+					float p[3] = {v[0]+sx*he[0], v[1]+sy*he[1], v[2]+sz*he[2]};
+					int c = goldsrc_hull::classify_hull0_tree(
+						bsp_data.nodes, bsp_data.leafs, bsp_data.planes,
+						hull0_root, p);
+					if (c == goldsrc::CONTENTS_SOLID) return true;
+				}
+			}
+		}
+		return false;
+	};
+
+	// Filter: h0 EMPTY (nudged) + h1 growth artifact check.
+	// Vertices are nudged 0.1 units toward cell centroid before hull 0
+	// classification to handle boundary precision from triple-plane intersection.
+	// For cells with vertices outside h1 expanded SOLID (growth artifacts),
+	// rescue only if the cell has a "clip brush indicator" vertex — one in
+	// h1 SOLID and NOT near hull 0 walls.
+	vector<ConvexCell> result_cells;
+	for (auto &cell : clipped_cells) {
+		auto verts = goldsrc_hull::compute_cell_vertices(cell.planes, EPSILON);
+		if (verts.size() < 4) continue;
+		// Compute centroid for nudging boundary vertices
+		float cx = 0, cy = 0, cz = 0;
+		for (const auto &v : verts) { cx += v.gs[0]; cy += v.gs[1]; cz += v.gs[2]; }
+		cx /= verts.size(); cy /= verts.size(); cz /= verts.size();
+
+		bool any_h0_solid = false;
+		bool any_h1_empty = false;
+		bool has_clip_indicator = false;
+		for (const auto &v : verts) {
+			// Nudge vertex 0.1 units toward centroid for hull 0 boundary precision
+			float nudged[3] = {v.gs[0], v.gs[1], v.gs[2]};
+			float dx = cx - v.gs[0], dy = cy - v.gs[1], dz = cz - v.gs[2];
+			float len = sqrtf(dx*dx + dy*dy + dz*dz);
+			if (len > 0.01f) {
+				float t = 0.1f / len;
+				nudged[0] += dx * t; nudged[1] += dy * t; nudged[2] += dz * t;
+			}
+			int h0c = goldsrc_hull::classify_hull0_tree(
+				bsp_data.nodes, bsp_data.leafs, bsp_data.planes,
+				hull0_root, nudged);
+			if (h0c == goldsrc::CONTENTS_SOLID) { any_h0_solid = true; break; }
+			int h1c = classify_h1(v.gs);
+			if (h1c != goldsrc::CONTENTS_SOLID) {
+				any_h1_empty = true;
+			} else if (!has_clip_indicator && !vert_near_wall(v.gs)) {
+				has_clip_indicator = true;
+			}
+		}
+		if (any_h0_solid) continue;
+		if (any_h1_empty && !has_clip_indicator) continue;
+		result_cells.push_back(std::move(cell));
+	}
+
+	UtilityFunctions::print("[GoldSrc] After vertex filter: ",
+		(int64_t)result_cells.size(), " cells");
+
+	vector<ConvexCell> final_cells;
+	for (auto &cell : result_cells) {
+		auto verts = goldsrc_hull::compute_cell_vertices(cell.planes, EPSILON);
+		if (verts.size() < 4) continue;
+		bool all_near_wall = true;
+		for (const auto &v : verts) {
+			if (!vert_near_wall(v.gs)) { all_near_wall = false; break; }
+		}
+		if (all_near_wall) continue;
+		final_cells.push_back(std::move(cell));
+	}
+
+	UtilityFunctions::print("[GoldSrc] After expansion ring filter: ",
+		(int64_t)final_cells.size(), " clip brush cells");
+
+	// --- Triangulate cells into triangle arrays ---
+	auto triangulate_cells = [&](const vector<ConvexCell> &cells) -> PackedVector3Array {
+		PackedVector3Array all_tris;
+
+		for (const auto &cell : cells) {
+			auto verts = goldsrc_hull::compute_cell_vertices(cell.planes, EPSILON);
+			if ((int)verts.size() < 4) continue;
+
+			vector<Vector3> gd_verts(verts.size());
+			for (size_t i = 0; i < verts.size(); i++) {
+				gd_verts[i] = goldsrc_to_godot(verts[i].gs[0], verts[i].gs[1], verts[i].gs[2]);
+			}
+
+			for (const auto &hp : cell.planes) {
+				Vector3 plane_normal(-hp.normal[0], hp.normal[2], hp.normal[1]);
+				float plane_dist_gs = hp.dist;
+
+				vector<int> on_plane;
+				for (size_t i = 0; i < verts.size(); i++) {
+					float dot = hp.normal[0] * verts[i].gs[0]
+					          + hp.normal[1] * verts[i].gs[1]
+					          + hp.normal[2] * verts[i].gs[2];
+					if (fabsf(dot - plane_dist_gs) < EPSILON * 2.0f) {
+						on_plane.push_back((int)i);
+					}
+				}
+				if ((int)on_plane.size() < 3) continue;
+
+				Vector3 centroid(0, 0, 0);
+				for (int idx : on_plane) centroid += gd_verts[idx];
+				centroid /= (float)on_plane.size();
+
+				Vector3 n = plane_normal.normalized();
+				Vector3 ref = (fabsf(n.y) < 0.9f) ? Vector3(0, 1, 0) : Vector3(1, 0, 0);
+				Vector3 u = ref.cross(n).normalized();
+				Vector3 v = n.cross(u).normalized();
+
+				vector<pair<float, int>> angle_indices;
+				for (int idx : on_plane) {
+					Vector3 rel = gd_verts[idx] - centroid;
+					angle_indices.push_back({atan2f(rel.dot(v), rel.dot(u)), idx});
+				}
+				sort(angle_indices.begin(), angle_indices.end());
+
+				for (size_t i = 1; i + 1 < angle_indices.size(); i++) {
+					all_tris.push_back(gd_verts[angle_indices[0].second]);
+					all_tris.push_back(gd_verts[angle_indices[i].second]);
+					all_tris.push_back(gd_verts[angle_indices[i + 1].second]);
+				}
+			}
+		}
+		return all_tris;
+	};
+
+	PackedVector3Array result_tris = triangulate_cells(final_cells);
+
+	// Helper: create a MeshInstance3D from triangles with a given color
+	auto make_mesh = [&](const PackedVector3Array &tris, const Color &color, const String &name, bool visible) {
+		if (tris.is_empty()) return;
+
+		int tri_count = tris.size() / 3;
+
+		PackedVector3Array normals;
+		normals.resize(tris.size());
+		for (int i = 0; i < tri_count; i++) {
+			Vector3 a = tris[i * 3 + 1] - tris[i * 3];
+			Vector3 b = tris[i * 3 + 2] - tris[i * 3];
+			Vector3 n = a.cross(b).normalized();
+			normals[i * 3] = n;
+			normals[i * 3 + 1] = n;
+			normals[i * 3 + 2] = n;
+		}
+
+		Ref<ArrayMesh> arr_mesh;
+		arr_mesh.instantiate();
+
+		Array arrays;
+		arrays.resize(ArrayMesh::ARRAY_MAX);
+		arrays[ArrayMesh::ARRAY_VERTEX] = tris;
+		arrays[ArrayMesh::ARRAY_NORMAL] = normals;
+		arr_mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
+
+		Ref<StandardMaterial3D> material;
+		material.instantiate();
+		material->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+		material->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+		material->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
+		material->set_albedo(color);
+		arr_mesh->surface_set_material(0, material);
+
+		MeshInstance3D *mesh_instance = memnew(MeshInstance3D);
+		mesh_instance->set_name(name);
+		mesh_instance->set_mesh(arr_mesh);
+		mesh_instance->set_visible(visible);
+		add_child(mesh_instance);
+
+		UtilityFunctions::print("[GoldSrc] Debug hull mesh '", name,
+			"': ", (int64_t)tri_count, " triangles");
+	};
+
+	make_mesh(result_tris, Color(0.0f, 1.0f, 0.5f, 0.25f), "DebugHullResult", true);
+
+	// Build collision shapes for hull cells on a dedicated layer (layer 5 = bit 4)
+	// so the player can raycast against them for debug tracing.
+	// One StaticBody3D with one ConvexPolygonShape3D per cell.
+	StaticBody3D *hull_body = memnew(StaticBody3D);
+	hull_body->set_name("HullCellBody");
+	hull_body->set_collision_layer(1 << 4);  // layer 5 only
+	hull_body->set_collision_mask(0);         // doesn't detect anything
+
+	int shape_count = 0;
+	for (size_t ci = 0; ci < final_cells.size(); ci++) {
+		auto verts = goldsrc_hull::compute_cell_vertices(final_cells[ci].planes, EPSILON);
+		if (verts.size() < 4) continue;
+
+		PackedVector3Array points;
+		points.resize((int)verts.size());
+		for (size_t vi = 0; vi < verts.size(); vi++) {
+			points[(int)vi] = goldsrc_to_godot(verts[vi].gs[0], verts[vi].gs[1], verts[vi].gs[2]);
+		}
+
+		Ref<ConvexPolygonShape3D> shape;
+		shape.instantiate();
+		shape->set_points(points);
+
+		CollisionShape3D *col = memnew(CollisionShape3D);
+		col->set_name(String("Cell") + String::num_int64((int64_t)ci));
+		col->set_shape(shape);
+
+		// Store GoldSrc AABB as metadata for debug output
+		float gs_min[3] = {1e30f, 1e30f, 1e30f}, gs_max[3] = {-1e30f, -1e30f, -1e30f};
+		for (const auto &v : verts) {
+			for (int a = 0; a < 3; a++) {
+				if (v.gs[a] < gs_min[a]) gs_min[a] = v.gs[a];
+				if (v.gs[a] > gs_max[a]) gs_max[a] = v.gs[a];
+			}
+		}
+		col->set_meta("gs_min", Vector3(gs_min[0], gs_min[1], gs_min[2]));
+		col->set_meta("gs_max", Vector3(gs_max[0], gs_max[1], gs_max[2]));
+
+		hull_body->add_child(col);
+		shape_count++;
+	}
+
+	add_child(hull_body);
+	UtilityFunctions::print("[GoldSrc] Hull cell collision: ",
+		(int64_t)shape_count, " convex shapes on layer 5");
 }
 
 void GoldSrcBSP::set_lightstyle(int style_index, float brightness) {
