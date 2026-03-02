@@ -1205,12 +1205,15 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 			cell.planes.push_back(bbox_planes[i]);
 	}
 
+	int hull0_root = bmodel.headnode[0];
+
 	// Un-expand ALL hull 1 planes by the Minkowski support function.
 	// This collapses world brush planes back to hull 0 surface positions and
 	// shrinks clip brush planes to their original (pre-expansion) positions.
 	float *he = hull_half_extents[hull_index];
-	vector<ConvexCell> unexpanded_cells;
-	for (auto &cell : solid_cells) {
+
+	// Helper: un-expand hull 1 planes with a given factor (1.0 = full, 0.0 = none)
+	auto unexpand_cell_f = [&](const ConvexCell &cell, float factor) -> ConvexCell {
 		ConvexCell ue;
 		for (const auto &hp : cell.planes) {
 			HullPlane p = hp;
@@ -1218,13 +1221,57 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 				float support = fabsf(p.normal[0]) * he[0]
 				              + fabsf(p.normal[1]) * he[1]
 				              + fabsf(p.normal[2]) * he[2];
-				p.dist -= support * hp.unexpand_sign;
+				p.dist -= support * hp.unexpand_sign * factor;
 			}
 			ue.planes.push_back(p);
 		}
+		return ue;
+	};
+
+	vector<ConvexCell> unexpanded_cells;
+	for (auto &cell : solid_cells) {
+		ConvexCell ue = unexpand_cell_f(cell, 1.0f);
 		auto verts = goldsrc_hull::compute_cell_vertices(ue.planes, EPSILON);
-		if (verts.size() < 4) continue;
-		unexpanded_cells.push_back(std::move(ue));
+		if (verts.size() >= 4) {
+			unexpanded_cells.push_back(std::move(ue));
+			continue;
+		}
+		// Degenerate — try hull 0 clip first, then un-expand fragments
+		vector<ConvexCell> h0_fragments;
+		goldsrc_hull::clip_cell_by_hull0(cell, bsp_data.nodes, bsp_data.leafs,
+			bsp_data.planes, hull0_root, EPSILON, h0_fragments);
+		bool any_rescued = false;
+		for (auto &frag : h0_fragments) {
+			ConvexCell uf = unexpand_cell_f(frag, 1.0f);
+			auto fv = goldsrc_hull::compute_cell_vertices(uf.planes, EPSILON);
+			if (fv.size() >= 4) {
+				unexpanded_cells.push_back(std::move(uf));
+				any_rescued = true;
+			}
+		}
+		if (!any_rescued) {
+			// Partial un-expansion: binary search for the maximum factor that
+			// yields valid geometry. Handles overlap regions between expanded
+			// clip brushes where full un-expansion collapses the cell.
+			float lo = 0.0f, hi = 1.0f, best = -1.0f;
+			ConvexCell best_cell;
+			for (int iter = 0; iter < 10; iter++) {
+				float mid = (lo + hi) * 0.5f;
+				ConvexCell trial = unexpand_cell_f(cell, mid);
+				auto tv = goldsrc_hull::compute_cell_vertices(trial.planes, EPSILON);
+				if (tv.size() >= 4) {
+					best = mid;
+					best_cell = std::move(trial);
+					lo = mid;
+				} else {
+					hi = mid;
+				}
+			}
+			if (best >= 0.0f) {
+				unexpanded_cells.push_back(std::move(best_cell));
+				any_rescued = true;
+			}
+		}
 	}
 
 	UtilityFunctions::print("[GoldSrc] After un-expansion: ",
@@ -1234,7 +1281,6 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 	// Clip un-expanded cells against hull 0 BSP tree.
 	// World brush parts overlap hull 0 SOLID and get filtered out.
 	// Clip brush parts are in hull 0 EMPTY and survive.
-	int hull0_root = bmodel.headnode[0];
 	vector<ConvexCell> clipped_cells;
 	for (const auto &cell : unexpanded_cells) {
 		goldsrc_hull::clip_cell_by_hull0(cell, bsp_data.nodes, bsp_data.leafs,
@@ -1244,8 +1290,8 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 	UtilityFunctions::print("[GoldSrc] After hull 0 clip: ",
 		(int64_t)clipped_cells.size(), " cells in hull 0 empty space");
 
-	// Helpers for vertex filtering
-	auto classify_h1 = [&](const float p[3]) -> int {
+	// Classify point against hull 1 expanded tree with optional tolerance
+	auto classify_h1 = [&](const float p[3], float tolerance = 0.0f) -> int {
 		int idx = root;
 		while (idx >= 0) {
 			if ((size_t)idx >= bsp_data.clipnodes.size()) return 0;
@@ -1253,7 +1299,7 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 			if (node.planenum < 0 || (size_t)node.planenum >= bsp_data.planes.size()) return 0;
 			const auto &plane = bsp_data.planes[node.planenum];
 			float dot = plane.normal[0]*p[0] + plane.normal[1]*p[1] + plane.normal[2]*p[2];
-			idx = (dot >= plane.dist) ? node.children[0] : node.children[1];
+			idx = (dot >= plane.dist - tolerance) ? node.children[0] : node.children[1];
 		}
 		return idx;
 	};
@@ -1273,26 +1319,26 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 		return false;
 	};
 
-	// Filter: h0 EMPTY (nudged) + h1 growth artifact check.
-	// Vertices are nudged 0.1 units toward cell centroid before hull 0
-	// classification to handle boundary precision from triple-plane intersection.
-	// For cells with vertices outside h1 expanded SOLID (growth artifacts),
-	// rescue only if the cell has a "clip brush indicator" vertex — one in
-	// h1 SOLID and NOT near hull 0 walls.
+	// Filter: h0 EMPTY + h1 growth artifact check.
+	// Per-vertex h0 check with centroid rescue: catches boundary precision
+	// from triple-plane intersection without filtering cells with vertices
+	// barely on the h0 boundary.
+	// h1 check: primary rescue (centroid h1 SOLID + not near wall) handles
+	// most cases. Secondary rescue for large cells (min dim >= 2*max_hull_extent)
+	// handles ceiling clip brushes where centroid barely straddles h1 boundary.
 	vector<ConvexCell> result_cells;
 	for (auto &cell : clipped_cells) {
 		auto verts = goldsrc_hull::compute_cell_vertices(cell.planes, EPSILON);
 		if (verts.size() < 4) continue;
-		// Compute centroid for nudging boundary vertices
+		// Compute centroid
 		float cx = 0, cy = 0, cz = 0;
 		for (const auto &v : verts) { cx += v.gs[0]; cy += v.gs[1]; cz += v.gs[2]; }
 		cx /= verts.size(); cy /= verts.size(); cz /= verts.size();
 
+		// h0 filter: per-vertex with centroid rescue
+		float cpt[3] = {cx, cy, cz};
 		bool any_h0_solid = false;
-		bool any_h1_empty = false;
-		bool has_clip_indicator = false;
 		for (const auto &v : verts) {
-			// Nudge vertex 0.1 units toward centroid for hull 0 boundary precision
 			float nudged[3] = {v.gs[0], v.gs[1], v.gs[2]};
 			float dx = cx - v.gs[0], dy = cy - v.gs[1], dz = cz - v.gs[2];
 			float len = sqrtf(dx*dx + dy*dy + dz*dz);
@@ -1304,6 +1350,19 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 				bsp_data.nodes, bsp_data.leafs, bsp_data.planes,
 				hull0_root, nudged);
 			if (h0c == goldsrc::CONTENTS_SOLID) { any_h0_solid = true; break; }
+		}
+		if (any_h0_solid) {
+			int h0_cent = goldsrc_hull::classify_hull0_tree(
+				bsp_data.nodes, bsp_data.leafs, bsp_data.planes,
+				hull0_root, cpt);
+			if (h0_cent == goldsrc::CONTENTS_SOLID) continue;
+			// Centroid is h0 empty — vertex was on boundary, cell is valid
+		}
+
+		// h1 filter: check for growth artifacts
+		bool any_h1_empty = false;
+		bool has_clip_indicator = false;
+		for (const auto &v : verts) {
 			int h1c = classify_h1(v.gs);
 			if (h1c != goldsrc::CONTENTS_SOLID) {
 				any_h1_empty = true;
@@ -1311,8 +1370,32 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 				has_clip_indicator = true;
 			}
 		}
-		if (any_h0_solid) continue;
-		if (any_h1_empty && !has_clip_indicator) continue;
+		if (any_h1_empty && !has_clip_indicator) {
+			// Primary rescue: centroid is h1 SOLID (exact) and not near wall
+			int ch1 = classify_h1(cpt);
+			if (ch1 == goldsrc::CONTENTS_SOLID && !vert_near_wall(cpt)) {
+				result_cells.push_back(std::move(cell));
+			} else {
+				// Secondary rescue: centroid h1 SOLID within 8-unit tolerance
+				// AND cell is large (min dim >= 2*max_hull_extent).
+				// Expansion ring slivers are thin, real clip brushes are thick.
+				if (ch1 != goldsrc::CONTENTS_SOLID) {
+					int ch1_tol = classify_h1(cpt, 8.0f);
+					if (ch1_tol == goldsrc::CONTENTS_SOLID) {
+						float mn[3]={1e9f,1e9f,1e9f}, mx[3]={-1e9f,-1e9f,-1e9f};
+						for (const auto &v : verts) {
+							for(int a=0;a<3;a++){if(v.gs[a]<mn[a])mn[a]=v.gs[a]; if(v.gs[a]>mx[a])mx[a]=v.gs[a];}
+						}
+						float min_dim = fminf(mx[0]-mn[0], fminf(mx[1]-mn[1], mx[2]-mn[2]));
+						float max_he = fmaxf(he[0], fmaxf(he[1], he[2]));
+						if (min_dim >= 2.0f * max_he) {
+							result_cells.push_back(std::move(cell));
+						}
+					}
+				}
+			}
+			continue;
+		}
 		result_cells.push_back(std::move(cell));
 	}
 

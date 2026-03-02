@@ -79,8 +79,8 @@ int main(int argc, char **argv) {
 	printf("\n--- Step 2: Un-expand all hull 1 planes ---\n");
 	auto t0 = chrono::steady_clock::now();
 
-	// Helper: un-expand hull 1 planes in a cell
-	auto unexpand_cell = [&](const ConvexCell &cell) -> ConvexCell {
+	// Helper: un-expand hull 1 planes in a cell with a given factor (1.0 = full, 0.0 = none)
+	auto unexpand_cell_f = [&](const ConvexCell &cell, float factor) -> ConvexCell {
 		ConvexCell ue;
 		for (const auto &hp : cell.planes) {
 			HullPlane p = hp;
@@ -88,11 +88,27 @@ int main(int argc, char **argv) {
 				float support = fabsf(p.normal[0]) * he[0]
 				              + fabsf(p.normal[1]) * he[1]
 				              + fabsf(p.normal[2]) * he[2];
-				p.dist -= support * hp.unexpand_sign;
+				p.dist -= support * hp.unexpand_sign * factor;
 			}
 			ue.planes.push_back(p);
 		}
 		return ue;
+	};
+	auto unexpand_cell = [&](const ConvexCell &cell) -> ConvexCell {
+		return unexpand_cell_f(cell, 1.0f);
+	};
+
+	// AABB-vs-cell: expand each plane by support(normal, he), then point test center.
+	auto aabb_overlaps_cell = [&](const float center[3], const float half_ext[3],
+		const ConvexCell &cell, float eps) -> bool {
+		for (const auto &hp : cell.planes) {
+			float support = fabsf(hp.normal[0]) * half_ext[0]
+			              + fabsf(hp.normal[1]) * half_ext[1]
+			              + fabsf(hp.normal[2]) * half_ext[2];
+			float dot = hp.normal[0] * center[0] + hp.normal[1] * center[1] + hp.normal[2] * center[2];
+			if (dot > hp.dist + support + eps) return false;
+		}
+		return true;
 	};
 
 	vector<ConvexCell> unexpanded_cells;
@@ -105,8 +121,7 @@ int main(int argc, char **argv) {
 			continue;
 		}
 		// Degenerate after un-expansion — try clipping against hull 0 first,
-		// then un-expanding each fragment. Hull 0 split planes add non-hull1
-		// constraints that help resolve inter-brush contradictions.
+		// then un-expanding each fragment.
 		vector<ConvexCell> h0_fragments;
 		clip_cell_by_hull0(cell, bsp.nodes, bsp.leafs, bsp.planes,
 			hull0_root, EPSILON, h0_fragments);
@@ -116,6 +131,29 @@ int main(int argc, char **argv) {
 			auto fv = compute_cell_vertices(uf.planes, EPSILON);
 			if (fv.size() >= 4) {
 				unexpanded_cells.push_back(std::move(uf));
+				any_rescued = true;
+			}
+		}
+		if (!any_rescued) {
+			// Partial un-expansion: binary search for the maximum factor that
+			// yields valid geometry. This handles overlap regions between
+			// expanded clip brushes where full un-expansion collapses the cell.
+			float lo = 0.0f, hi = 1.0f, best = -1.0f;
+			ConvexCell best_cell;
+			for (int iter = 0; iter < 10; iter++) {
+				float mid = (lo + hi) * 0.5f;
+				ConvexCell trial = unexpand_cell_f(cell, mid);
+				auto tv = compute_cell_vertices(trial.planes, EPSILON);
+				if (tv.size() >= 4) {
+					best = mid;
+					best_cell = std::move(trial);
+					lo = mid;  // try more un-expansion
+				} else {
+					hi = mid;  // reduce un-expansion
+				}
+			}
+			if (best >= 0.0f) {
+				unexpanded_cells.push_back(std::move(best_cell));
 				any_rescued = true;
 			}
 		}
@@ -142,6 +180,63 @@ int main(int argc, char **argv) {
 	printf("Clipped cells (in hull0-empty): %zu  (%lldms)\n", clipped_cells.size(),
 		(long long)chrono::duration_cast<chrono::milliseconds>(t3 - t2).count());
 
+	// Classify point against hull 1 expanded tree with optional tolerance.
+	auto classify_h1 = [&](const float p[3], float tolerance = 0.0f) -> int {
+		int idx = root;
+		while (idx >= 0) {
+			if ((size_t)idx >= bsp.clipnodes.size()) return 0;
+			const auto &node = bsp.clipnodes[idx];
+			if (node.planenum < 0 || (size_t)node.planenum >= bsp.planes.size()) return 0;
+			const auto &plane = bsp.planes[node.planenum];
+			float dot = plane.normal[0]*p[0] + plane.normal[1]*p[1] + plane.normal[2]*p[2];
+			idx = (dot >= plane.dist - tolerance) ? node.children[0] : node.children[1];
+		}
+		return idx;
+	};
+
+	// Hull 1 clip function — used as rescue in step 4 for cells killed by h1 filter
+	function<void(const ConvexCell &, int, vector<ConvexCell> &)> clip_cell_hull1;
+	clip_cell_hull1 = [&](const ConvexCell &cell, int node_idx, vector<ConvexCell> &out) {
+		if (node_idx < 0) {
+			if (node_idx == goldsrc::CONTENTS_SOLID) {
+				out.push_back(cell);
+			}
+			return;
+		}
+		if ((size_t)node_idx >= bsp.clipnodes.size()) return;
+		const auto &node = bsp.clipnodes[node_idx];
+		if (node.planenum < 0 || (size_t)node.planenum >= bsp.planes.size()) return;
+		const auto &plane = bsp.planes[node.planenum];
+
+		auto verts = compute_cell_vertices(cell.planes, EPSILON);
+		if (verts.size() < 4) return;
+
+		bool any_front = false, any_back = false;
+		for (const auto &v : verts) {
+			float dot = plane.normal[0]*v.gs[0] + plane.normal[1]*v.gs[1] + plane.normal[2]*v.gs[2];
+			if (dot >= plane.dist - EPSILON) any_front = true;
+			if (dot <= plane.dist + EPSILON) any_back = true;
+		}
+
+		if (any_front && !any_back) {
+			clip_cell_hull1(cell, node.children[0], out);
+		} else if (any_back && !any_front) {
+			clip_cell_hull1(cell, node.children[1], out);
+		} else {
+			ConvexCell front_cell = cell, back_cell = cell;
+			HullPlane split = {};
+			split.normal[0] = plane.normal[0]; split.normal[1] = plane.normal[1]; split.normal[2] = plane.normal[2];
+			split.dist = plane.dist; split.from_hull1 = false;
+			HullPlane neg_split = {};
+			neg_split.normal[0] = -plane.normal[0]; neg_split.normal[1] = -plane.normal[1]; neg_split.normal[2] = -plane.normal[2];
+			neg_split.dist = -plane.dist; neg_split.from_hull1 = false;
+			front_cell.planes.push_back(neg_split);
+			back_cell.planes.push_back(split);
+			clip_cell_hull1(front_cell, node.children[0], out);
+			clip_cell_hull1(back_cell, node.children[1], out);
+		}
+	};
+
 	// Helpers used by steps 4 and 5
 	auto vert_near_wall = [&](const float v[3]) -> bool {
 		for (int sx = -1; sx <= 1; sx += 2) {
@@ -156,20 +251,6 @@ int main(int argc, char **argv) {
 		return false;
 	};
 
-	// Classify point against hull 1 expanded tree with optional tolerance.
-	// Positive tolerance expands the "solid" region (makes it easier to be inside).
-	auto classify_h1 = [&](const float p[3], float tolerance = 0.0f) -> int {
-		int idx = root;
-		while (idx >= 0) {
-			if ((size_t)idx >= bsp.clipnodes.size()) return 0;
-			const auto &node = bsp.clipnodes[idx];
-			if (node.planenum < 0 || (size_t)node.planenum >= bsp.planes.size()) return 0;
-			const auto &plane = bsp.planes[node.planenum];
-			float dot = plane.normal[0]*p[0] + plane.normal[1]*p[1] + plane.normal[2]*p[2];
-			idx = (dot >= plane.dist - tolerance) ? node.children[0] : node.children[1];
-		}
-		return idx;
-	};
 
 	// Step 4: Filter — h0 EMPTY + h1/ring combined check
 	printf("\n--- Step 4: Vertex filter (h0 EMPTY + h1 SOLID) ---\n");
@@ -179,20 +260,22 @@ int main(int argc, char **argv) {
 	// bounds (precision/BSP-splitting artifacts) are OK; vertices far outside
 	// indicate growth artifacts.
 	vector<ConvexCell> result_cells;
-	size_t degenerate = 0, h0_filtered = 0, h1_filtered = 0;
+	size_t degenerate = 0, h0_filtered = 0, h1_filtered = 0, h1_rescued = 0;
 	for (auto &cell : clipped_cells) {
 		auto verts = compute_cell_vertices(cell.planes, EPSILON);
 		if (verts.size() < 4) { degenerate++; continue; }
-		// Compute centroid for nudging boundary vertices
+		// Compute centroid
 		float cx = 0, cy = 0, cz = 0;
 		for (const auto &v : verts) { cx += v.gs[0]; cy += v.gs[1]; cz += v.gs[2]; }
 		cx /= verts.size(); cy /= verts.size(); cz /= verts.size();
 
+		// h0 filter: per-vertex with centroid rescue.
+		// Per-vertex catches cells with vertices barely inside h0 solid (boundary
+		// precision from triple-plane intersection). Centroid rescue handles
+		// valid cells where hull 0 clip left a vertex on the h0 boundary.
+		float cpt[3] = {cx, cy, cz};
 		bool any_h0_solid = false;
-		bool any_h1_empty = false;
-		bool has_clip_indicator = false;  // vertex that's h1 SOLID and not near wall
 		for (const auto &v : verts) {
-			// Nudge vertex slightly toward centroid to avoid boundary precision issues
 			float nudged[3] = {v.gs[0], v.gs[1], v.gs[2]};
 			float dx = cx - v.gs[0], dy = cy - v.gs[1], dz = cz - v.gs[2];
 			float len = sqrtf(dx*dx + dy*dy + dz*dz);
@@ -203,6 +286,17 @@ int main(int argc, char **argv) {
 			int h0c = classify_hull0_tree(
 				bsp.nodes, bsp.leafs, bsp.planes, hull0_root, nudged);
 			if (h0c == goldsrc::CONTENTS_SOLID) { any_h0_solid = true; break; }
+		}
+		if (any_h0_solid) {
+			int h0_cent = classify_hull0_tree(
+				bsp.nodes, bsp.leafs, bsp.planes, hull0_root, cpt);
+			if (h0_cent == goldsrc::CONTENTS_SOLID) { h0_filtered++; continue; }
+			// Centroid is h0 empty — vertex was on boundary, cell is valid
+		}
+
+		bool any_h1_empty = false;
+		bool has_clip_indicator = false;
+		for (const auto &v : verts) {
 			int h1c = classify_h1(v.gs);
 			if (h1c != goldsrc::CONTENTS_SOLID) {
 				any_h1_empty = true;
@@ -210,17 +304,45 @@ int main(int argc, char **argv) {
 				has_clip_indicator = true;
 			}
 		}
-		if (any_h0_solid) { h0_filtered++; continue; }
-		// If any vertex is outside hull 1, reject unless the cell has at least
-		// one "clip brush indicator" — a vertex that's inside hull 1 AND in open
-		// space (not near world geometry). Growth artifacts lack such vertices.
-		if (any_h1_empty && !has_clip_indicator) { h1_filtered++; continue; }
+		if (any_h1_empty && !has_clip_indicator) {
+			// Primary rescue: centroid is h1 SOLID (exact) and not near wall.
+			int ch1 = classify_h1(cpt);
+			if (ch1 == goldsrc::CONTENTS_SOLID && !vert_near_wall(cpt)) {
+				result_cells.push_back(std::move(cell));
+
+				h1_rescued++;
+			} else {
+				// Secondary rescue: centroid is h1 SOLID within 8-unit tolerance
+				// AND cell is large (min dimension >= 2*max_hull_extent).
+				// Expansion ring slivers are thin (< hull extent), while real
+				// clip brushes (e.g. ceiling clips) are thick in all directions.
+				bool rescued = false;
+				if (ch1 != goldsrc::CONTENTS_SOLID) {
+				int ch1_tol = classify_h1(cpt, 8.0f);
+				if (ch1_tol == goldsrc::CONTENTS_SOLID) {
+					float mn[3]={1e9,1e9,1e9}, mx[3]={-1e9,-1e9,-1e9};
+					for (const auto &v : verts) { for(int a=0;a<3;a++){if(v.gs[a]<mn[a])mn[a]=v.gs[a]; if(v.gs[a]>mx[a])mx[a]=v.gs[a];}}
+					float min_dim = fminf(mx[0]-mn[0], fminf(mx[1]-mn[1], mx[2]-mn[2]));
+					float max_he = fmaxf(he[0], fmaxf(he[1], he[2]));
+					if (min_dim >= 2.0f * max_he) {
+						result_cells.push_back(std::move(cell));
+		
+						h1_rescued++;
+						rescued = true;
+					}
+				}
+				} // ch1 != SOLID
+				if (!rescued) h1_filtered++;
+			}
+			continue;
+		}
 		result_cells.push_back(std::move(cell));
+
 	}
 
 	auto t5 = chrono::steady_clock::now();
-	printf("After filter: %zu -> %zu result (degen: %zu, h0: %zu, h1: %zu)  (%lldms)\n",
-		clipped_cells.size(), result_cells.size(), degenerate, h0_filtered, h1_filtered,
+	printf("After filter: %zu -> %zu result (degen: %zu, h0: %zu, h1: %zu, rescued: %zu)  (%lldms)\n",
+		clipped_cells.size(), result_cells.size(), degenerate, h0_filtered, h1_filtered, h1_rescued,
 		(long long)chrono::duration_cast<chrono::milliseconds>(t5 - t4).count());
 
 	// Step 5: Expansion ring filter — remove cells where ALL vertices are
@@ -267,6 +389,18 @@ int main(int argc, char **argv) {
 		{{-890.7f, 724.0f, 766.6f}, "missing_1", true},
 		{{-488.3f, 742.0f, 811.6f}, "missing_2", true},
 		{{1690.0f, -1628.4f, 158.7f}, "missing_3", true},
+		{{449.2f, 464.5f, 845.8f}, "missing_4", true},
+		{{1769.4f, -1505.4f, 335.0f}, "missing_5", true},
+		{{-1708.2f, -2407.1f, 291.5f}, "missing_6", true},
+		{{1129.9f, -2504.3f, 246.1f}, "missing_7", true},
+		{{-1821.0f, -2339.2f, 127.1f}, "missing_8", true},
+		// Player-reported new artifacts (from hull 1 clip)
+		{{479.9f, 464.0f, 384.4f}, "artifact_5", false},
+		{{1803.5f, 464.0f, 335.7f}, "artifact_6", false},
+		// New missing points
+		{{1541.1f, 486.1f, 844.4f}, "missing_9", true},
+		{{1639.3f, -984.8f, 844.1f}, "missing_10", true},
+		{{1829.8f, -3616.8f, 140.2f}, "missing_11", true},
 		// All info_player_start / info_player_teamspawn entities
 		{{529.0f, -2490.0f, 152.0f}, "info_player_start", false},
 		{{-1872.0f, 624.0f, 736.0f}, "teamspawn_1", false},
@@ -299,18 +433,6 @@ int main(int argc, char **argv) {
 		{{-1400.0f, -1928.0f, 216.0f}, "teamspawn_28", false},
 	};
 
-	// AABB-vs-cell: expand each plane by support(normal, he), then point test center.
-	auto aabb_overlaps_cell = [&](const float center[3], const float half_ext[3],
-		const ConvexCell &cell, float eps) -> bool {
-		for (const auto &hp : cell.planes) {
-			float support = fabsf(hp.normal[0]) * half_ext[0]
-			              + fabsf(hp.normal[1]) * half_ext[1]
-			              + fabsf(hp.normal[2]) * half_ext[2];
-			float dot = hp.normal[0] * center[0] + hp.normal[1] * center[1] + hp.normal[2] * center[2];
-			if (dot > hp.dist + support + eps) return false;
-		}
-		return true;
-	};
 
 	printf("\n=== COLLISION TESTS ===\n");
 	int pass = 0, fail = 0;
@@ -342,6 +464,7 @@ int main(int argc, char **argv) {
 	}
 	printf("\n=== RESULTS: %d PASS, %d FAIL ===\n", pass, fail);
 	printf("Total result cells: %zu\n", final_cells.size());
+
 
 	// Diagnostics for missing_ points — trace which step kills the cell
 	printf("\n=== DIAGNOSTICS ===\n");
