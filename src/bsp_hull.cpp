@@ -541,6 +541,9 @@ vector<CellVertex> compute_cell_vertices(
 	vector<CellVertex> verts;
 	int np = (int)planes.size();
 
+	// Use double precision for Cramer's rule to handle near-parallel planes
+	// (e.g. thin wedge cells from BSP splitting where two planes are nearly
+	// anti-parallel and the determinant is very small in float).
 	for (int i = 0; i < np - 2; i++) {
 		for (int j = i + 1; j < np - 1; j++) {
 			for (int k = j + 1; k < np; k++) {
@@ -548,25 +551,30 @@ vector<CellVertex> compute_cell_vertices(
 				const auto &p2 = planes[j];
 				const auto &p3 = planes[k];
 
-				float cx = p2.normal[1] * p3.normal[2] - p2.normal[2] * p3.normal[1];
-				float cy = p2.normal[2] * p3.normal[0] - p2.normal[0] * p3.normal[2];
-				float cz = p2.normal[0] * p3.normal[1] - p2.normal[1] * p3.normal[0];
+				double n1[3] = {p1.normal[0], p1.normal[1], p1.normal[2]};
+				double n2[3] = {p2.normal[0], p2.normal[1], p2.normal[2]};
+				double n3[3] = {p3.normal[0], p3.normal[1], p3.normal[2]};
+				double d1 = p1.dist, d2 = p2.dist, d3 = p3.dist;
 
-				float denom = p1.normal[0] * cx + p1.normal[1] * cy + p1.normal[2] * cz;
-				if (fabsf(denom) < 1e-6f) continue;
+				double cx = n2[1]*n3[2] - n2[2]*n3[1];
+				double cy = n2[2]*n3[0] - n2[0]*n3[2];
+				double cz = n2[0]*n3[1] - n2[1]*n3[0];
 
-				float ax = p3.normal[1] * p1.normal[2] - p3.normal[2] * p1.normal[1];
-				float ay = p3.normal[2] * p1.normal[0] - p3.normal[0] * p1.normal[2];
-				float az = p3.normal[0] * p1.normal[1] - p3.normal[1] * p1.normal[0];
+				double denom = n1[0]*cx + n1[1]*cy + n1[2]*cz;
+				if (fabs(denom) < 1e-10) continue;
 
-				float bx = p1.normal[1] * p2.normal[2] - p1.normal[2] * p2.normal[1];
-				float by = p1.normal[2] * p2.normal[0] - p1.normal[0] * p2.normal[2];
-				float bz = p1.normal[0] * p2.normal[1] - p1.normal[1] * p2.normal[0];
+				double ax = n3[1]*n1[2] - n3[2]*n1[1];
+				double ay = n3[2]*n1[0] - n3[0]*n1[2];
+				double az = n3[0]*n1[1] - n3[1]*n1[0];
 
-				float inv_denom = 1.0f / denom;
-				float px = (p1.dist * cx + p2.dist * ax + p3.dist * bx) * inv_denom;
-				float py = (p1.dist * cy + p2.dist * ay + p3.dist * by) * inv_denom;
-				float pz = (p1.dist * cz + p2.dist * az + p3.dist * bz) * inv_denom;
+				double bx = n1[1]*n2[2] - n1[2]*n2[1];
+				double by = n1[2]*n2[0] - n1[0]*n2[2];
+				double bz = n1[0]*n2[1] - n1[1]*n2[0];
+
+				double inv_denom = 1.0 / denom;
+				float px = (float)((d1*cx + d2*ax + d3*bx) * inv_denom);
+				float py = (float)((d1*cy + d2*ay + d3*by) * inv_denom);
+				float pz = (float)((d1*cz + d2*az + d3*bz) * inv_denom);
 
 				bool inside = true;
 				for (int m = 0; m < np; m++) {

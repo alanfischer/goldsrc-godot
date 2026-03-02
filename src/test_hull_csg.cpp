@@ -1,6 +1,6 @@
 // Standalone test: hull 1 clip brush extraction via un-expand + hull 0 clip
 // Build: clang++ -std=c++17 -O2 -I. test_hull_csg.cpp parsers/bsp_parser.cpp bsp_hull.cpp -o test_hull_csg
-// Run:   ./test_hull_csg ../../res/maps/ww_golem.bsp
+// Run:   ./test_hull_csg (auto-discovers maps relative to binary dir)
 
 #include "parsers/bsp_parser.h"
 #include "bsp_hull.h"
@@ -9,34 +9,131 @@
 #include <cmath>
 #include <vector>
 #include <chrono>
+#include <string>
+#include <functional>
 
 using namespace std;
 using namespace goldsrc_hull;
 
-int main(int argc, char **argv) {
-	if (argc < 2) {
-		fprintf(stderr, "Usage: %s <bsp_file>\n", argv[0]);
-		return 1;
-	}
+// --- Test point definition ---
+struct TestPoint {
+	float gs[3];
+	const char *label;
+	bool should_be_inside;
+};
 
-	// Load BSP file
-	FILE *f = fopen(argv[1], "rb");
-	if (!f) { fprintf(stderr, "Cannot open %s\n", argv[1]); return 1; }
-	fseek(f, 0, SEEK_END);
-	size_t sz = ftell(f);
-	fseek(f, 0, SEEK_SET);
-	vector<uint8_t> buf(sz);
-	fread(buf.data(), 1, sz, f);
-	fclose(f);
+// --- Per-map test data ---
+struct MapTestData {
+	const char *bsp_relative_path;
+	const char *map_name;
+	const TestPoint *points;
+	size_t num_points;
+};
 
-	goldsrc::BSPParser parser;
-	if (!parser.parse(buf.data(), sz)) {
-		fprintf(stderr, "Failed to parse BSP\n");
-		return 1;
-	}
+// ww_golem test points
+static const TestPoint ww_golem_points[] = {
+	// Clip brush test point - AABB must overlap a cell
+	{{1198.0f, -2468.0f, 20.0f}, "clip_brush", true},
+	// Player-reported artifact cells that should not exist
+	{{1046.5f, 109.9f, 191.2f}, "artifact_1", false},
+	{{-1790.0f, 490.0f, 290.7f}, "artifact_2", false},
+	{{-1828.0f, 490.0f, 58.6f}, "artifact_3", false},
+	{{-1289.0f, 336.7f, 25.8f}, "artifact_4", false},
+	// Player-reported missing clip hulls
+	{{-890.7f, 724.0f, 766.6f}, "missing_1", true},
+	{{-488.3f, 742.0f, 811.6f}, "missing_2", true},
+	{{1690.0f, -1628.4f, 158.7f}, "missing_3", true},
+	{{449.2f, 464.5f, 845.8f}, "missing_4", true},
+	{{1769.4f, -1505.4f, 335.0f}, "missing_5", true},
+	{{-1708.2f, -2407.1f, 291.5f}, "missing_6", true},
+	{{1129.9f, -2504.3f, 246.1f}, "missing_7", true},
+	{{-1821.0f, -2339.2f, 127.1f}, "missing_8", true},
+	// Player-reported new artifacts (from hull 1 clip)
+	{{479.9f, 464.0f, 384.4f}, "artifact_5", false},
+	{{1803.5f, 464.0f, 335.7f}, "artifact_6", false},
+	// New missing points
+	{{1541.1f, 486.1f, 844.4f}, "missing_9", true},
+	{{1639.3f, -984.8f, 844.1f}, "missing_10", true},
+	{{1829.8f, -3616.8f, 140.2f}, "missing_11", true},
+	// New artifact
+	{{-1872.0f, 455.1f, 478.8f}, "artifact_7", false},
+	// New missing points (batch 3)
+	{{1621.4f, -1808.9f, 215.9f}, "missing_12", true},
+	{{1198.4f, -2474.9f, 174.8f}, "missing_13", true},
+	{{-1741.2f, -2386.1f, 243.1f}, "missing_14", true},
+	// New missing point (batch 4)
+	{{1741.3f, -1547.5f, 73.4f}, "missing_15", true},
+	// New missing points (batch 5)
+	{{2336.4f, -1760.2f, 563.5f}, "missing_16", true},
+	{{1600.8f, -1842.9f, 458.9f}, "missing_17", true},
+	// New missing point (batch 6)
+	{{1142.2f, -2485.9f, 160.8f}, "missing_18", true},
+	// All info_player_start / info_player_teamspawn entities
+	{{529.0f, -2490.0f, 152.0f}, "info_player_start", false},
+	{{-1872.0f, 624.0f, 736.0f}, "teamspawn_1", false},
+	{{-528.0f, 624.0f, 736.0f}, "teamspawn_2", false},
+	{{464.0f, 624.0f, 736.0f}, "teamspawn_3", false},
+	{{1808.0f, 624.0f, 736.0f}, "teamspawn_4", false},
+	{{1040.0f, -1920.0f, 48.0f}, "teamspawn_5", false},
+	{{1192.0f, -1920.0f, 48.0f}, "teamspawn_6", false},
+	{{1112.0f, -2008.0f, 52.0f}, "teamspawn_7", false},
+	{{-160.0f, 736.0f, 64.0f}, "teamspawn_8", false},
+	{{-224.0f, 736.0f, 64.0f}, "teamspawn_9", false},
+	{{-288.0f, 736.0f, 64.0f}, "teamspawn_10", false},
+	{{-160.0f, 656.0f, 64.0f}, "teamspawn_11", false},
+	{{-224.0f, 656.0f, 64.0f}, "teamspawn_12", false},
+	{{-288.0f, 656.0f, 64.0f}, "teamspawn_13", false},
+	{{-288.0f, 576.0f, 64.0f}, "teamspawn_14", false},
+	{{-160.0f, 576.0f, 64.0f}, "teamspawn_15", false},
+	{{-224.0f, 576.0f, 64.0f}, "teamspawn_16", false},
+	{{96.0f, 736.0f, 64.0f}, "teamspawn_17", false},
+	{{160.0f, 736.0f, 64.0f}, "teamspawn_18", false},
+	{{224.0f, 736.0f, 64.0f}, "teamspawn_19", false},
+	{{160.0f, 656.0f, 64.0f}, "teamspawn_20", false},
+	{{224.0f, 656.0f, 64.0f}, "teamspawn_21", false},
+	{{96.0f, 656.0f, 64.0f}, "teamspawn_22", false},
+	{{224.0f, 576.0f, 64.0f}, "teamspawn_23", false},
+	{{160.0f, 576.0f, 64.0f}, "teamspawn_24", false},
+	{{96.0f, 576.0f, 64.0f}, "teamspawn_25", false},
+	{{-1352.0f, -1928.0f, 48.0f}, "teamspawn_26", false},
+	{{-1456.0f, -1928.0f, 52.0f}, "teamspawn_27", false},
+	{{-1400.0f, -1928.0f, 216.0f}, "teamspawn_28", false},
+};
 
-	const auto &bsp = parser.get_data();
-	if (bsp.models.empty()) { fprintf(stderr, "No models\n"); return 1; }
+// ww_hunt test points
+static const TestPoint ww_hunt_points[] = {
+	// Player-reported artifact cells (batch 1)
+	{{-1871.2f, 528.0f, 256.5f}, "artifact_1", false},
+	{{-1630.7f, 704.0f, 377.1f}, "artifact_2", false},
+	{{-1529.5f, 104.9f, 117.5f}, "artifact_3", false},
+	{{-499.3f, 16.0f, 199.1f}, "artifact_4", false},
+	// Player-reported missing clip hulls
+	{{-1039.5f, -560.5f, 369.8f}, "missing_1", true},
+	// Player-reported artifact cells (batch 2)
+	{{-2512.0f, 1471.2f, 378.9f}, "artifact_5", false},
+	{{-1273.7f, 160.9f, 150.8f}, "artifact_6", false},
+	{{-624.4f, 16.0f, 180.2f}, "artifact_7", false},
+	{{1920.0f, 724.2f, 158.3f}, "artifact_8", false},
+	// Player-reported artifact cells (batch 3)
+	{{-3520.0f, 1838.9f, 431.6f}, "artifact_9", false},
+};
+
+static const MapTestData all_maps[] = {
+	{"../../../res/maps/ww_golem.bsp", "ww_golem", ww_golem_points,
+		sizeof(ww_golem_points)/sizeof(ww_golem_points[0])},
+	{"../../../res/maps/ww_hunt.bsp", "ww_hunt", ww_hunt_points,
+		sizeof(ww_hunt_points)/sizeof(ww_hunt_points[0])},
+};
+
+// --- Pipeline: run full clip brush extraction on a BSP ---
+struct PipelineResult {
+	vector<ConvexCell> final_cells;
+	vector<ConvexCell> solid_cells;       // step 1
+	vector<ConvexCell> unexpanded_cells;  // step 2
+};
+
+static PipelineResult run_pipeline(const goldsrc::BSPData &bsp, const char *map_name) {
+	PipelineResult result;
 
 	const auto &bmodel = bsp.models[0];
 	int hull_index = 1;
@@ -47,9 +144,8 @@ int main(int argc, char **argv) {
 		bsp.clipnodes.size(), bsp.nodes.size(), bsp.leafs.size(), bsp.planes.size());
 
 	const float EPSILON = 0.1f;
-	float he[3] = {16, 16, 36}; // Hull 1 half-extents
+	float he[3] = {16, 16, 36};
 
-	// Bounding box planes (tagged from_hull1=false)
 	HullPlane bbox_planes[6];
 	bbox_planes[0] = {{ 1, 0, 0}, bmodel.maxs[0] + 1.0f};
 	bbox_planes[1] = {{-1, 0, 0}, -bmodel.mins[0] + 1.0f};
@@ -61,13 +157,11 @@ int main(int argc, char **argv) {
 	// Step 1: Walk expanded hull 1 tree
 	printf("\n--- Step 1: Walk clip tree (expanded solid) ---\n");
 	vector<HullPlane> accumulated;
-	vector<ConvexCell> solid_cells;
-	walk_clip_tree(bsp.clipnodes, bsp.planes, root, accumulated, solid_cells,
+	walk_clip_tree(bsp.clipnodes, bsp.planes, root, accumulated, result.solid_cells,
 		goldsrc::CONTENTS_SOLID);
-	printf("Expanded solid cells: %zu\n", solid_cells.size());
+	printf("Expanded solid cells: %zu\n", result.solid_cells.size());
 
-	// Cap with bbox
-	for (auto &cell : solid_cells) {
+	for (auto &cell : result.solid_cells) {
 		for (int i = 0; i < 6; i++) {
 			HullPlane bp = bbox_planes[i];
 			bp.from_hull1 = false;
@@ -79,7 +173,6 @@ int main(int argc, char **argv) {
 	printf("\n--- Step 2: Un-expand all hull 1 planes ---\n");
 	auto t0 = chrono::steady_clock::now();
 
-	// Helper: un-expand hull 1 planes in a cell with a given factor (1.0 = full, 0.0 = none)
 	auto unexpand_cell_f = [&](const ConvexCell &cell, float factor) -> ConvexCell {
 		ConvexCell ue;
 		for (const auto &hp : cell.planes) {
@@ -98,30 +191,14 @@ int main(int argc, char **argv) {
 		return unexpand_cell_f(cell, 1.0f);
 	};
 
-	// AABB-vs-cell: expand each plane by support(normal, he), then point test center.
-	auto aabb_overlaps_cell = [&](const float center[3], const float half_ext[3],
-		const ConvexCell &cell, float eps) -> bool {
-		for (const auto &hp : cell.planes) {
-			float support = fabsf(hp.normal[0]) * half_ext[0]
-			              + fabsf(hp.normal[1]) * half_ext[1]
-			              + fabsf(hp.normal[2]) * half_ext[2];
-			float dot = hp.normal[0] * center[0] + hp.normal[1] * center[1] + hp.normal[2] * center[2];
-			if (dot > hp.dist + support + eps) return false;
-		}
-		return true;
-	};
-
-	vector<ConvexCell> unexpanded_cells;
 	size_t step2_degen = 0, step2_rescued = 0;
-	for (auto &cell : solid_cells) {
+	for (auto &cell : result.solid_cells) {
 		ConvexCell ue = unexpand_cell(cell);
 		auto verts = compute_cell_vertices(ue.planes, EPSILON);
 		if (verts.size() >= 4) {
-			unexpanded_cells.push_back(std::move(ue));
+			result.unexpanded_cells.push_back(std::move(ue));
 			continue;
 		}
-		// Degenerate after un-expansion — try clipping against hull 0 first,
-		// then un-expanding each fragment.
 		vector<ConvexCell> h0_fragments;
 		clip_cell_by_hull0(cell, bsp.nodes, bsp.leafs, bsp.planes,
 			hull0_root, EPSILON, h0_fragments);
@@ -130,14 +207,11 @@ int main(int argc, char **argv) {
 			ConvexCell uf = unexpand_cell(frag);
 			auto fv = compute_cell_vertices(uf.planes, EPSILON);
 			if (fv.size() >= 4) {
-				unexpanded_cells.push_back(std::move(uf));
+				result.unexpanded_cells.push_back(std::move(uf));
 				any_rescued = true;
 			}
 		}
 		if (!any_rescued) {
-			// Partial un-expansion: binary search for the maximum factor that
-			// yields valid geometry. This handles overlap regions between
-			// expanded clip brushes where full un-expansion collapses the cell.
 			float lo = 0.0f, hi = 1.0f, best = -1.0f;
 			ConvexCell best_cell;
 			for (int iter = 0; iter < 10; iter++) {
@@ -147,13 +221,13 @@ int main(int argc, char **argv) {
 				if (tv.size() >= 4) {
 					best = mid;
 					best_cell = std::move(trial);
-					lo = mid;  // try more un-expansion
+					lo = mid;
 				} else {
-					hi = mid;  // reduce un-expansion
+					hi = mid;
 				}
 			}
 			if (best >= 0.0f) {
-				unexpanded_cells.push_back(std::move(best_cell));
+				result.unexpanded_cells.push_back(std::move(best_cell));
 				any_rescued = true;
 			}
 		}
@@ -163,7 +237,7 @@ int main(int argc, char **argv) {
 
 	auto t1 = chrono::steady_clock::now();
 	printf("Un-expanded cells: %zu (degenerate: %zu, rescued: %zu)  (%lldms)\n",
-		unexpanded_cells.size(), step2_degen, step2_rescued,
+		result.unexpanded_cells.size(), step2_degen, step2_rescued,
 		(long long)chrono::duration_cast<chrono::milliseconds>(t1 - t0).count());
 
 	// Step 3: Clip un-expanded cells against hull 0 EMPTY
@@ -171,8 +245,8 @@ int main(int argc, char **argv) {
 	auto t2 = chrono::steady_clock::now();
 
 	vector<ConvexCell> clipped_cells;
-	for (size_t i = 0; i < unexpanded_cells.size(); i++) {
-		clip_cell_by_hull0(unexpanded_cells[i], bsp.nodes, bsp.leafs, bsp.planes,
+	for (size_t i = 0; i < result.unexpanded_cells.size(); i++) {
+		clip_cell_by_hull0(result.unexpanded_cells[i], bsp.nodes, bsp.leafs, bsp.planes,
 			hull0_root, EPSILON, clipped_cells);
 	}
 
@@ -180,7 +254,6 @@ int main(int argc, char **argv) {
 	printf("Clipped cells (in hull0-empty): %zu  (%lldms)\n", clipped_cells.size(),
 		(long long)chrono::duration_cast<chrono::milliseconds>(t3 - t2).count());
 
-	// Classify point against hull 1 expanded tree with optional tolerance.
 	auto classify_h1 = [&](const float p[3], float tolerance = 0.0f) -> int {
 		int idx = root;
 		while (idx >= 0) {
@@ -194,50 +267,6 @@ int main(int argc, char **argv) {
 		return idx;
 	};
 
-	// Hull 1 clip function — used as rescue in step 4 for cells killed by h1 filter
-	function<void(const ConvexCell &, int, vector<ConvexCell> &)> clip_cell_hull1;
-	clip_cell_hull1 = [&](const ConvexCell &cell, int node_idx, vector<ConvexCell> &out) {
-		if (node_idx < 0) {
-			if (node_idx == goldsrc::CONTENTS_SOLID) {
-				out.push_back(cell);
-			}
-			return;
-		}
-		if ((size_t)node_idx >= bsp.clipnodes.size()) return;
-		const auto &node = bsp.clipnodes[node_idx];
-		if (node.planenum < 0 || (size_t)node.planenum >= bsp.planes.size()) return;
-		const auto &plane = bsp.planes[node.planenum];
-
-		auto verts = compute_cell_vertices(cell.planes, EPSILON);
-		if (verts.size() < 4) return;
-
-		bool any_front = false, any_back = false;
-		for (const auto &v : verts) {
-			float dot = plane.normal[0]*v.gs[0] + plane.normal[1]*v.gs[1] + plane.normal[2]*v.gs[2];
-			if (dot >= plane.dist - EPSILON) any_front = true;
-			if (dot <= plane.dist + EPSILON) any_back = true;
-		}
-
-		if (any_front && !any_back) {
-			clip_cell_hull1(cell, node.children[0], out);
-		} else if (any_back && !any_front) {
-			clip_cell_hull1(cell, node.children[1], out);
-		} else {
-			ConvexCell front_cell = cell, back_cell = cell;
-			HullPlane split = {};
-			split.normal[0] = plane.normal[0]; split.normal[1] = plane.normal[1]; split.normal[2] = plane.normal[2];
-			split.dist = plane.dist; split.from_hull1 = false;
-			HullPlane neg_split = {};
-			neg_split.normal[0] = -plane.normal[0]; neg_split.normal[1] = -plane.normal[1]; neg_split.normal[2] = -plane.normal[2];
-			neg_split.dist = -plane.dist; neg_split.from_hull1 = false;
-			front_cell.planes.push_back(neg_split);
-			back_cell.planes.push_back(split);
-			clip_cell_hull1(front_cell, node.children[0], out);
-			clip_cell_hull1(back_cell, node.children[1], out);
-		}
-	};
-
-	// Helpers used by steps 4 and 5
 	auto vert_near_wall = [&](const float v[3]) -> bool {
 		for (int sx = -1; sx <= 1; sx += 2) {
 			for (int sy = -1; sy <= 1; sy += 2) {
@@ -251,29 +280,21 @@ int main(int argc, char **argv) {
 		return false;
 	};
 
-
-	// Step 4: Filter — h0 EMPTY + h1/ring combined check
+	// Step 4: Filter - h0 EMPTY + h1/ring combined check
 	printf("\n--- Step 4: Vertex filter (h0 EMPTY + h1 SOLID) ---\n");
 	auto t4 = chrono::steady_clock::now();
 
-	// Use a tolerance when checking hull 1: vertices barely outside expanded
-	// bounds (precision/BSP-splitting artifacts) are OK; vertices far outside
-	// indicate growth artifacts.
 	vector<ConvexCell> result_cells;
 	size_t degenerate = 0, h0_filtered = 0, h1_filtered = 0, h1_rescued = 0;
 	for (auto &cell : clipped_cells) {
 		auto verts = compute_cell_vertices(cell.planes, EPSILON);
 		if (verts.size() < 4) { degenerate++; continue; }
-		// Compute centroid
 		float cx = 0, cy = 0, cz = 0;
 		for (const auto &v : verts) { cx += v.gs[0]; cy += v.gs[1]; cz += v.gs[2]; }
 		cx /= verts.size(); cy /= verts.size(); cz /= verts.size();
 
-		// h0 filter: per-vertex with centroid rescue.
-		// Per-vertex catches cells with vertices barely inside h0 solid (boundary
-		// precision from triple-plane intersection). Centroid rescue handles
-		// valid cells where hull 0 clip left a vertex on the h0 boundary.
 		float cpt[3] = {cx, cy, cz};
+		if (cx > -1200 && cx < -800 && cy > -700 && cy < -400 && cz > 200 && cz < 900) { float tmn[3]={1e9,1e9,1e9},tmx[3]={-1e9,-1e9,-1e9}; for(const auto &v:verts){for(int a=0;a<3;a++){if(v.gs[a]<tmn[a])tmn[a]=v.gs[a];if(v.gs[a]>tmx[a])tmx[a]=v.gs[a];}} printf("  TRACE cell: cpt=(%.1f,%.1f,%.1f) %zu verts dim=%.0fx%.0fx%.0f AABB=(%.0f,%.0f,%.0f)-(%.0f,%.0f,%.0f)\n", cx,cy,cz, verts.size(), tmx[0]-tmn[0],tmx[1]-tmn[1],tmx[2]-tmn[2], tmn[0],tmn[1],tmn[2],tmx[0],tmx[1],tmx[2]); }
 		bool any_h0_solid = false;
 		for (const auto &v : verts) {
 			float nudged[3] = {v.gs[0], v.gs[1], v.gs[2]};
@@ -291,61 +312,88 @@ int main(int argc, char **argv) {
 			int h0_cent = classify_hull0_tree(
 				bsp.nodes, bsp.leafs, bsp.planes, hull0_root, cpt);
 			if (h0_cent == goldsrc::CONTENTS_SOLID) { h0_filtered++; continue; }
-			// Centroid is h0 empty — vertex was on boundary, cell is valid
 		}
 
 		bool any_h1_empty = false;
 		bool has_clip_indicator = false;
+		int nw_count = 0;
 		for (const auto &v : verts) {
 			int h1c = classify_h1(v.gs);
+			bool nw = vert_near_wall(v.gs);
+			if (nw) nw_count++;
 			if (h1c != goldsrc::CONTENTS_SOLID) {
 				any_h1_empty = true;
-			} else if (!has_clip_indicator && !vert_near_wall(v.gs)) {
+			} else if (!has_clip_indicator && !nw) {
 				has_clip_indicator = true;
 			}
 		}
+
+		// Compute cell dimensions (used by multiple filter paths)
+		float mn[3]={1e9,1e9,1e9}, mx[3]={-1e9,-1e9,-1e9};
+		for (const auto &v : verts) { for(int a=0;a<3;a++){if(v.gs[a]<mn[a])mn[a]=v.gs[a]; if(v.gs[a]>mx[a])mx[a]=v.gs[a];}}
+		float dim[3] = {mx[0]-mn[0], mx[1]-mn[1], mx[2]-mn[2]};
+		float min_dim = fminf(dim[0], fminf(dim[1], dim[2]));
+		float max_he = fmaxf(he[0], fmaxf(he[1], he[2]));
+		bool big_per_axis = (dim[0] >= 2.0f*he[0]) &&
+		                    (dim[1] >= 2.0f*he[1]) &&
+		                    (dim[2] >= 2.0f*he[2]);
+		bool big_global = min_dim >= 2.0f * max_he;
+		bool big_per_he = (dim[0] >= he[0]) && (dim[1] >= he[1]) && (dim[2] >= he[2]);
+
 		if (any_h1_empty && !has_clip_indicator) {
-			// Primary rescue: centroid is h1 SOLID (exact) and not near wall.
+			// No clip indicator: cell needs rescue via centroid h1 check + size gate
 			int ch1 = classify_h1(cpt);
 			if (ch1 == goldsrc::CONTENTS_SOLID && !vert_near_wall(cpt)) {
-				// Size check: expansion ring slivers are thin.
-				float mn[3]={1e9,1e9,1e9}, mx[3]={-1e9,-1e9,-1e9};
-				for (const auto &v : verts) { for(int a=0;a<3;a++){if(v.gs[a]<mn[a])mn[a]=v.gs[a]; if(v.gs[a]>mx[a])mx[a]=v.gs[a];}}
-				float min_dim = fminf(mx[0]-mn[0], fminf(mx[1]-mn[1], mx[2]-mn[2]));
-				float max_he = fmaxf(he[0], fmaxf(he[1], he[2]));
-				if (min_dim >= 2.0f * max_he) {
-					result_cells.push_back(std::move(cell));
-					h1_rescued++;
+				if (big_per_he) {
+					// No clip indicator: require centroid h0 not solid
+					int ch0 = classify_hull0_tree(
+						bsp.nodes, bsp.leafs, bsp.planes, hull0_root, cpt);
+					if (ch0 != goldsrc::CONTENTS_SOLID) {
+						result_cells.push_back(std::move(cell));
+						h1_rescued++;
+					} else {
+						h1_filtered++;
+					}
 				} else {
 					h1_filtered++;
 				}
 			} else {
-				// Secondary rescue: centroid is h1 SOLID within 8-unit tolerance
-				// AND cell is large (min dimension >= 2*max_hull_extent).
-				// Expansion ring slivers are thin (< hull extent), while real
-				// clip brushes (e.g. ceiling clips) are thick in all directions.
 				bool rescued = false;
 				if (ch1 != goldsrc::CONTENTS_SOLID) {
-				int ch1_tol = classify_h1(cpt, 8.0f);
-				if (ch1_tol == goldsrc::CONTENTS_SOLID) {
-					float mn[3]={1e9,1e9,1e9}, mx[3]={-1e9,-1e9,-1e9};
-					for (const auto &v : verts) { for(int a=0;a<3;a++){if(v.gs[a]<mn[a])mn[a]=v.gs[a]; if(v.gs[a]>mx[a])mx[a]=v.gs[a];}}
-					float min_dim = fminf(mx[0]-mn[0], fminf(mx[1]-mn[1], mx[2]-mn[2]));
-					float max_he = fmaxf(he[0], fmaxf(he[1], he[2]));
-					if (min_dim >= 2.0f * max_he) {
+					int ch1_tol = classify_h1(cpt, 8.0f);
+					if (ch1_tol == goldsrc::CONTENTS_SOLID && big_global) {
 						result_cells.push_back(std::move(cell));
-		
 						h1_rescued++;
 						rescued = true;
 					}
 				}
-				} // ch1 != SOLID
 				if (!rescued) h1_filtered++;
 			}
 			continue;
 		}
-		result_cells.push_back(std::move(cell));
 
+		// Cell has clip indicator (or all verts h1 SOLID).
+		// Per-axis size gates:
+		// 1) Any dim < he[i]: physically impossible as un-expanded brush. Always filter.
+		// 2) Any dim < 2*he[i] with weak evidence: likely expansion artifact.
+		bool impossibly_thin = verts.size() >= 6 && ((dim[0] < he[0]) || (dim[1] < he[1]) || (dim[2] < he[2]));
+		if (impossibly_thin) { h1_filtered++; continue; }
+		if (!big_per_he) {
+			int cent_h1 = classify_h1(cpt);
+			if (any_h1_empty || cent_h1 != goldsrc::CONTENTS_SOLID) {
+				h1_filtered++;
+				continue;
+			}
+		} else if (!big_per_axis) {
+			// Between he and 2*he on some axis: need centroid h1 SOLID
+			int cent_h1 = classify_h1(cpt);
+			if (any_h1_empty && cent_h1 != goldsrc::CONTENTS_SOLID) {
+				h1_filtered++;
+				continue;
+			}
+		}
+
+		result_cells.push_back(std::move(cell));
 	}
 
 	auto t5 = chrono::steady_clock::now();
@@ -353,110 +401,108 @@ int main(int argc, char **argv) {
 		clipped_cells.size(), result_cells.size(), degenerate, h0_filtered, h1_filtered, h1_rescued,
 		(long long)chrono::duration_cast<chrono::milliseconds>(t5 - t4).count());
 
-	// Step 5: Expansion ring filter — remove cells where ALL vertices are
-	// within hull expansion distance of hull 0 solid (i.e., every vertex's
-	// player AABB touches hull 0 solid). These are expansion ring slivers,
-	// not real clip brushes.
+	// Step 5: Expansion ring filter
 	printf("\n--- Step 5: Expansion ring filter ---\n");
 	auto t6 = chrono::steady_clock::now();
 
-	vector<ConvexCell> final_cells;
 	size_t ring_filtered = 0;
 	for (auto &cell : result_cells) {
 		auto verts = compute_cell_vertices(cell.planes, EPSILON);
 		if (verts.size() < 4) continue;
 		bool all_near_wall = true;
+		int nw_count = 0;
 		for (const auto &v : verts) {
-			if (!vert_near_wall(v.gs)) { all_near_wall = false; break; }
+			if (vert_near_wall(v.gs)) nw_count++; else all_near_wall = false;
 		}
 		if (all_near_wall) { ring_filtered++; continue; }
-		final_cells.push_back(std::move(cell));
+		// Additional: small cells (fail per-axis) with majority near-wall verts
+		float rn[3]={1e9,1e9,1e9}, rx[3]={-1e9,-1e9,-1e9};
+		for (const auto &v : verts) { for(int a=0;a<3;a++){if(v.gs[a]<rn[a])rn[a]=v.gs[a]; if(v.gs[a]>rx[a])rx[a]=v.gs[a];}}
+		float rdim[3] = {rx[0]-rn[0], rx[1]-rn[1], rx[2]-rn[2]};
+		bool r_big = (rdim[0] >= 2.0f*he[0]) && (rdim[1] >= 2.0f*he[1]) && (rdim[2] >= 2.0f*he[2]);
+		// Centroid near wall = expansion ring artifact (regardless of size)
+		float rcpt[3];
+		rcpt[0]=rcpt[1]=rcpt[2]=0;
+		for (const auto &v : verts) { rcpt[0]+=v.gs[0]; rcpt[1]+=v.gs[1]; rcpt[2]+=v.gs[2]; }
+		rcpt[0]/=verts.size(); rcpt[1]/=verts.size(); rcpt[2]/=verts.size();
+		if (vert_near_wall(rcpt)) { ring_filtered++; continue; }
+		// Small cells with majority near-wall verts
+		if (!r_big && nw_count > (int)verts.size()/2) { ring_filtered++; continue; }
+		// Expansion ring tube: 2+ dims at expansion width with majority near-wall
+		int narrow_axes = 0;
+		for (int a = 0; a < 3; a++) { if (rdim[a] <= 2.0f * he[a] + 0.5f) narrow_axes++; }
+		if (narrow_axes >= 2 && nw_count > (int)verts.size()/2) { ring_filtered++; continue; }
+				result.final_cells.push_back(std::move(cell));
 	}
 
 	auto t7 = chrono::steady_clock::now();
 	printf("After expansion ring filter: %zu -> %zu (removed: %zu)  (%lldms)\n",
-		result_cells.size(), final_cells.size(), ring_filtered,
+		result_cells.size(), result.final_cells.size(), ring_filtered,
 		(long long)chrono::duration_cast<chrono::milliseconds>(t7 - t6).count());
 
-	// --- AABB collision tests ---
-	struct TestPoint {
-		float gs[3];
-		const char *label;
-		bool should_be_inside;
+	return result;
+}
+
+// --- Run tests for a single map ---
+static void run_tests(const PipelineResult &pipeline, const goldsrc::BSPData &bsp,
+	const TestPoint *points, size_t num_points, const char *map_name,
+	int &total_pass, int &total_fail) {
+
+	const float EPSILON = 0.1f;
+	float he[3] = {16, 16, 36};
+
+	const auto &bmodel = bsp.models[0];
+	int hull0_root = bmodel.headnode[0];
+	int root = bmodel.headnode[1];
+
+	auto aabb_overlaps_cell = [&](const float center[3], const float half_ext[3],
+		const ConvexCell &cell, float eps) -> bool {
+		for (const auto &hp : cell.planes) {
+			float support = fabsf(hp.normal[0]) * half_ext[0]
+			              + fabsf(hp.normal[1]) * half_ext[1]
+			              + fabsf(hp.normal[2]) * half_ext[2];
+			float dot = hp.normal[0] * center[0] + hp.normal[1] * center[1] + hp.normal[2] * center[2];
+			if (dot > hp.dist + support + eps) return false;
+		}
+		return true;
 	};
 
-	TestPoint test_points[] = {
-		// Clip brush test point — AABB must overlap a cell
-		{{1198.0f, -2468.0f, 20.0f}, "clip_brush", true},
-		// Player-reported artifact cells that should not exist
-		{{1046.5f, 109.9f, 191.2f}, "artifact_1", false},
-		{{-1790.0f, 490.0f, 290.7f}, "artifact_2", false},
-		{{-1828.0f, 490.0f, 58.6f}, "artifact_3", false},
-		{{-1289.0f, 336.7f, 25.8f}, "artifact_4", false},
-		// Player-reported missing clip hulls
-		{{-890.7f, 724.0f, 766.6f}, "missing_1", true},
-		{{-488.3f, 742.0f, 811.6f}, "missing_2", true},
-		{{1690.0f, -1628.4f, 158.7f}, "missing_3", true},
-		{{449.2f, 464.5f, 845.8f}, "missing_4", true},
-		{{1769.4f, -1505.4f, 335.0f}, "missing_5", true},
-		{{-1708.2f, -2407.1f, 291.5f}, "missing_6", true},
-		{{1129.9f, -2504.3f, 246.1f}, "missing_7", true},
-		{{-1821.0f, -2339.2f, 127.1f}, "missing_8", true},
-		// Player-reported new artifacts (from hull 1 clip)
-		{{479.9f, 464.0f, 384.4f}, "artifact_5", false},
-		{{1803.5f, 464.0f, 335.7f}, "artifact_6", false},
-		// New missing points
-		{{1541.1f, 486.1f, 844.4f}, "missing_9", true},
-		{{1639.3f, -984.8f, 844.1f}, "missing_10", true},
-		{{1829.8f, -3616.8f, 140.2f}, "missing_11", true},
-		// New artifact
-		{{-1872.0f, 455.1f, 478.8f}, "artifact_7", false},
-		// New missing points (batch 3)
-		{{1621.4f, -1808.9f, 215.9f}, "missing_12", true},
-		{{1198.4f, -2474.9f, 174.8f}, "missing_13", true},
-		{{-1741.2f, -2386.1f, 243.1f}, "missing_14", true},
-		// All info_player_start / info_player_teamspawn entities
-		{{529.0f, -2490.0f, 152.0f}, "info_player_start", false},
-		{{-1872.0f, 624.0f, 736.0f}, "teamspawn_1", false},
-		{{-528.0f, 624.0f, 736.0f}, "teamspawn_2", false},
-		{{464.0f, 624.0f, 736.0f}, "teamspawn_3", false},
-		{{1808.0f, 624.0f, 736.0f}, "teamspawn_4", false},
-		{{1040.0f, -1920.0f, 48.0f}, "teamspawn_5", false},
-		{{1192.0f, -1920.0f, 48.0f}, "teamspawn_6", false},
-		{{1112.0f, -2008.0f, 52.0f}, "teamspawn_7", false},
-		{{-160.0f, 736.0f, 64.0f}, "teamspawn_8", false},
-		{{-224.0f, 736.0f, 64.0f}, "teamspawn_9", false},
-		{{-288.0f, 736.0f, 64.0f}, "teamspawn_10", false},
-		{{-160.0f, 656.0f, 64.0f}, "teamspawn_11", false},
-		{{-224.0f, 656.0f, 64.0f}, "teamspawn_12", false},
-		{{-288.0f, 656.0f, 64.0f}, "teamspawn_13", false},
-		{{-288.0f, 576.0f, 64.0f}, "teamspawn_14", false},
-		{{-160.0f, 576.0f, 64.0f}, "teamspawn_15", false},
-		{{-224.0f, 576.0f, 64.0f}, "teamspawn_16", false},
-		{{96.0f, 736.0f, 64.0f}, "teamspawn_17", false},
-		{{160.0f, 736.0f, 64.0f}, "teamspawn_18", false},
-		{{224.0f, 736.0f, 64.0f}, "teamspawn_19", false},
-		{{160.0f, 656.0f, 64.0f}, "teamspawn_20", false},
-		{{224.0f, 656.0f, 64.0f}, "teamspawn_21", false},
-		{{96.0f, 656.0f, 64.0f}, "teamspawn_22", false},
-		{{224.0f, 576.0f, 64.0f}, "teamspawn_23", false},
-		{{160.0f, 576.0f, 64.0f}, "teamspawn_24", false},
-		{{96.0f, 576.0f, 64.0f}, "teamspawn_25", false},
-		{{-1352.0f, -1928.0f, 48.0f}, "teamspawn_26", false},
-		{{-1456.0f, -1928.0f, 52.0f}, "teamspawn_27", false},
-		{{-1400.0f, -1928.0f, 216.0f}, "teamspawn_28", false},
+	auto classify_h1 = [&](const float p[3], float tolerance = 0.0f) -> int {
+		int idx = root;
+		while (idx >= 0) {
+			if ((size_t)idx >= bsp.clipnodes.size()) return 0;
+			const auto &node = bsp.clipnodes[idx];
+			if (node.planenum < 0 || (size_t)node.planenum >= bsp.planes.size()) return 0;
+			const auto &plane = bsp.planes[node.planenum];
+			float dot = plane.normal[0]*p[0] + plane.normal[1]*p[1] + plane.normal[2]*p[2];
+			idx = (dot >= plane.dist - tolerance) ? node.children[0] : node.children[1];
+		}
+		return idx;
 	};
 
+	auto vert_near_wall = [&](const float v[3]) -> bool {
+		for (int sx = -1; sx <= 1; sx += 2) {
+			for (int sy = -1; sy <= 1; sy += 2) {
+				for (int sz = -1; sz <= 1; sz += 2) {
+					float p[3] = {v[0]+sx*he[0], v[1]+sy*he[1], v[2]+sz*he[2]};
+					int c = classify_hull0_tree(bsp.nodes, bsp.leafs, bsp.planes, hull0_root, p);
+					if (c == goldsrc::CONTENTS_SOLID) return true;
+				}
+			}
+		}
+		return false;
+	};
 
-	printf("\n=== COLLISION TESTS ===\n");
+	printf("\n=== COLLISION TESTS [%s] ===\n", map_name);
 	int pass = 0, fail = 0;
-	for (const auto &tp : test_points) {
+	for (size_t ti = 0; ti < num_points; ti++) {
+		const auto &tp = points[ti];
 		printf("\n%s  GS(%.0f, %.0f, %.0f):\n", tp.label, tp.gs[0], tp.gs[1], tp.gs[2]);
 
 		if (tp.should_be_inside) {
 			int overlaps = 0;
-			for (size_t i = 0; i < final_cells.size(); i++) {
-				if (aabb_overlaps_cell(tp.gs, he, final_cells[i], EPSILON))
+			for (size_t i = 0; i < pipeline.final_cells.size(); i++) {
+				if (aabb_overlaps_cell(tp.gs, he, pipeline.final_cells[i], EPSILON))
 					overlaps++;
 			}
 			bool ok = overlaps > 0;
@@ -464,9 +510,35 @@ int main(int argc, char **argv) {
 			if (ok) pass++; else fail++;
 		} else {
 			int overlaps = 0;
-			for (size_t i = 0; i < final_cells.size(); i++) {
-				if (aabb_overlaps_cell(tp.gs, he, final_cells[i], EPSILON))
+			for (size_t i = 0; i < pipeline.final_cells.size(); i++) {
+				if (aabb_overlaps_cell(tp.gs, he, pipeline.final_cells[i], EPSILON)) {
 					overlaps++;
+					auto cverts = compute_cell_vertices(pipeline.final_cells[i].planes, EPSILON);
+					float cmn[3]={1e9,1e9,1e9}, cmx[3]={-1e9,-1e9,-1e9};
+					for (const auto &v : cverts) {
+						for(int a=0;a<3;a++){if(v.gs[a]<cmn[a])cmn[a]=v.gs[a]; if(v.gs[a]>cmx[a])cmx[a]=v.gs[a];}
+					}
+					printf("  -> artifact overlap cell %zu: AABB=(%.0f,%.0f,%.0f)-(%.0f,%.0f,%.0f) dims=%.0fx%.0fx%.0f\n",
+						i, cmn[0],cmn[1],cmn[2], cmx[0],cmx[1],cmx[2],
+						cmx[0]-cmn[0], cmx[1]-cmn[1], cmx[2]-cmn[2]);
+					// Diagnostic: why did this cell survive?
+					float ccx=0,ccy=0,ccz=0;
+					for (const auto &v : cverts) { ccx+=v.gs[0]; ccy+=v.gs[1]; ccz+=v.gs[2]; }
+					ccx/=cverts.size(); ccy/=cverts.size(); ccz/=cverts.size();
+					float ccp[3]={ccx,ccy,ccz};
+					int dch1_0 = classify_h1(ccp, 0);
+					bool dany_h1e=false, dhas_clip=false;
+					int dnw_cnt=0;
+					for (const auto &v : cverts) {
+						int h1c = classify_h1(v.gs);
+						if (h1c != goldsrc::CONTENTS_SOLID) dany_h1e=true;
+						if (h1c == goldsrc::CONTENTS_SOLID && !vert_near_wall(v.gs)) dhas_clip=true;
+						if (vert_near_wall(v.gs)) dnw_cnt++;
+					}
+					bool cent_nw = vert_near_wall(ccp);
+					printf("       centroid=(%.1f,%.1f,%.1f) h1=%d any_h1e=%d clip_ind=%d near=%d/%zu cent_nw=%d\n",
+						ccx,ccy,ccz, dch1_0, dany_h1e, dhas_clip, dnw_cnt, cverts.size(), cent_nw);
+				}
 			}
 			bool ok = overlaps == 0;
 			if (overlaps > 0)
@@ -476,13 +548,15 @@ int main(int argc, char **argv) {
 			if (ok) pass++; else fail++;
 		}
 	}
-	printf("\n=== RESULTS: %d PASS, %d FAIL ===\n", pass, fail);
-	printf("Total result cells: %zu\n", final_cells.size());
+	printf("\n=== [%s] %d PASS, %d FAIL ===\n", map_name, pass, fail);
+	printf("Total result cells: %zu\n", pipeline.final_cells.size());
+	total_pass += pass;
+	total_fail += fail;
 
-
-	// Diagnostics for missing_ points — trace which step kills the cell
-	printf("\n=== DIAGNOSTICS ===\n");
-	for (const auto &tp : test_points) {
+	// Diagnostics for missing_ points
+	printf("\n=== DIAGNOSTICS [%s] ===\n", map_name);
+	for (size_t ti = 0; ti < num_points; ti++) {
+		const auto &tp = points[ti];
 		if (strncmp(tp.label, "missing_", 8) != 0) continue;
 		printf("\n%s  GS(%.1f, %.1f, %.1f):\n", tp.label, tp.gs[0], tp.gs[1], tp.gs[2]);
 
@@ -491,28 +565,25 @@ int main(int argc, char **argv) {
 			bsp.nodes, bsp.leafs, bsp.planes, hull0_root, tp.gs);
 		printf("  hull1_expanded=%d  hull0=%d\n", h1_exp, h0);
 
-		// Count overlaps at each pipeline step
 		int s1_count = 0, s2_count = 0;
-		for (size_t ci = 0; ci < solid_cells.size(); ci++)
-			if (aabb_overlaps_cell(tp.gs, he, solid_cells[ci], EPSILON)) s1_count++;
-		for (size_t ci = 0; ci < unexpanded_cells.size(); ci++)
-			if (aabb_overlaps_cell(tp.gs, he, unexpanded_cells[ci], EPSILON)) s2_count++;
+		for (size_t ci = 0; ci < pipeline.solid_cells.size(); ci++)
+			if (aabb_overlaps_cell(tp.gs, he, pipeline.solid_cells[ci], EPSILON)) s1_count++;
+		for (size_t ci = 0; ci < pipeline.unexpanded_cells.size(); ci++)
+			if (aabb_overlaps_cell(tp.gs, he, pipeline.unexpanded_cells[ci], EPSILON)) s2_count++;
 		printf("  step1 (expanded): %d  step2 (unexpanded): %d\n", s1_count, s2_count);
 
-		// If present in step1 but not step2, trace the expanded cell's un-expansion
 		if (s1_count > 0 && s2_count == 0) {
-			for (size_t ci = 0; ci < solid_cells.size(); ci++) {
-				if (!aabb_overlaps_cell(tp.gs, he, solid_cells[ci], EPSILON)) continue;
-				auto ev = compute_cell_vertices(solid_cells[ci].planes, EPSILON);
-				float mn[3]={1e9,1e9,1e9}, mx[3]={-1e9,-1e9,-1e9};
+			for (size_t ci = 0; ci < pipeline.solid_cells.size(); ci++) {
+				if (!aabb_overlaps_cell(tp.gs, he, pipeline.solid_cells[ci], EPSILON)) continue;
+				auto ev = compute_cell_vertices(pipeline.solid_cells[ci].planes, EPSILON);
+				float emn[3]={1e9,1e9,1e9}, emx[3]={-1e9,-1e9,-1e9};
 				for (const auto &v : ev) {
-					for (int a=0;a<3;a++) { if(v.gs[a]<mn[a])mn[a]=v.gs[a]; if(v.gs[a]>mx[a])mx[a]=v.gs[a]; }
+					for (int a=0;a<3;a++) { if(v.gs[a]<emn[a])emn[a]=v.gs[a]; if(v.gs[a]>emx[a])emx[a]=v.gs[a]; }
 				}
 				printf("  expanded_cell%zu: %zu verts, AABB=(%.0f,%.0f,%.0f)-(%.0f,%.0f,%.0f)\n",
-					ci, ev.size(), mn[0],mn[1],mn[2], mx[0],mx[1],mx[2]);
-				// Un-expand and check
+					ci, ev.size(), emn[0],emn[1],emn[2], emx[0],emx[1],emx[2]);
 				ConvexCell ue;
-				for (const auto &hp : solid_cells[ci].planes) {
+				for (const auto &hp : pipeline.solid_cells[ci].planes) {
 					HullPlane p = hp;
 					if (p.from_hull1) {
 						float support = fabsf(p.normal[0])*he[0]+fabsf(p.normal[1])*he[1]+fabsf(p.normal[2])*he[2];
@@ -523,10 +594,6 @@ int main(int argc, char **argv) {
 				auto uv = compute_cell_vertices(ue.planes, EPSILON);
 				if (uv.size() < 4) {
 					printf("    -> un-expanded: DEGENERATE (%zu verts)\n", uv.size());
-					printf("    planes: %zu (hull1: ", ue.planes.size());
-					int h1_count = 0;
-					for (const auto &p : ue.planes) if (p.from_hull1) h1_count++;
-					printf("%d)\n", h1_count);
 				} else {
 					float umn[3]={1e9,1e9,1e9}, umx[3]={-1e9,-1e9,-1e9};
 					for (const auto &v : uv) {
@@ -538,24 +605,21 @@ int main(int argc, char **argv) {
 			}
 		}
 
-		// Find the unexpanded cell(s) containing this point and trace their fate
-		for (size_t ci = 0; ci < unexpanded_cells.size(); ci++) {
-			if (!aabb_overlaps_cell(tp.gs, he, unexpanded_cells[ci], EPSILON)) continue;
-
-			auto verts = goldsrc_hull::compute_cell_vertices(unexpanded_cells[ci].planes, EPSILON);
-			float mn[3] = {1e9,1e9,1e9}, mx[3] = {-1e9,-1e9,-1e9};
+		for (size_t ci = 0; ci < pipeline.unexpanded_cells.size(); ci++) {
+			if (!aabb_overlaps_cell(tp.gs, he, pipeline.unexpanded_cells[ci], EPSILON)) continue;
+			auto verts = goldsrc_hull::compute_cell_vertices(pipeline.unexpanded_cells[ci].planes, EPSILON);
+			float fmn[3] = {1e9,1e9,1e9}, fmx[3] = {-1e9,-1e9,-1e9};
 			for (const auto &v : verts) {
 				for (int a = 0; a < 3; a++) {
-					if (v.gs[a] < mn[a]) mn[a] = v.gs[a];
-					if (v.gs[a] > mx[a]) mx[a] = v.gs[a];
+					if (v.gs[a] < fmn[a]) fmn[a] = v.gs[a];
+					if (v.gs[a] > fmx[a]) fmx[a] = v.gs[a];
 				}
 			}
 			printf("  unexpanded_cell%zu: %zu verts, dims=%.1f x %.1f x %.1f\n",
-				ci, verts.size(), mx[0]-mn[0], mx[1]-mn[1], mx[2]-mn[2]);
+				ci, verts.size(), fmx[0]-fmn[0], fmx[1]-fmn[1], fmx[2]-fmn[2]);
 
-			// Clip this cell against hull 0 and trace what happens
 			vector<ConvexCell> fragments;
-			goldsrc_hull::clip_cell_by_hull0(unexpanded_cells[ci],
+			goldsrc_hull::clip_cell_by_hull0(pipeline.unexpanded_cells[ci],
 				bsp.nodes, bsp.leafs, bsp.planes, hull0_root, EPSILON, fragments);
 			printf("    hull0 clip -> %zu fragments\n", fragments.size());
 
@@ -564,8 +628,6 @@ int main(int argc, char **argv) {
 				if (!aabb_overlaps_cell(tp.gs, he, fragments[fi], EPSILON)) continue;
 				frag_overlap++;
 				auto fv = goldsrc_hull::compute_cell_vertices(fragments[fi].planes, EPSILON);
-
-				// Step 4 checks: h0 EMPTY + h1 SOLID for all vertices
 				bool any_h0_solid = false, any_h1_empty = false;
 				int near_wall_count = 0;
 				for (const auto &v : fv) {
@@ -576,30 +638,78 @@ int main(int argc, char **argv) {
 					if (h1c != goldsrc::CONTENTS_SOLID) any_h1_empty = true;
 					if (vert_near_wall(v.gs)) near_wall_count++;
 				}
+				float fcx=0,fcy=0,fcz=0;
+				for (const auto &v : fv) { fcx+=v.gs[0]; fcy+=v.gs[1]; fcz+=v.gs[2]; }
+				fcx/=fv.size(); fcy/=fv.size(); fcz/=fv.size();
+				float fcpt[3]={fcx,fcy,fcz};
+				bool fcnw = vert_near_wall(fcpt);
+				int fc_h1 = classify_h1(fcpt);
 				const char *fate = "SURVIVES";
 				if (fv.size() < 4) fate = "killed:degenerate";
 				else if (any_h0_solid) fate = "killed:h0_solid_vert";
 				else if (any_h1_empty) fate = "killed:h1_empty_vert";
 				else if (near_wall_count == (int)fv.size()) fate = "killed:ring_filter";
-				printf("    frag%zu: %zu verts, h0s=%d h1e=%d near=%d/%zu -> %s\n",
-					fi, fv.size(), any_h0_solid, any_h1_empty,
-					near_wall_count, fv.size(), fate);
-				// Print each vertex's h1 classification at various tolerances
-				for (size_t vi = 0; vi < fv.size(); vi++) {
-					int h1_0 = classify_h1(fv[vi].gs, 0);
-					int h1_4 = classify_h1(fv[vi].gs, 4);
-					int h1_8 = classify_h1(fv[vi].gs, 8);
-					int h1_16 = classify_h1(fv[vi].gs, 16);
-					bool nw = vert_near_wall(fv[vi].gs);
-					printf("      v%zu (%.1f,%.1f,%.1f): h1[0]=%d h1[4]=%d h1[8]=%d h1[16]=%d near=%d\n",
-						vi, fv[vi].gs[0], fv[vi].gs[1], fv[vi].gs[2],
-						h1_0, h1_4, h1_8, h1_16, nw);
-				}
+				float fn[3]={1e9f,1e9f,1e9f},fx[3]={-1e9f,-1e9f,-1e9f};
+				for(const auto&v:fv){for(int a=0;a<3;a++){if(v.gs[a]<fn[a])fn[a]=v.gs[a];if(v.gs[a]>fx[a])fx[a]=v.gs[a];}}
+				float fd[3]={fx[0]-fn[0],fx[1]-fn[1],fx[2]-fn[2]};
+				printf("    frag%zu: %zu verts, dims=%.0fx%.0fx%.0f h0s=%d h1e=%d near=%d/%zu cent_nw=%d ch1=%d -> %s\n",
+					fi, fv.size(), fd[0],fd[1],fd[2], any_h0_solid, any_h1_empty,
+					near_wall_count, fv.size(), fcnw, fc_h1, fate);
 			}
 			printf("    overlapping fragments: %d\n", frag_overlap);
 		}
 	}
-
-	printf("\nDone.\n");
-	return 0;
 }
+
+// --- Main ---
+int main(int argc, char **argv) {
+	int total_pass = 0, total_fail = 0;
+
+	for (const auto &map : all_maps) {
+		printf("\n########################################\n");
+		printf("# MAP: %s\n", map.map_name);
+		printf("########################################\n");
+
+		string bsp_path;
+		if (argc >= 2) {
+			bsp_path = string(argv[1]) + "/" + map.map_name + ".bsp";
+		} else {
+			bsp_path = map.bsp_relative_path;
+		}
+
+		FILE *f = fopen(bsp_path.c_str(), "rb");
+		if (!f) {
+			printf("Cannot open %s - SKIPPING\n", bsp_path.c_str());
+			continue;
+		}
+		fseek(f, 0, SEEK_END);
+		size_t sz = ftell(f);
+		fseek(f, 0, SEEK_SET);
+		vector<uint8_t> buf(sz);
+		fread(buf.data(), 1, sz, f);
+		fclose(f);
+
+		goldsrc::BSPParser parser;
+		if (!parser.parse(buf.data(), sz)) {
+			fprintf(stderr, "Failed to parse %s\n", bsp_path.c_str());
+			continue;
+		}
+
+		const auto &bsp = parser.get_data();
+		if (bsp.models.empty()) {
+			fprintf(stderr, "No models in %s\n", bsp_path.c_str());
+			continue;
+		}
+
+		auto pipeline = run_pipeline(bsp, map.map_name);
+		run_tests(pipeline, bsp, map.points, map.num_points, map.map_name,
+			total_pass, total_fail);
+	}
+
+	printf("\n========================================\n");
+	printf("=== GRAND TOTAL: %d PASS, %d FAIL ===\n", total_pass, total_fail);
+	printf("========================================\n");
+
+	return total_fail > 0 ? 1 : 0;
+}
+

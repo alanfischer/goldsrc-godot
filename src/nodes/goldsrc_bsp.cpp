@@ -1370,34 +1370,57 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 				has_clip_indicator = true;
 			}
 		}
+		// Compute cell dimensions (used by multiple filter paths)
+		float mn[3]={1e9f,1e9f,1e9f}, mx[3]={-1e9f,-1e9f,-1e9f};
+		for (const auto &v : verts) {
+			for(int a=0;a<3;a++){if(v.gs[a]<mn[a])mn[a]=v.gs[a]; if(v.gs[a]>mx[a])mx[a]=v.gs[a];}
+		}
+		float dim[3] = {mx[0]-mn[0], mx[1]-mn[1], mx[2]-mn[2]};
+		float min_dim = fminf(dim[0], fminf(dim[1], dim[2]));
+		float max_he = fmaxf(he[0], fmaxf(he[1], he[2]));
+		bool big_per_axis = (dim[0] >= 2.0f*he[0]) &&
+		                    (dim[1] >= 2.0f*he[1]) &&
+		                    (dim[2] >= 2.0f*he[2]);
+		bool big_global = min_dim >= 2.0f * max_he;
+		bool big_per_he = (dim[0] >= he[0]) && (dim[1] >= he[1]) && (dim[2] >= he[2]);
+
 		if (any_h1_empty && !has_clip_indicator) {
-			// Both rescues require minimum cell size to reject thin
-			// expansion ring slivers.
-			float mn[3]={1e9f,1e9f,1e9f}, mx[3]={-1e9f,-1e9f,-1e9f};
-			for (const auto &v : verts) {
-				for(int a=0;a<3;a++){if(v.gs[a]<mn[a])mn[a]=v.gs[a]; if(v.gs[a]>mx[a])mx[a]=v.gs[a];}
-			}
-			float min_dim = fminf(mx[0]-mn[0], fminf(mx[1]-mn[1], mx[2]-mn[2]));
-			float max_he = fmaxf(he[0], fmaxf(he[1], he[2]));
-			// Primary rescue: centroid is h1 SOLID (exact), not near wall,
-			// and cell is large enough
+			// No clip indicator: rescue via centroid h1 + h0 + size gate
 			int ch1 = classify_h1(cpt);
-			if (ch1 == goldsrc::CONTENTS_SOLID && !vert_near_wall(cpt)
-					&& min_dim >= 2.0f * max_he) {
-				result_cells.push_back(std::move(cell));
+			if (ch1 == goldsrc::CONTENTS_SOLID && !vert_near_wall(cpt)) {
+				if (big_per_he) {
+					// Also require centroid h0 not solid
+					int ch0 = goldsrc_hull::classify_hull0_tree(
+						bsp_data.nodes, bsp_data.leafs,
+						bsp_data.planes, hull0_root, cpt);
+					if (ch0 != goldsrc::CONTENTS_SOLID) {
+						result_cells.push_back(std::move(cell));
+					}
+				}
 			} else {
-				// Secondary rescue: centroid h1 SOLID within 8-unit tolerance
-				// AND cell is large. Handles ceiling clip brushes where
-				// centroid barely straddles the h1 boundary.
 				if (ch1 != goldsrc::CONTENTS_SOLID) {
 					int ch1_tol = classify_h1(cpt, 8.0f);
-					if (ch1_tol == goldsrc::CONTENTS_SOLID
-							&& min_dim >= 2.0f * max_he) {
+					if (ch1_tol == goldsrc::CONTENTS_SOLID && big_global) {
 						result_cells.push_back(std::move(cell));
 					}
 				}
 			}
 			continue;
+		}
+		// Cell has clip indicator (or all verts h1 SOLID).
+		// Per-axis size gates:
+		// 1) Any dim < he[i] with enough verts: physically impossible un-expanded brush.
+		// 2) Tier 1 (< he[i]): always filter. Tier 2 (< 2*he[i]): need extra evidence.
+		bool impossibly_thin = verts.size() >= 6 &&
+			((dim[0] < he[0]) || (dim[1] < he[1]) || (dim[2] < he[2]));
+		if (impossibly_thin) continue;
+		if (!big_per_he) {
+			int cent_h1 = classify_h1(cpt);
+			if (any_h1_empty || cent_h1 != goldsrc::CONTENTS_SOLID) continue;
+		} else if (!big_per_axis) {
+			// Between he and 2*he on some axis: need centroid h1 SOLID
+			int cent_h1 = classify_h1(cpt);
+			if (any_h1_empty && cent_h1 != goldsrc::CONTENTS_SOLID) continue;
 		}
 		result_cells.push_back(std::move(cell));
 	}
@@ -1410,10 +1433,28 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 		auto verts = goldsrc_hull::compute_cell_vertices(cell.planes, EPSILON);
 		if (verts.size() < 4) continue;
 		bool all_near_wall = true;
+		int nw_count = 0;
 		for (const auto &v : verts) {
-			if (!vert_near_wall(v.gs)) { all_near_wall = false; break; }
+			if (vert_near_wall(v.gs)) nw_count++; else all_near_wall = false;
 		}
 		if (all_near_wall) continue;
+		// Additional: small cells (fail per-axis) with majority near-wall verts
+		float rn[3]={1e9f,1e9f,1e9f}, rx[3]={-1e9f,-1e9f,-1e9f};
+		for (const auto &v : verts) {
+			for(int a=0;a<3;a++){if(v.gs[a]<rn[a])rn[a]=v.gs[a]; if(v.gs[a]>rx[a])rx[a]=v.gs[a];}
+		}
+		float rdim[3] = {rx[0]-rn[0], rx[1]-rn[1], rx[2]-rn[2]};
+		bool r_big = (rdim[0] >= 2.0f*he[0]) && (rdim[1] >= 2.0f*he[1]) && (rdim[2] >= 2.0f*he[2]);
+		if (!r_big && nw_count > (int)verts.size()/2) continue;
+		// Expansion ring tube: 2+ dims at expansion width with majority near-wall
+		int narrow_axes = 0;
+		for (int a = 0; a < 3; a++) { if (rdim[a] <= 2.0f * he[a] + 0.5f) narrow_axes++; }
+		if (narrow_axes >= 2 && nw_count > (int)verts.size()/2) continue;
+		// Centroid near wall = expansion ring artifact (regardless of size)
+		float rcpt[3] = {0,0,0};
+		for (const auto &v : verts) { rcpt[0]+=v.gs[0]; rcpt[1]+=v.gs[1]; rcpt[2]+=v.gs[2]; }
+		rcpt[0]/=verts.size(); rcpt[1]/=verts.size(); rcpt[2]/=verts.size();
+		if (vert_near_wall(rcpt)) continue;
 		final_cells.push_back(std::move(cell));
 	}
 
