@@ -98,6 +98,8 @@ static const TestPoint ww_golem_points[] = {
 	{{-1352.0f, -1928.0f, 48.0f}, "teamspawn_26", false},
 	{{-1456.0f, -1928.0f, 52.0f}, "teamspawn_27", false},
 	{{-1400.0f, -1928.0f, 216.0f}, "teamspawn_28", false},
+	{{949.9f, -16.1f, 845.0f}, "missing_12", true},
+	{{-1670.6f, -2381.4f, 248.8f}, "missing_13", true},
 };
 
 // ww_hunt test points
@@ -135,6 +137,24 @@ static const TestPoint ww_2fort_points[] = {
 	{{-1103.9f, 1696.0f, -240.8f}, "artifact_3", false},
 	{{491.2f, 2985.6f, -402.0f}, "artifact_4", false},
 	{{-973.9f, 1699.4f, -227.5f}, "artifact_5", false},
+	{{1132.5f, -1646.6f, -144.1f}, "artifact_6", false},
+	{{955.9f, -1536.0f, -42.4f}, "artifact_7", false},
+};
+
+// ww_ravine2 test points
+static const TestPoint ww_ravine2_points[] = {
+	{{816.7f, 1905.8f, 541.6f}, "missing_1", true},
+	{{883.0f, 2170.3f, 541.0f}, "missing_2", true},
+	{{1074.1f, 1688.4f, 541.0f}, "missing_3", true},
+	{{499.0f, 1714.6f, 540.7f}, "missing_4", true},
+	{{1284.8f, 1715.6f, 540.4f}, "missing_5", true},
+	{{903.8f, -1889.1f, 540.0f}, "missing_6", true},
+};
+
+// castle_rush test points
+static const TestPoint castle_rush_points[] = {
+	{{484.0f, -2880.1f, -38.9f}, "missing_1", true},
+	{{376.0f, -1062.3f, 177.6f}, "missing_2", true},
 };
 
 static const MapTestData all_maps[] = {
@@ -144,6 +164,10 @@ static const MapTestData all_maps[] = {
 		sizeof(ww_hunt_points)/sizeof(ww_hunt_points[0])},
 	{"../../../res/maps/ww_2fort.bsp", "ww_2fort", ww_2fort_points,
 		sizeof(ww_2fort_points)/sizeof(ww_2fort_points[0])},
+	{"../../../res/maps/ww_ravine2.bsp", "ww_ravine2", ww_ravine2_points,
+		sizeof(ww_ravine2_points)/sizeof(ww_ravine2_points[0])},
+	{"../../../res/maps/castle_rush.bsp", "castle_rush", castle_rush_points,
+		sizeof(castle_rush_points)/sizeof(castle_rush_points[0])},
 };
 
 // --- Pipeline: run full clip brush extraction on a BSP ---
@@ -435,8 +459,14 @@ static PipelineResult run_pipeline(const goldsrc::BSPData &bsp, const char *map_
 				continue;
 			}
 		} else if (!big_per_axis) {
-			// Between he and 2*he on some axis: need centroid h1 SOLID
-			// and majority of verts h1 SOLID (half or more empty = artifact)
+			// Count axes where dim < 2*he (negative after un-expansion)
+			int sub_axes = 0;
+			for (int a = 0; a < 3; a++) { if (dim[a] < 2.0f * he[a]) sub_axes++; }
+			// 2+ sub-expansion axes with any h1 empty = expansion remnant
+			if (sub_axes >= 2 && any_h1_empty) {
+				h1_filtered++;
+				continue;
+			}
 			int cent_h1 = classify_h1(cpt);
 			if (cent_h1 != goldsrc::CONTENTS_SOLID ||
 				h1_empty_count >= (int)verts.size()/2) {
@@ -481,7 +511,18 @@ static PipelineResult run_pipeline(const goldsrc::BSPData &bsp, const char *map_
 			acpt[0]/=verts.size(); acpt[1]/=verts.size(); acpt[2]/=verts.size();
 			int ah1 = classify_h1(acpt);
 			if (ah1 != goldsrc::CONTENTS_SOLID || vert_near_wall(acpt)) {
-				ring_filtered++; continue;
+				// Second rescue: all verts h1 SOLID + centroid h0 non-solid + large cell
+				bool all_h1s_anw = true;
+				for (const auto &v : verts) {
+					if (classify_h1(v.gs) != goldsrc::CONTENTS_SOLID) { all_h1s_anw = false; break; }
+				}
+				int ch0_anw = classify_hull0_tree(bsp.nodes, bsp.leafs, bsp.planes, hull0_root, acpt);
+				float anw_mn[3]={1e9,1e9,1e9}, anw_mx[3]={-1e9,-1e9,-1e9};
+				for (const auto &v : verts) { for(int a=0;a<3;a++){if(v.gs[a]<anw_mn[a])anw_mn[a]=v.gs[a];if(v.gs[a]>anw_mx[a])anw_mx[a]=v.gs[a];} }
+				float anw_max_dim = fmaxf(anw_mx[0]-anw_mn[0], fmaxf(anw_mx[1]-anw_mn[1], anw_mx[2]-anw_mn[2]));
+				if (!(all_h1s_anw && ch0_anw != goldsrc::CONTENTS_SOLID && anw_max_dim >= 256.0f)) {
+					ring_filtered++; continue;
+				}
 			}
 		}
 		// Additional: small cells (fail per-axis) with majority near-wall verts
@@ -489,14 +530,45 @@ static PipelineResult run_pipeline(const goldsrc::BSPData &bsp, const char *map_
 		for (const auto &v : verts) { for(int a=0;a<3;a++){if(v.gs[a]<rn[a])rn[a]=v.gs[a]; if(v.gs[a]>rx[a])rx[a]=v.gs[a];}}
 		float rdim[3] = {rx[0]-rn[0], rx[1]-rn[1], rx[2]-rn[2]};
 		bool r_big = (rdim[0] >= 2.0f*he[0]) && (rdim[1] >= 2.0f*he[1]) && (rdim[2] >= 2.0f*he[2]);
-		// Centroid near wall = expansion ring artifact (regardless of size)
+		// Centroid near wall = expansion ring artifact
 		float rcpt[3];
 		rcpt[0]=rcpt[1]=rcpt[2]=0;
 		for (const auto &v : verts) { rcpt[0]+=v.gs[0]; rcpt[1]+=v.gs[1]; rcpt[2]+=v.gs[2]; }
 		rcpt[0]/=verts.size(); rcpt[1]/=verts.size(); rcpt[2]/=verts.size();
-		if (vert_near_wall(rcpt)) { ring_filtered++; continue; }
+		if (vert_near_wall(rcpt)) {
+			bool any_h0s = false, all_h1s = true;
+			for (const auto &v : verts) {
+				int vh0 = classify_hull0_tree(bsp.nodes, bsp.leafs, bsp.planes, hull0_root, v.gs);
+				if (vh0 == goldsrc::CONTENTS_SOLID) any_h0s = true;
+				if (classify_h1(v.gs) != goldsrc::CONTENTS_SOLID) { all_h1s = false; break; }
+			}
+			if (!all_h1s) { ring_filtered++; continue; }
+			if (any_h0s) {
+				// Second rescue: per-axis 4*he big + centroid h0 non-solid
+				bool big4 = (rdim[0] >= 4.0f*he[0]) && (rdim[1] >= 4.0f*he[1]) && (rdim[2] >= 4.0f*he[2]);
+				int ch0_cnw = classify_hull0_tree(bsp.nodes, bsp.leafs, bsp.planes, hull0_root, rcpt);
+				if (!(big4 && ch0_cnw != goldsrc::CONTENTS_SOLID)) {
+					ring_filtered++; continue;
+				}
+			}
+		}
 		// Small cells with majority near-wall verts
-		if (!r_big && nw_count > (int)verts.size()/2) { ring_filtered++; continue; }
+		int big_axes = 0;
+		for (int a = 0; a < 3; a++) { if (rdim[a] >= 2.0f * he[a]) big_axes++; }
+		if (!r_big && nw_count > (int)verts.size()/2) {
+			// Rescue: if any non-near-wall vert is h1 SOLID, this is a real clip brush
+			bool has_nnw_solid = false;
+			for (const auto &v : verts) {
+				if (!vert_near_wall(v.gs) && classify_h1(v.gs) == goldsrc::CONTENTS_SOLID) {
+					has_nnw_solid = true; break;
+				}
+			}
+			float rsd[3]={rdim[0],rdim[1],rdim[2]};
+			if(rsd[0]<rsd[1])swap(rsd[0],rsd[1]); if(rsd[1]<rsd[2])swap(rsd[1],rsd[2]); if(rsd[0]<rsd[1])swap(rsd[0],rsd[1]);
+			if (big_axes >= 2 && has_nnw_solid && rsd[0] >= 256.0f) {
+				/* rescued */
+			} else { ring_filtered++; continue; }
+		}
 		// Expansion ring tube: 2+ dims at expansion width with majority near-wall
 		int narrow_axes = 0;
 		for (int a = 0; a < 3; a++) { if (rdim[a] <= 2.0f * he[a] + 0.5f) narrow_axes++; }
@@ -507,7 +579,19 @@ static PipelineResult run_pipeline(const goldsrc::BSPData &bsp, const char *map_
 			if (rh1_tol != goldsrc::CONTENTS_SOLID) { ring_filtered++; continue; }
 		}
 		// Non-big cells with 6+ verts and significant near-wall fraction (>1/3)
-		if (!r_big && verts.size() >= 6 && nw_count >= 3 && nw_count * 3 > (int)verts.size()) { ring_filtered++; continue; }
+		if (!r_big && verts.size() >= 6 && nw_count >= 3 && nw_count * 3 > (int)verts.size()) {
+			bool has_nnw_solid2 = false;
+			for (const auto &v : verts) {
+				if (!vert_near_wall(v.gs) && classify_h1(v.gs) == goldsrc::CONTENTS_SOLID) {
+					has_nnw_solid2 = true; break;
+				}
+			}
+			float rsd2[3]={rdim[0],rdim[1],rdim[2]};
+			if(rsd2[0]<rsd2[1])swap(rsd2[0],rsd2[1]); if(rsd2[1]<rsd2[2])swap(rsd2[1],rsd2[2]); if(rsd2[0]<rsd2[1])swap(rsd2[0],rsd2[1]);
+			if (big_axes >= 2 && has_nnw_solid2 && rsd2[0] >= 256.0f) {
+				/* rescued */
+			} else { ring_filtered++; continue; }
+		}
 				result.final_cells.push_back(std::move(cell));
 	}
 
@@ -723,17 +807,25 @@ static void run_tests(const PipelineResult &pipeline, const goldsrc::BSPData &bs
 				float fcpt[3]={fcx,fcy,fcz};
 				bool fcnw = vert_near_wall(fcpt);
 				int fc_h1 = classify_h1(fcpt);
+				int fc_h0 = goldsrc_hull::classify_hull0_tree(
+					bsp.nodes, bsp.leafs, bsp.planes, hull0_root, fcpt);
 				const char *fate = "SURVIVES";
 				if (fv.size() < 4) fate = "killed:degenerate";
-				else if (any_h0_solid) fate = "killed:h0_solid_vert";
+				else if (any_h0_solid) {
+					if (fc_h0 == goldsrc::CONTENTS_SOLID) {
+						if (fc_h1 != goldsrc::CONTENTS_SOLID || fcnw)
+							fate = "killed:h0_cent_solid";
+						else fate = "rescued:h0_cent_h1solid";
+					} else fate = "h0verts_but_cent_empty";
+				}
 				else if (any_h1_empty) fate = "killed:h1_empty_vert";
 				else if (near_wall_count == (int)fv.size()) fate = "killed:ring_filter";
 				float fn[3]={1e9f,1e9f,1e9f},fx[3]={-1e9f,-1e9f,-1e9f};
 				for(const auto&v:fv){for(int a=0;a<3;a++){if(v.gs[a]<fn[a])fn[a]=v.gs[a];if(v.gs[a]>fx[a])fx[a]=v.gs[a];}}
 				float fd[3]={fx[0]-fn[0],fx[1]-fn[1],fx[2]-fn[2]};
-				printf("    frag%zu: %zu verts, dims=%.0fx%.0fx%.0f h0s=%d h1e=%d near=%d/%zu cent_nw=%d ch1=%d -> %s\n",
+				printf("    frag%zu: %zu verts, dims=%.0fx%.0fx%.0f h0s=%d h1e=%d near=%d/%zu cent_nw=%d ch0=%d ch1=%d -> %s\n",
 					fi, fv.size(), fd[0],fd[1],fd[2], any_h0_solid, any_h1_empty,
-					near_wall_count, fv.size(), fcnw, fc_h1, fate);
+					near_wall_count, fv.size(), fcnw, fc_h0, fc_h1, fate);
 			}
 			printf("    overlapping fragments: %d\n", frag_overlap);
 		}

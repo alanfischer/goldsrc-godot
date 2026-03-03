@@ -1443,8 +1443,11 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 			// Complex small cells with any near-wall verts are expansion artifacts
 			if (verts.size() >= 6 && nw_count > 0) continue;
 		} else if (!big_per_axis) {
-			// Between he and 2*he on some axis: need centroid h1 SOLID
-			// and majority of verts h1 SOLID (half or more empty = artifact)
+			// Count axes where dim < 2*he (negative after un-expansion)
+			int sub_axes = 0;
+			for (int a = 0; a < 3; a++) { if (dim[a] < 2.0f * he[a]) sub_axes++; }
+			// 2+ sub-expansion axes with any h1 empty = expansion remnant
+			if (sub_axes >= 2 && any_h1_empty) continue;
 			int cent_h1 = classify_h1(cpt);
 			if (cent_h1 != goldsrc::CONTENTS_SOLID ||
 				h1_empty_count >= (int)verts.size()/2) continue;
@@ -1475,7 +1478,18 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 			for (const auto &v : verts) { acpt[0]+=v.gs[0]; acpt[1]+=v.gs[1]; acpt[2]+=v.gs[2]; }
 			acpt[0]/=verts.size(); acpt[1]/=verts.size(); acpt[2]/=verts.size();
 			int ah1 = classify_h1(acpt);
-			if (ah1 != goldsrc::CONTENTS_SOLID || vert_near_wall(acpt)) continue;
+			if (ah1 != goldsrc::CONTENTS_SOLID || vert_near_wall(acpt)) {
+				// Second rescue: all verts h1 SOLID + centroid h0 non-solid + large cell
+				bool all_h1s_anw = true;
+				for (const auto &v : verts) {
+					if (classify_h1(v.gs) != goldsrc::CONTENTS_SOLID) { all_h1s_anw = false; break; }
+				}
+				int ch0_anw = goldsrc_hull::classify_hull0_tree(bsp_data.nodes, bsp_data.leafs, bsp_data.planes, hull0_root, acpt);
+				float anw_mn[3]={1e9f,1e9f,1e9f}, anw_mx[3]={-1e9f,-1e9f,-1e9f};
+				for (const auto &v : verts) { for(int a=0;a<3;a++){if(v.gs[a]<anw_mn[a])anw_mn[a]=v.gs[a];if(v.gs[a]>anw_mx[a])anw_mx[a]=v.gs[a];} }
+				float anw_max_dim = fmaxf(anw_mx[0]-anw_mn[0], fmaxf(anw_mx[1]-anw_mn[1], anw_mx[2]-anw_mn[2]));
+				if (!(all_h1s_anw && ch0_anw != goldsrc::CONTENTS_SOLID && anw_max_dim >= 256.0f)) continue;
+			}
 		}
 		// Additional: small cells (fail per-axis) with majority near-wall verts
 		float rn[3]={1e9f,1e9f,1e9f}, rx[3]={-1e9f,-1e9f,-1e9f};
@@ -1484,7 +1498,23 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 		}
 		float rdim[3] = {rx[0]-rn[0], rx[1]-rn[1], rx[2]-rn[2]};
 		bool r_big = (rdim[0] >= 2.0f*he[0]) && (rdim[1] >= 2.0f*he[1]) && (rdim[2] >= 2.0f*he[2]);
-		if (!r_big && nw_count > (int)verts.size()/2) continue;
+		int big_axes = 0;
+		for (int a = 0; a < 3; a++) { if (rdim[a] >= 2.0f * he[a]) big_axes++; }
+		float rcpt[3] = {0,0,0};
+		for (const auto &v : verts) { rcpt[0]+=v.gs[0]; rcpt[1]+=v.gs[1]; rcpt[2]+=v.gs[2]; }
+		rcpt[0]/=verts.size(); rcpt[1]/=verts.size(); rcpt[2]/=verts.size();
+		if (!r_big && nw_count > (int)verts.size()/2) {
+			// Rescue: large cells with non-near-wall h1 SOLID vert
+			bool has_nnw_solid = false;
+			for (const auto &v : verts) {
+				if (!vert_near_wall(v.gs) && classify_h1(v.gs) == goldsrc::CONTENTS_SOLID) {
+					has_nnw_solid = true; break;
+				}
+			}
+			float rsd[3]={rdim[0],rdim[1],rdim[2]};
+			if(rsd[0]<rsd[1])std::swap(rsd[0],rsd[1]); if(rsd[1]<rsd[2])std::swap(rsd[1],rsd[2]); if(rsd[0]<rsd[1])std::swap(rsd[0],rsd[1]);
+			if (!(big_axes >= 2 && has_nnw_solid && rsd[0] >= 256.0f)) continue;
+		}
 		// Expansion ring tube: 2+ dims at expansion width with majority near-wall
 		int narrow_axes = 0;
 		for (int a = 0; a < 3; a++) { if (rdim[a] <= 2.0f * he[a] + 0.5f) narrow_axes++; }
@@ -1498,12 +1528,33 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 			if (rh1_tol != goldsrc::CONTENTS_SOLID) continue;
 		}
 		// Non-big cells with 6+ verts and significant near-wall fraction (>1/3)
-		if (!r_big && verts.size() >= 6 && nw_count >= 3 && nw_count * 3 > (int)verts.size()) continue;
-		// Centroid near wall = expansion ring artifact (regardless of size)
-		float rcpt[3] = {0,0,0};
-		for (const auto &v : verts) { rcpt[0]+=v.gs[0]; rcpt[1]+=v.gs[1]; rcpt[2]+=v.gs[2]; }
-		rcpt[0]/=verts.size(); rcpt[1]/=verts.size(); rcpt[2]/=verts.size();
-		if (vert_near_wall(rcpt)) continue;
+		if (!r_big && verts.size() >= 6 && nw_count >= 3 && nw_count * 3 > (int)verts.size()) {
+			bool has_nnw_solid2 = false;
+			for (const auto &v : verts) {
+				if (!vert_near_wall(v.gs) && classify_h1(v.gs) == goldsrc::CONTENTS_SOLID) {
+					has_nnw_solid2 = true; break;
+				}
+			}
+			float rsd2[3]={rdim[0],rdim[1],rdim[2]};
+			if(rsd2[0]<rsd2[1])std::swap(rsd2[0],rsd2[1]); if(rsd2[1]<rsd2[2])std::swap(rsd2[1],rsd2[2]); if(rsd2[0]<rsd2[1])std::swap(rsd2[0],rsd2[1]);
+			if (!(big_axes >= 2 && has_nnw_solid2 && rsd2[0] >= 256.0f)) continue;
+		}
+		// Centroid near wall = expansion ring artifact
+		if (vert_near_wall(rcpt)) {
+			bool any_h0s = false, all_h1s = true;
+			for (const auto &v : verts) {
+				int vh0 = goldsrc_hull::classify_hull0_tree(bsp_data.nodes, bsp_data.leafs, bsp_data.planes, hull0_root, v.gs);
+				if (vh0 == goldsrc::CONTENTS_SOLID) any_h0s = true;
+				if (classify_h1(v.gs) != goldsrc::CONTENTS_SOLID) { all_h1s = false; break; }
+			}
+			if (!all_h1s) continue;
+			if (any_h0s) {
+				// Second rescue: per-axis 4*he big + centroid h0 non-solid
+				bool big4 = (rdim[0] >= 4.0f*he[0]) && (rdim[1] >= 4.0f*he[1]) && (rdim[2] >= 4.0f*he[2]);
+				int ch0_cnw = goldsrc_hull::classify_hull0_tree(bsp_data.nodes, bsp_data.leafs, bsp_data.planes, hull0_root, rcpt);
+				if (!(big4 && ch0_cnw != goldsrc::CONTENTS_SOLID)) continue;
+			}
+		}
 		final_cells.push_back(std::move(cell));
 	}
 
