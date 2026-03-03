@@ -1,5 +1,7 @@
 #include "bsp_hull.h"
 
+#include <algorithm>
+
 using std::vector;
 
 namespace goldsrc_hull {
@@ -434,26 +436,6 @@ static int classify_hull0(
 	return leafs[leaf_index].contents;
 }
 
-// Classify a point against the hull 1 clip BSP tree. Returns contents value.
-static int classify_hull1(
-	const vector<goldsrc::BSPClipNode> &clipnodes,
-	const vector<goldsrc::BSPPlane> &planes,
-	int node_index,
-	const float p[3]) {
-
-	while (node_index >= 0) {
-		if ((size_t)node_index >= clipnodes.size()) return 0;
-		const auto &node = clipnodes[node_index];
-		if (node.planenum < 0 || (size_t)node.planenum >= planes.size()) return 0;
-		const auto &plane = planes[node.planenum];
-		float dot = plane.normal[0] * p[0] + plane.normal[1] * p[1] + plane.normal[2] * p[2];
-		if (dot >= plane.dist)
-			node_index = node.children[0];
-		else
-			node_index = node.children[1];
-	}
-	return node_index; // negative = contents
-}
 
 // Classify a point against the hull 1 clip BSP tree with UN-EXPANDED planes.
 // Points in the expansion ring (between hull 0 surface and hull 1 expanded surface)
@@ -688,6 +670,349 @@ vector<ConvexCell> subtract_convex(const ConvexCell &a, const ConvexCell &b, flo
 	}
 
 	return fragments;
+}
+
+int classify_clip_hull(
+	const vector<goldsrc::BSPClipNode> &clipnodes,
+	const vector<goldsrc::BSPPlane> &planes,
+	int root, const float point[3], float tolerance) {
+
+	int idx = root;
+	while (idx >= 0) {
+		if ((size_t)idx >= clipnodes.size()) return 0;
+		const auto &node = clipnodes[idx];
+		if (node.planenum < 0 || (size_t)node.planenum >= planes.size()) return 0;
+		const auto &plane = planes[node.planenum];
+		float dot = plane.normal[0]*point[0] + plane.normal[1]*point[1] + plane.normal[2]*point[2];
+		idx = (dot >= plane.dist - tolerance) ? node.children[0] : node.children[1];
+	}
+	return idx;
+}
+
+bool vert_near_wall(
+	const vector<goldsrc::BSPNode> &nodes,
+	const vector<goldsrc::BSPLeaf> &leafs,
+	const vector<goldsrc::BSPPlane> &planes,
+	int hull0_root, const float v[3], const float he[3]) {
+
+	for (int sx = -1; sx <= 1; sx += 2) {
+		for (int sy = -1; sy <= 1; sy += 2) {
+			for (int sz = -1; sz <= 1; sz += 2) {
+				float p[3] = {v[0]+sx*he[0], v[1]+sy*he[1], v[2]+sz*he[2]};
+				int c = classify_hull0_tree(nodes, leafs, planes, hull0_root, p);
+				if (c == goldsrc::CONTENTS_SOLID) return true;
+			}
+		}
+	}
+	return false;
+}
+
+vector<ConvexCell> filter_clip_brush_cells(
+	vector<ConvexCell> &&clipped_cells,
+	const vector<goldsrc::BSPNode> &nodes,
+	const vector<goldsrc::BSPLeaf> &leafs,
+	const vector<goldsrc::BSPClipNode> &clipnodes,
+	const vector<goldsrc::BSPPlane> &planes,
+	int hull0_root, int hull1_root,
+	const float he[3], float epsilon) {
+
+	float max_he = fmaxf(he[0], fmaxf(he[1], he[2]));
+
+	// Helper: check if a near-wall cell can be rescued as a real clip brush.
+	// Requires a non-near-wall vertex that is h1 SOLID (proving clip brush
+	// overlap), the cell is big on 2+ axes, and the largest dim >= 256.
+	auto has_large_clip_rescue = [&](const vector<CellVertex> &verts,
+		const float rdim[3], int big_axes) -> bool {
+		bool has_nnw_solid = false;
+		for (const auto &v : verts) {
+			if (!vert_near_wall(nodes, leafs, planes, hull0_root, v.gs, he) &&
+				classify_clip_hull(clipnodes, planes, hull1_root, v.gs) == goldsrc::CONTENTS_SOLID) {
+				has_nnw_solid = true; break;
+			}
+		}
+		float sorted[3] = {rdim[0], rdim[1], rdim[2]};
+		if (sorted[0] < sorted[1]) std::swap(sorted[0], sorted[1]);
+		if (sorted[1] < sorted[2]) std::swap(sorted[1], sorted[2]);
+		if (sorted[0] < sorted[1]) std::swap(sorted[0], sorted[1]);
+		return big_axes >= 2 && has_nnw_solid && sorted[0] >= 256.0f;
+	};
+
+	// ========================================================================
+	// STAGE 1: Vertex filter
+	//
+	// Each un-expanded cell was clipped against hull 0 EMPTY in the previous
+	// pipeline step, so every cell should lie in open space. However, the
+	// Minkowski un-expansion creates two kinds of artifacts:
+	//   (a) World brush remnants — cells from the expansion ring around world
+	//       geometry that didn't fully collapse during un-expansion.
+	//   (b) Growth artifacts — cells that grew beyond the original clip brush
+	//       boundary because un-expansion pushed planes outward on some faces.
+	//
+	// This stage uses three complementary checks per cell:
+	//   1. h0 solid vertex check — are any vertices actually inside world geo?
+	//   2. h1 classification — do vertices/centroid classify as SOLID in the
+	//      original expanded clip hull? (real clip brush cells should)
+	//   3. Size gates — are cell dimensions physically plausible for an
+	//      un-expanded brush?
+	// ========================================================================
+	vector<ConvexCell> result_cells;
+	for (auto &cell : clipped_cells) {
+		auto verts = compute_cell_vertices(cell.planes, epsilon);
+		if (verts.size() < 4) continue;
+		float cx = 0, cy = 0, cz = 0;
+		for (const auto &v : verts) { cx += v.gs[0]; cy += v.gs[1]; cz += v.gs[2]; }
+		cx /= verts.size(); cy /= verts.size(); cz /= verts.size();
+
+		float cpt[3] = {cx, cy, cz};
+
+		// --- 1a. h0 vertex check ---
+		// Triple-plane intersection can land vertices exactly on the hull 0
+		// boundary (BSP split plane). Nudge each vertex slightly toward the
+		// centroid before classifying, so boundary vertices don't false-positive
+		// as h0 SOLID.
+		bool any_h0_solid = false;
+		for (const auto &v : verts) {
+			float nudged[3] = {v.gs[0], v.gs[1], v.gs[2]};
+			float dx = cx - v.gs[0], dy = cy - v.gs[1], dz = cz - v.gs[2];
+			float len = sqrtf(dx*dx + dy*dy + dz*dz);
+			if (len > 0.01f) {
+				float t = 0.1f / len;
+				nudged[0] += dx * t; nudged[1] += dy * t; nudged[2] += dz * t;
+			}
+			int h0c = classify_hull0_tree(nodes, leafs, planes, hull0_root, nudged);
+			if (h0c == goldsrc::CONTENTS_SOLID) { any_h0_solid = true; break; }
+		}
+		if (any_h0_solid) {
+			// Some vertex is in world geometry. Filter unless the centroid proves
+			// this is a real clip brush embedded in a wall: centroid must be h1
+			// SOLID and not near any wall surface.
+			int h0_cent = classify_hull0_tree(nodes, leafs, planes, hull0_root, cpt);
+			if (h0_cent == goldsrc::CONTENTS_SOLID) {
+				int h1_cent = classify_clip_hull(clipnodes, planes, hull1_root, cpt);
+				if (h1_cent != goldsrc::CONTENTS_SOLID ||
+					vert_near_wall(nodes, leafs, planes, hull0_root, cpt, he)) continue;
+			}
+		}
+
+		// --- 1b. Per-vertex h1 classification ---
+		// A "clip indicator" is a vertex that is h1 SOLID *and* not near a wall.
+		// This is strong evidence the cell overlaps a real clip brush, not just
+		// the expansion ring around world geometry.
+		bool any_h1_empty = false;
+		bool has_clip_indicator = false;
+		int nw_count = 0;
+		int h1_empty_count = 0;
+		for (const auto &v : verts) {
+			int h1c = classify_clip_hull(clipnodes, planes, hull1_root, v.gs);
+			bool nw = vert_near_wall(nodes, leafs, planes, hull0_root, v.gs, he);
+			if (nw) nw_count++;
+			if (h1c != goldsrc::CONTENTS_SOLID) {
+				any_h1_empty = true;
+				h1_empty_count++;
+			} else if (!has_clip_indicator && !nw) {
+				has_clip_indicator = true;
+			}
+		}
+
+		// --- 1c. Cell dimension analysis ---
+		// big_per_he:   each dim >= he[i] (minimum for a non-degenerate brush)
+		// big_per_axis: each dim >= 2*he[i] (full expansion width removed)
+		// big_global:   smallest dim >= 2*max(he) (uniformly large)
+		float mn[3]={1e9f,1e9f,1e9f}, mx[3]={-1e9f,-1e9f,-1e9f};
+		for (const auto &v : verts) { for(int a=0;a<3;a++){if(v.gs[a]<mn[a])mn[a]=v.gs[a]; if(v.gs[a]>mx[a])mx[a]=v.gs[a];}}
+		float dim[3] = {mx[0]-mn[0], mx[1]-mn[1], mx[2]-mn[2]};
+		float min_dim = fminf(dim[0], fminf(dim[1], dim[2]));
+		bool big_per_axis = (dim[0] >= 2.0f*he[0]) &&
+		                    (dim[1] >= 2.0f*he[1]) &&
+		                    (dim[2] >= 2.0f*he[2]);
+		bool big_global = min_dim >= 2.0f * max_he;
+		bool big_per_he = (dim[0] >= he[0]) && (dim[1] >= he[1]) && (dim[2] >= he[2]);
+
+		// --- 1d. No clip indicator path ---
+		// All h1 SOLID verts are near walls, so no direct evidence of a clip
+		// brush. The cell might still be a real clip brush if the centroid is
+		// h1 SOLID, not near wall, big enough, and centroid h0 non-solid.
+		// Secondary rescue: centroid barely outside h1 boundary (within 8 units
+		// tolerance) + uniformly large cell = likely a ceiling clip brush whose
+		// centroid straddles the h1 boundary.
+		if (any_h1_empty && !has_clip_indicator) {
+			int ch1 = classify_clip_hull(clipnodes, planes, hull1_root, cpt);
+			if (ch1 == goldsrc::CONTENTS_SOLID &&
+				!vert_near_wall(nodes, leafs, planes, hull0_root, cpt, he)) {
+				if (big_per_he) {
+					int ch0 = classify_hull0_tree(nodes, leafs, planes, hull0_root, cpt);
+					if (ch0 != goldsrc::CONTENTS_SOLID) {
+						result_cells.push_back(std::move(cell));
+					}
+				}
+			} else {
+				if (ch1 != goldsrc::CONTENTS_SOLID) {
+					int ch1_tol = classify_clip_hull(clipnodes, planes, hull1_root, cpt, 8.0f);
+					if (ch1_tol == goldsrc::CONTENTS_SOLID && big_global) {
+						result_cells.push_back(std::move(cell));
+					}
+				}
+			}
+			continue;
+		}
+
+		// --- 1e. Size gate filters (cell has clip indicator or all h1 SOLID) ---
+		// Impossibly thin: any dim < half the half-extent with 6+ verts means
+		// the cell is a sliver from BSP splitting, not a real brush face.
+		bool impossibly_thin = verts.size() >= 6 && ((dim[0] < he[0]*0.5f) || (dim[1] < he[1]*0.5f) || (dim[2] < he[2]*0.5f));
+		if (impossibly_thin) continue;
+		// Degenerate: 2+ dims smaller than he and max dim too small to be real
+		{	int degen_count = 0;
+			float max_dim_val = fmaxf(dim[0], fmaxf(dim[1], dim[2]));
+			for (int a = 0; a < 3; a++) { if (dim[a] < he[a]) degen_count++; }
+			if (degen_count >= 2 && max_dim_val < 2.0f * max_he) continue;
+		}
+		// Small-axis at expansion boundary: a dim of exactly 2*he on a short
+		// axis (he < max_he) means un-expansion collapsed it to ~0. This is a
+		// telltale expansion artifact on non-cubic hulls (e.g. hull 1: 16x16x36).
+		if (any_h1_empty) {
+			bool small_axis_narrow = false;
+			for (int a = 0; a < 3; a++) {
+				if (he[a] < max_he && dim[a] >= 2.0f * he[a] - 1.0f && dim[a] <= 2.0f * he[a] + 1.0f) {
+					small_axis_narrow = true; break;
+				}
+			}
+			if (small_axis_narrow) continue;
+		}
+
+		// --- 1f. Tiered size checks ---
+		// Small cells (any dim < he): need centroid h1 SOLID and no h1 EMPTY
+		//   verts. Complex small cells (6+ verts) near walls are artifacts.
+		// Medium cells (some dim < 2*he): 2+ sub-expansion axes + any h1 EMPTY
+		//   = expansion remnant. Otherwise need centroid h1 SOLID + majority.
+		// Big cells: just need centroid h1 SOLID + majority h1 SOLID.
+		if (!big_per_he) {
+			int cent_h1 = classify_clip_hull(clipnodes, planes, hull1_root, cpt);
+			if (any_h1_empty || cent_h1 != goldsrc::CONTENTS_SOLID) continue;
+			if (verts.size() >= 6 && nw_count > 0) continue;
+		} else if (!big_per_axis) {
+			int sub_axes = 0;
+			for (int a = 0; a < 3; a++) { if (dim[a] < 2.0f * he[a]) sub_axes++; }
+			if (sub_axes >= 2 && any_h1_empty) continue;
+			int cent_h1 = classify_clip_hull(clipnodes, planes, hull1_root, cpt);
+			if (cent_h1 != goldsrc::CONTENTS_SOLID ||
+				h1_empty_count >= (int)verts.size()/2) continue;
+		} else if (any_h1_empty) {
+			int cent_h1 = classify_clip_hull(clipnodes, planes, hull1_root, cpt);
+			if (cent_h1 != goldsrc::CONTENTS_SOLID ||
+				h1_empty_count >= (int)verts.size()/2) continue;
+		}
+
+		result_cells.push_back(std::move(cell));
+	}
+
+	// ========================================================================
+	// STAGE 2: Expansion ring filter
+	//
+	// The Minkowski expansion of world brushes creates a "ring" of solid space
+	// around walls/floors/ceilings in the clip hull. After un-expansion, some
+	// ring fragments survive stage 1 because they have valid dimensions and
+	// h1 SOLID vertices. This stage catches them by checking whether the cell
+	// sits at a wall boundary (all or most vertices are "near wall" — i.e.,
+	// an AABB corner is in hull 0 SOLID).
+	//
+	// Each sub-check has rescue paths for real clip brushes that happen to sit
+	// near walls (e.g., a railing clip brush flush against a wall).
+	// ========================================================================
+	vector<ConvexCell> final_cells;
+	for (auto &cell : result_cells) {
+		auto verts = compute_cell_vertices(cell.planes, epsilon);
+		if (verts.size() < 4) continue;
+		bool all_near_wall = true;
+		int nw_count = 0;
+		for (const auto &v : verts) {
+			if (vert_near_wall(nodes, leafs, planes, hull0_root, v.gs, he)) nw_count++; else all_near_wall = false;
+		}
+
+		// Compute AABB and centroid (shared by all stage 2 checks)
+		float rn[3]={1e9f,1e9f,1e9f}, rx[3]={-1e9f,-1e9f,-1e9f};
+		for (const auto &v : verts) { for(int a=0;a<3;a++){if(v.gs[a]<rn[a])rn[a]=v.gs[a]; if(v.gs[a]>rx[a])rx[a]=v.gs[a];}}
+		float rdim[3] = {rx[0]-rn[0], rx[1]-rn[1], rx[2]-rn[2]};
+		bool r_big = (rdim[0] >= 2.0f*he[0]) && (rdim[1] >= 2.0f*he[1]) && (rdim[2] >= 2.0f*he[2]);
+		float rcpt[3] = {0, 0, 0};
+		for (const auto &v : verts) { rcpt[0]+=v.gs[0]; rcpt[1]+=v.gs[1]; rcpt[2]+=v.gs[2]; }
+		rcpt[0]/=verts.size(); rcpt[1]/=verts.size(); rcpt[2]/=verts.size();
+
+		// --- 2a. All-near-wall check ---
+		// Every vertex has an AABB corner in world geometry. Almost certainly
+		// an expansion ring artifact. Rescue if centroid is h1 SOLID and not
+		// near wall (clip brush flush with wall). Second rescue for very large
+		// cells (>= 256 units) where all verts are h1 SOLID and centroid is
+		// h0 non-solid.
+		if (all_near_wall) {
+			int ah1 = classify_clip_hull(clipnodes, planes, hull1_root, rcpt);
+			if (ah1 != goldsrc::CONTENTS_SOLID ||
+				vert_near_wall(nodes, leafs, planes, hull0_root, rcpt, he)) {
+				bool all_h1s_anw = true;
+				for (const auto &v : verts) {
+					if (classify_clip_hull(clipnodes, planes, hull1_root, v.gs) != goldsrc::CONTENTS_SOLID) { all_h1s_anw = false; break; }
+				}
+				int ch0_anw = classify_hull0_tree(nodes, leafs, planes, hull0_root, rcpt);
+				float anw_max_dim = fmaxf(rdim[0], fmaxf(rdim[1], rdim[2]));
+				if (!(all_h1s_anw && ch0_anw != goldsrc::CONTENTS_SOLID && anw_max_dim >= 256.0f)) continue;
+			}
+		}
+
+		// --- 2b. Centroid near wall ---
+		// If the centroid's AABB touches world geometry, this cell is likely in
+		// the expansion ring. Requires all verts h1 SOLID to survive (otherwise
+		// definitely an artifact). Cells with any h0 SOLID vert need to be very
+		// large (4x half-extents per axis) with centroid h0 non-solid to be
+		// rescued as real clip brushes near corners.
+		if (vert_near_wall(nodes, leafs, planes, hull0_root, rcpt, he)) {
+			bool any_h0s = false, all_h1s = true;
+			for (const auto &v : verts) {
+				int vh0 = classify_hull0_tree(nodes, leafs, planes, hull0_root, v.gs);
+				if (vh0 == goldsrc::CONTENTS_SOLID) any_h0s = true;
+				if (classify_clip_hull(clipnodes, planes, hull1_root, v.gs) != goldsrc::CONTENTS_SOLID) { all_h1s = false; break; }
+			}
+			if (!all_h1s) continue;
+			if (any_h0s) {
+				bool big4 = (rdim[0] >= 4.0f*he[0]) && (rdim[1] >= 4.0f*he[1]) && (rdim[2] >= 4.0f*he[2]);
+				int ch0_cnw = classify_hull0_tree(nodes, leafs, planes, hull0_root, rcpt);
+				if (!(big4 && ch0_cnw != goldsrc::CONTENTS_SOLID)) continue;
+			}
+		}
+
+		// --- 2c. Small cells with majority near-wall verts ---
+		// Not big on all axes but >50% near-wall verts. Rescued only if the
+		// cell has a non-near-wall h1 SOLID vert (proving clip brush overlap),
+		// is big on 2+ axes, and largest dim >= 256 (real brushes are big).
+		int big_axes = 0;
+		for (int a = 0; a < 3; a++) { if (rdim[a] >= 2.0f * he[a]) big_axes++; }
+		if (!r_big && nw_count > (int)verts.size()/2) {
+			if (!has_large_clip_rescue(verts, rdim, big_axes)) continue;
+		}
+
+		// --- 2d. Expansion ring tubes ---
+		// Cells with 2+ dimensions at or below the expansion width (2*he+0.5)
+		// and majority near-wall verts are thin tubes left from the ring.
+		int narrow_axes = 0;
+		for (int a = 0; a < 3; a++) { if (rdim[a] <= 2.0f * he[a] + 0.5f) narrow_axes++; }
+		if (narrow_axes >= 2 && nw_count > (int)verts.size()/2) continue;
+		// Single narrow axis with majority near-wall: check centroid h1 at
+		// tight tolerance (2 units). If centroid barely outside h1, it's a ring
+		// artifact; if solidly inside, it's a real narrow clip brush.
+		if (narrow_axes >= 1 && nw_count > (int)verts.size()/2) {
+			int rh1_tol = classify_clip_hull(clipnodes, planes, hull1_root, rcpt, 2.0f);
+			if (rh1_tol != goldsrc::CONTENTS_SOLID) continue;
+		}
+
+		// --- 2e. Complex non-big cells with significant near-wall fraction ---
+		// 6+ verts, >1/3 near wall, not big on all axes. Same rescue as 2c:
+		// need a non-near-wall h1 SOLID vert + big on 2+ axes + largest >= 256.
+		if (!r_big && verts.size() >= 6 && nw_count >= 3 && nw_count * 3 > (int)verts.size()) {
+			if (!has_large_clip_rescue(verts, rdim, big_axes)) continue;
+		}
+		final_cells.push_back(std::move(cell));
+	}
+
+	return final_cells;
 }
 
 } // namespace goldsrc_hull

@@ -155,4 +155,65 @@ bool aabb_overlap(const CellAABB &a, const CellAABB &b);
 std::vector<ConvexCell> subtract_convex(
 	const ConvexCell &a, const ConvexCell &b, float epsilon);
 
+// Classify a point against a clip BSP tree. Returns contents value.
+// Supports an optional tolerance for slightly expanded classification.
+int classify_clip_hull(
+	const std::vector<goldsrc::BSPClipNode> &clipnodes,
+	const std::vector<goldsrc::BSPPlane> &planes,
+	int root, const float point[3], float tolerance = 0.0f);
+
+// Test if any of the 8 AABB corners around v (defined by he) classifies
+// as SOLID in hull 0. Used to detect expansion ring artifacts near walls.
+bool vert_near_wall(
+	const std::vector<goldsrc::BSPNode> &nodes,
+	const std::vector<goldsrc::BSPLeaf> &leafs,
+	const std::vector<goldsrc::BSPPlane> &planes,
+	int hull0_root, const float v[3], const float he[3]);
+
+// Filter clip brush cells via a two-stage pipeline:
+//
+// Stage 1 — Vertex filter (h0 EMPTY + h1 SOLID):
+//   For each cell, computes vertices and centroid, then applies:
+//   - h0 solid check: nudges each vertex toward centroid and classifies against
+//     hull 0. If any vertex is in hull 0 SOLID, the cell is filtered unless the
+//     centroid is h1 SOLID and not near a wall (real clip brush at wall surface).
+//   - h1 empty check: vertices classified against the expanded clip hull. Cells
+//     with h1 EMPTY vertices and no "clip indicator" (h1 SOLID vertex away from
+//     walls) need rescue via centroid h1 SOLID + size gates.
+//   - Size gates: per-axis dimension checks filter impossibly thin cells and
+//     expansion artifacts. Cells smaller than half-extents in any dimension
+//     cannot be real un-expanded brushes.
+//
+// Stage 2 — Expansion ring filter:
+//   Catches Minkowski expansion ring artifacts that survive stage 1:
+//   - All-near-wall cells: all vertices have an AABB corner in hull 0 SOLID,
+//     indicating the cell sits in the expansion ring. Rescued if centroid is
+//     h1 SOLID and not near wall, or if all verts are h1 SOLID with centroid
+//     h0 non-solid and cell is large (>= 256 units).
+//   - Centroid-near-wall cells: centroid AABB touches hull 0 SOLID. Requires
+//     all verts h1 SOLID to survive; cells with h0 SOLID verts need 4x
+//     half-extent size to be rescued.
+//   - Small cells with majority near-wall verts: filtered unless they have a
+//     non-near-wall h1 SOLID vertex and are large on 2+ axes.
+//   - Narrow tube filter: cells with 2+ dimensions at expansion width (2*he)
+//     with majority near-wall verts are expansion ring tubes.
+//
+// Parameters:
+//   clipped_cells — cells already clipped against hull 0 EMPTY (step 3 output)
+//   nodes/leafs/clipnodes/planes — BSP data structures
+//   hull0_root — root node index for hull 0 (world geometry) BSP tree
+//   hull1_root — root node index for the clip hull BSP tree
+//   he[3] — hull half-extents in GoldSrc coords (e.g. {16,16,36} for hull 1)
+//   epsilon — vertex computation tolerance (typically 0.1)
+//
+// Returns: filtered cells representing actual clip brush collision geometry.
+std::vector<ConvexCell> filter_clip_brush_cells(
+	std::vector<ConvexCell> &&clipped_cells,
+	const std::vector<goldsrc::BSPNode> &nodes,
+	const std::vector<goldsrc::BSPLeaf> &leafs,
+	const std::vector<goldsrc::BSPClipNode> &clipnodes,
+	const std::vector<goldsrc::BSPPlane> &planes,
+	int hull0_root, int hull1_root,
+	const float he[3], float epsilon);
+
 } // namespace goldsrc_hull
