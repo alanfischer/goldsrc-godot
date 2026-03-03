@@ -1428,11 +1428,12 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 
 			float hull_area = polygon_area_2d(hull);
 
-			// Overfill check: if convex hull is much larger than face area sum,
-			// the shape is significantly concave (e.g., wall around doorway).
-			// Convert total_area from GoldSrc to Godot units for comparison.
+			// Overfill check: if convex hull is larger than face area sum,
+			// the shape is concave (e.g., wall around doorway) and the hull
+			// would cover openings, incorrectly occluding things behind them.
+			// BSP-split straight walls have hull ≈ face sum (ratio ~1.0).
 			float total_area_godot = total_area * scale_factor * scale_factor;
-			if (hull_area > 1.5f * total_area_godot) {
+			if (hull_area > 1.05f * total_area_godot) {
 				// Reject merged — leave faces for individual fallback
 				continue;
 			}
@@ -1773,7 +1774,7 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 	// One StaticBody3D with one ConvexPolygonShape3D per cell.
 	StaticBody3D *hull_body = memnew(StaticBody3D);
 	hull_body->set_name("HullCellBody");
-	hull_body->set_collision_layer(1 | (1 << 4));  // layer 1 (world) + layer 5 (debug)
+	hull_body->set_collision_layer((1 << 4) | (1 << 5));  // layer 5 (debug) + layer 6 (clip hulls, player-only)
 	hull_body->set_collision_mask(0);               // static, doesn't detect anything
 
 	int shape_count = 0;

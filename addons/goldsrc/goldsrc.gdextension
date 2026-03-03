@@ -8,6 +8,8 @@ reloadable = true
 
 macos.debug.arm64 = "res://addons/goldsrc/bin/libgoldsrc.macos.template_debug.arm64.dylib"
 macos.release.arm64 = "res://addons/goldsrc/bin/libgoldsrc.macos.template_release.arm64.dylib"
+macos.debug.universal = "res://addons/goldsrc/bin/libgoldsrc.macos.template_debug.arm64.dylib"
+macos.release.universal = "res://addons/goldsrc/bin/libgoldsrc.macos.template_release.arm64.dylib"
 macos.debug.x86_64 = "res://addons/goldsrc/bin/libgoldsrc.macos.template_debug.x86_64.dylib"
 macos.release.x86_64 = "res://addons/goldsrc/bin/libgoldsrc.macos.template_release.x86_64.dylib"
 windows.debug.x86_64 = "res://addons/goldsrc/bin/libgoldsrc.windows.template_debug.x86_64.dll"
