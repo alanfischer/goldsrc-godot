@@ -1427,6 +1427,16 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 			for (int a = 0; a < 3; a++) { if (dim[a] < he[a]) degen_count++; }
 			if (degen_count >= 2 && max_dim_val < 2.0f * max_he) continue;
 		}
+		// Cells with a small-axis dim at expansion boundary (un-expanded ~0) are artifacts
+		if (any_h1_empty) {
+			bool small_axis_narrow = false;
+			for (int a = 0; a < 3; a++) {
+				if (he[a] < max_he && dim[a] >= 2.0f * he[a] - 1.0f && dim[a] <= 2.0f * he[a] + 1.0f) {
+					small_axis_narrow = true; break;
+				}
+			}
+			if (small_axis_narrow) continue;
+		}
 		if (!big_per_he) {
 			int cent_h1 = classify_h1(cpt);
 			if (any_h1_empty || cent_h1 != goldsrc::CONTENTS_SOLID) continue;
@@ -1435,6 +1445,11 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 		} else if (!big_per_axis) {
 			// Between he and 2*he on some axis: need centroid h1 SOLID
 			// and majority of verts h1 SOLID (half or more empty = artifact)
+			int cent_h1 = classify_h1(cpt);
+			if (cent_h1 != goldsrc::CONTENTS_SOLID ||
+				h1_empty_count >= (int)verts.size()/2) continue;
+		} else if (any_h1_empty) {
+			// Big cells still need centroid h1 SOLID + majority h1 SOLID
 			int cent_h1 = classify_h1(cpt);
 			if (cent_h1 != goldsrc::CONTENTS_SOLID ||
 				h1_empty_count >= (int)verts.size()/2) continue;
@@ -1474,6 +1489,14 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 		int narrow_axes = 0;
 		for (int a = 0; a < 3; a++) { if (rdim[a] <= 2.0f * he[a] + 0.5f) narrow_axes++; }
 		if (narrow_axes >= 2 && nw_count > (int)verts.size()/2) continue;
+		// Single narrow axis with majority near-wall: check h1 at tight tolerance
+		if (narrow_axes >= 1 && nw_count > (int)verts.size()/2) {
+			float rcpt2[3] = {0,0,0};
+			for (const auto &v : verts) { rcpt2[0]+=v.gs[0]; rcpt2[1]+=v.gs[1]; rcpt2[2]+=v.gs[2]; }
+			rcpt2[0]/=verts.size(); rcpt2[1]/=verts.size(); rcpt2[2]/=verts.size();
+			int rh1_tol = classify_h1(rcpt2, 2.0f);
+			if (rh1_tol != goldsrc::CONTENTS_SOLID) continue;
+		}
 		// Non-big cells with 6+ verts and significant near-wall fraction (>1/3)
 		if (!r_big && verts.size() >= 6 && nw_count >= 3 && nw_count * 3 > (int)verts.size()) continue;
 		// Centroid near wall = expansion ring artifact (regardless of size)

@@ -128,11 +128,22 @@ static const TestPoint ww_hunt_points[] = {
 	{{1198.9f, -633.8f, 106.1f}, "missing_3", true},
 };
 
+// ww_2fort test points
+static const TestPoint ww_2fort_points[] = {
+	{{1042.2f, 2154.7f, 110.0f}, "artifact_1", false},
+	{{462.2f, 2577.7f, -402.0f}, "artifact_2", false},
+	{{-1103.9f, 1696.0f, -240.8f}, "artifact_3", false},
+	{{491.2f, 2985.6f, -402.0f}, "artifact_4", false},
+	{{-973.9f, 1699.4f, -227.5f}, "artifact_5", false},
+};
+
 static const MapTestData all_maps[] = {
 	{"../../../res/maps/ww_golem.bsp", "ww_golem", ww_golem_points,
 		sizeof(ww_golem_points)/sizeof(ww_golem_points[0])},
 	{"../../../res/maps/ww_hunt.bsp", "ww_hunt", ww_hunt_points,
 		sizeof(ww_hunt_points)/sizeof(ww_hunt_points[0])},
+	{"../../../res/maps/ww_2fort.bsp", "ww_2fort", ww_2fort_points,
+		sizeof(ww_2fort_points)/sizeof(ww_2fort_points[0])},
 };
 
 // --- Pipeline: run full clip brush extraction on a BSP ---
@@ -402,6 +413,16 @@ static PipelineResult run_pipeline(const goldsrc::BSPData &bsp, const char *map_
 			for (int a = 0; a < 3; a++) { if (dim[a] < he[a]) degen_count++; }
 			if (degen_count >= 2 && max_dim_val < 2.0f * max_he) { h1_filtered++; continue; }
 		}
+		// Cells with a small-axis dim at expansion boundary (un-expanded ~0) are artifacts
+		if (any_h1_empty) {
+			bool small_axis_narrow = false;
+			for (int a = 0; a < 3; a++) {
+				if (he[a] < max_he && dim[a] >= 2.0f * he[a] - 1.0f && dim[a] <= 2.0f * he[a] + 1.0f) {
+					small_axis_narrow = true; break;
+				}
+			}
+			if (small_axis_narrow) { h1_filtered++; continue; }
+		}
 		if (!big_per_he) {
 			int cent_h1 = classify_h1(cpt);
 			if (any_h1_empty || cent_h1 != goldsrc::CONTENTS_SOLID) {
@@ -416,6 +437,14 @@ static PipelineResult run_pipeline(const goldsrc::BSPData &bsp, const char *map_
 		} else if (!big_per_axis) {
 			// Between he and 2*he on some axis: need centroid h1 SOLID
 			// and majority of verts h1 SOLID (half or more empty = artifact)
+			int cent_h1 = classify_h1(cpt);
+			if (cent_h1 != goldsrc::CONTENTS_SOLID ||
+				h1_empty_count >= (int)verts.size()/2) {
+				h1_filtered++;
+				continue;
+			}
+		} else if (any_h1_empty) {
+			// Big cells still need centroid h1 SOLID + majority h1 SOLID
 			int cent_h1 = classify_h1(cpt);
 			if (cent_h1 != goldsrc::CONTENTS_SOLID ||
 				h1_empty_count >= (int)verts.size()/2) {
@@ -472,6 +501,11 @@ static PipelineResult run_pipeline(const goldsrc::BSPData &bsp, const char *map_
 		int narrow_axes = 0;
 		for (int a = 0; a < 3; a++) { if (rdim[a] <= 2.0f * he[a] + 0.5f) narrow_axes++; }
 		if (narrow_axes >= 2 && nw_count > (int)verts.size()/2) { ring_filtered++; continue; }
+		// Single narrow axis with majority near-wall: check h1 at tight tolerance
+		if (narrow_axes >= 1 && nw_count > (int)verts.size()/2) {
+			int rh1_tol = classify_h1(rcpt, 2.0f);
+			if (rh1_tol != goldsrc::CONTENTS_SOLID) { ring_filtered++; continue; }
+		}
 		// Non-big cells with 6+ verts and significant near-wall fraction (>1/3)
 		if (!r_big && verts.size() >= 6 && nw_count >= 3 && nw_count * 3 > (int)verts.size()) { ring_filtered++; continue; }
 				result.final_cells.push_back(std::move(cell));
