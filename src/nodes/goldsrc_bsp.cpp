@@ -1414,7 +1414,7 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 		// 1) Any dim < he[i] with enough verts: physically impossible un-expanded brush.
 		// 2) Tier 1 (< he[i]): always filter. Tier 2 (< 2*he[i]): need extra evidence.
 		bool impossibly_thin = verts.size() >= 6 &&
-			((dim[0] < he[0]) || (dim[1] < he[1]) || (dim[2] < he[2]));
+			((dim[0] < he[0]*0.5f) || (dim[1] < he[1]*0.5f) || (dim[2] < he[2]*0.5f));
 		if (impossibly_thin) continue;
 		// Degenerate small cells: 2+ dims < he and max dim too small to be real
 		{	int degen_count = 0;
@@ -1460,6 +1460,8 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 		int narrow_axes = 0;
 		for (int a = 0; a < 3; a++) { if (rdim[a] <= 2.0f * he[a] + 0.5f) narrow_axes++; }
 		if (narrow_axes >= 2 && nw_count > (int)verts.size()/2) continue;
+		// Non-big cells with 6+ verts and significant near-wall fraction (>1/3)
+		if (!r_big && verts.size() >= 6 && nw_count >= 3 && nw_count * 3 > (int)verts.size()) continue;
 		// Centroid near wall = expansion ring artifact (regardless of size)
 		float rcpt[3] = {0,0,0};
 		for (const auto &v : verts) { rcpt[0]+=v.gs[0]; rcpt[1]+=v.gs[1]; rcpt[2]+=v.gs[2]; }
@@ -1573,13 +1575,14 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 
 	make_mesh(result_tris, Color(0.0f, 1.0f, 0.5f, 0.25f), "DebugHullResult", true);
 
-	// Build collision shapes for hull cells on a dedicated layer (layer 5 = bit 4)
-	// so the player can raycast against them for debug tracing.
+	// Build collision shapes for clip brush cells.
+	// Layer 1 = world collision (player collides with this).
+	// Also keep layer 5 for debug raycasting.
 	// One StaticBody3D with one ConvexPolygonShape3D per cell.
 	StaticBody3D *hull_body = memnew(StaticBody3D);
 	hull_body->set_name("HullCellBody");
-	hull_body->set_collision_layer(1 << 4);  // layer 5 only
-	hull_body->set_collision_mask(0);         // doesn't detect anything
+	hull_body->set_collision_layer(1 | (1 << 4));  // layer 1 (world) + layer 5 (debug)
+	hull_body->set_collision_mask(0);               // static, doesn't detect anything
 
 	int shape_count = 0;
 	for (size_t ci = 0; ci < final_cells.size(); ci++) {

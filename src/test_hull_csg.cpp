@@ -120,6 +120,9 @@ static const TestPoint ww_hunt_points[] = {
 	{{1440.0f, 593.1f, 149.4f}, "artifact_10", false},
 	{{286.3f, 995.0f, 124.3f}, "artifact_11", false},
 	{{-2888.6f, 3376.0f, 578.3f}, "artifact_12", false},
+	// Batch 5
+	{{-179.5f, 141.3f, 636.1f}, "missing_2", true},
+	{{152.6f, 1024.0f, 110.9f}, "artifact_13", false},
 };
 
 static const MapTestData all_maps[] = {
@@ -382,7 +385,7 @@ static PipelineResult run_pipeline(const goldsrc::BSPData &bsp, const char *map_
 		// Per-axis size gates:
 		// 1) Any dim < he[i]: physically impossible as un-expanded brush. Always filter.
 		// 2) Any dim < 2*he[i] with weak evidence: likely expansion artifact.
-		bool impossibly_thin = verts.size() >= 6 && ((dim[0] < he[0]) || (dim[1] < he[1]) || (dim[2] < he[2]));
+		bool impossibly_thin = verts.size() >= 6 && ((dim[0] < he[0]*0.5f) || (dim[1] < he[1]*0.5f) || (dim[2] < he[2]*0.5f));
 		if (impossibly_thin) { h1_filtered++; continue; }
 		// Degenerate small cells: 2+ dims < he and max dim too small to be real
 		{	int degen_count = 0;
@@ -446,6 +449,8 @@ static PipelineResult run_pipeline(const goldsrc::BSPData &bsp, const char *map_
 		int narrow_axes = 0;
 		for (int a = 0; a < 3; a++) { if (rdim[a] <= 2.0f * he[a] + 0.5f) narrow_axes++; }
 		if (narrow_axes >= 2 && nw_count > (int)verts.size()/2) { ring_filtered++; continue; }
+		// Non-big cells with 6+ verts and significant near-wall fraction (>1/3)
+		if (!r_big && verts.size() >= 6 && nw_count >= 3 && nw_count * 3 > (int)verts.size()) { ring_filtered++; continue; }
 				result.final_cells.push_back(std::move(cell));
 	}
 
