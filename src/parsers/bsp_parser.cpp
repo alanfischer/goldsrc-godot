@@ -133,6 +133,8 @@ void BSPParser::parse_faces(const uint8_t *data, size_t size) {
 		}
 	}
 
+	bsp_data.raw_to_parsed.assign(raw_faces.size(), -1);
+
 	for (size_t f = 0; f < raw_faces.size(); f++) {
 		const BSPFace &face = raw_faces[f];
 
@@ -256,6 +258,7 @@ void BSPParser::parse_faces(const uint8_t *data, size_t size) {
 		}
 
 		pface.vertices = std::move(verts);
+		bsp_data.raw_to_parsed[f] = (int)bsp_data.faces.size();
 		bsp_data.faces.push_back(std::move(pface));
 	}
 }

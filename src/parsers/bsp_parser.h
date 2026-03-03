@@ -171,6 +171,7 @@ struct BSPData {
 	std::vector<BSPPlane> planes;
 	std::vector<BSPNode> nodes;
 	std::vector<BSPLeaf> leafs;
+	std::vector<int> raw_to_parsed; // raw_to_parsed[raw_index] = parsed_index, or -1 if filtered
 };
 
 class BSPParser {
