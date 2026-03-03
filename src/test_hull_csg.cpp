@@ -123,6 +123,9 @@ static const TestPoint ww_hunt_points[] = {
 	// Batch 5
 	{{-179.5f, 141.3f, 636.1f}, "missing_2", true},
 	{{152.6f, 1024.0f, 110.9f}, "artifact_13", false},
+	// Batch 6
+	{{250.1f, 1024.0f, 103.3f}, "artifact_14", false},
+	{{1198.9f, -633.8f, 106.1f}, "missing_3", true},
 };
 
 static const MapTestData all_maps[] = {
@@ -318,7 +321,13 @@ static PipelineResult run_pipeline(const goldsrc::BSPData &bsp, const char *map_
 		if (any_h0_solid) {
 			int h0_cent = classify_hull0_tree(
 				bsp.nodes, bsp.leafs, bsp.planes, hull0_root, cpt);
-			if (h0_cent == goldsrc::CONTENTS_SOLID) { h0_filtered++; continue; }
+			if (h0_cent == goldsrc::CONTENTS_SOLID) {
+				// Rescue: centroid h1 SOLID and not near wall = likely real clip brush
+				int h1_cent = classify_h1(cpt);
+				if (h1_cent != goldsrc::CONTENTS_SOLID || vert_near_wall(cpt)) {
+					h0_filtered++; continue;
+				}
+			}
 		}
 
 		bool any_h1_empty = false;
@@ -399,6 +408,11 @@ static PipelineResult run_pipeline(const goldsrc::BSPData &bsp, const char *map_
 				h1_filtered++;
 				continue;
 			}
+			// Complex small cells with any near-wall verts are expansion artifacts
+			if (verts.size() >= 6 && nw_count > 0) {
+				h1_filtered++;
+				continue;
+			}
 		} else if (!big_per_axis) {
 			// Between he and 2*he on some axis: need centroid h1 SOLID
 			// and majority of verts h1 SOLID (half or more empty = artifact)
@@ -431,7 +445,16 @@ static PipelineResult run_pipeline(const goldsrc::BSPData &bsp, const char *map_
 		for (const auto &v : verts) {
 			if (vert_near_wall(v.gs)) nw_count++; else all_near_wall = false;
 		}
-		if (all_near_wall) { ring_filtered++; continue; }
+		if (all_near_wall) {
+			// Rescue: centroid h1 SOLID and not near wall = clip brush at wall
+			float acpt[3]={0,0,0};
+			for (const auto &v : verts) { acpt[0]+=v.gs[0]; acpt[1]+=v.gs[1]; acpt[2]+=v.gs[2]; }
+			acpt[0]/=verts.size(); acpt[1]/=verts.size(); acpt[2]/=verts.size();
+			int ah1 = classify_h1(acpt);
+			if (ah1 != goldsrc::CONTENTS_SOLID || vert_near_wall(acpt)) {
+				ring_filtered++; continue;
+			}
+		}
 		// Additional: small cells (fail per-axis) with majority near-wall verts
 		float rn[3]={1e9,1e9,1e9}, rx[3]={-1e9,-1e9,-1e9};
 		for (const auto &v : verts) { for(int a=0;a<3;a++){if(v.gs[a]<rn[a])rn[a]=v.gs[a]; if(v.gs[a]>rx[a])rx[a]=v.gs[a];}}

@@ -1355,16 +1355,21 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 			int h0_cent = goldsrc_hull::classify_hull0_tree(
 				bsp_data.nodes, bsp_data.leafs, bsp_data.planes,
 				hull0_root, cpt);
-			if (h0_cent == goldsrc::CONTENTS_SOLID) continue;
-			// Centroid is h0 empty — vertex was on boundary, cell is valid
+			if (h0_cent == goldsrc::CONTENTS_SOLID) {
+				// Rescue: centroid h1 SOLID and not near wall = likely real clip brush at wall
+				int h1_cent = classify_h1(cpt);
+				if (h1_cent != goldsrc::CONTENTS_SOLID || vert_near_wall(cpt)) continue;
+			}
 		}
 
 		// h1 filter: check for growth artifacts
 		bool any_h1_empty = false;
 		bool has_clip_indicator = false;
 		int h1_empty_count = 0;
+		int nw_count = 0;
 		for (const auto &v : verts) {
 			int h1c = classify_h1(v.gs);
+			if (vert_near_wall(v.gs)) nw_count++;
 			if (h1c != goldsrc::CONTENTS_SOLID) {
 				any_h1_empty = true;
 				h1_empty_count++;
@@ -1425,6 +1430,8 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 		if (!big_per_he) {
 			int cent_h1 = classify_h1(cpt);
 			if (any_h1_empty || cent_h1 != goldsrc::CONTENTS_SOLID) continue;
+			// Complex small cells with any near-wall verts are expansion artifacts
+			if (verts.size() >= 6 && nw_count > 0) continue;
 		} else if (!big_per_axis) {
 			// Between he and 2*he on some axis: need centroid h1 SOLID
 			// and majority of verts h1 SOLID (half or more empty = artifact)
@@ -1447,7 +1454,14 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 		for (const auto &v : verts) {
 			if (vert_near_wall(v.gs)) nw_count++; else all_near_wall = false;
 		}
-		if (all_near_wall) continue;
+		if (all_near_wall) {
+			// Rescue: centroid h1 SOLID and not near wall = clip brush at wall
+			float acpt[3]={0,0,0};
+			for (const auto &v : verts) { acpt[0]+=v.gs[0]; acpt[1]+=v.gs[1]; acpt[2]+=v.gs[2]; }
+			acpt[0]/=verts.size(); acpt[1]/=verts.size(); acpt[2]/=verts.size();
+			int ah1 = classify_h1(acpt);
+			if (ah1 != goldsrc::CONTENTS_SOLID || vert_near_wall(acpt)) continue;
+		}
 		// Additional: small cells (fail per-axis) with majority near-wall verts
 		float rn[3]={1e9f,1e9f,1e9f}, rx[3]={-1e9f,-1e9f,-1e9f};
 		for (const auto &v : verts) {
