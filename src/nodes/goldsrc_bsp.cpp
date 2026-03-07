@@ -79,7 +79,7 @@ void fragment() {
 // Alpha-scissor variant for '{' textures (fences, grates)
 static const char *LIGHTSTYLE_SHADER_ALPHA_CODE = R"(
 shader_type spatial;
-render_mode unshaded;
+render_mode ambient_light_disabled;
 
 uniform sampler2D albedo_texture : source_color;
 uniform sampler2D lm_layer0 : filter_linear;
@@ -1433,7 +1433,7 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 			// would cover openings, incorrectly occluding things behind them.
 			// BSP-split straight walls have hull ≈ face sum (ratio ~1.0).
 			float total_area_godot = total_area * scale_factor * scale_factor;
-			if (hull_area > 1.05f * total_area_godot) {
+			if (hull_area > 1.001f * total_area_godot) {
 				// Reject merged — leave faces for individual fallback
 				continue;
 			}

@@ -128,6 +128,7 @@ static const TestPoint ww_hunt_points[] = {
 	// Batch 6
 	{{250.1f, 1024.0f, 103.3f}, "artifact_14", false},
 	{{1198.9f, -633.8f, 106.1f}, "missing_3", true},
+	{{549.3f, 528.0f, 194.8f}, "artifact_15", false},
 };
 
 // ww_2fort test points

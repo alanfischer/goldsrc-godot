@@ -2,6 +2,8 @@
 
 #include <godot_cpp/classes/node3d.hpp>
 #include <godot_cpp/classes/skeleton3d.hpp>
+#include <godot_cpp/classes/mesh_instance3d.hpp>
+#include <godot_cpp/classes/standard_material3d.hpp>
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/transform3d.hpp>
 #include <godot_cpp/variant/quaternion.hpp>
@@ -29,6 +31,8 @@ public:
 	int get_bodypart_count() const;
 	godot::String get_bodypart_name(int index) const;
 	int get_bone_count() const;
+	int get_skin_count() const;
+	void set_skin(int family);
 
 	void set_scale_factor(float scale);
 	float get_scale_factor() const;
@@ -45,6 +49,8 @@ private:
 	std::unique_ptr<goldsrc::MDLParser> parser;
 	godot::Skeleton3D *skeleton = nullptr;
 	std::vector<godot::Transform3D> rest_bone_world; // cached rest-pose world transforms
+	std::vector<godot::Ref<godot::StandardMaterial3D>> stored_materials;
+	std::vector<std::pair<godot::MeshInstance3D*, int>> mesh_skin_refs; // mesh instance + skin_ref
 	float scale_factor = 0.025f;
 	bool model_built = false;
 };

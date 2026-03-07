@@ -870,14 +870,21 @@ vector<ConvexCell> filter_clip_brush_cells(
 		// Small-axis at expansion boundary: a dim of exactly 2*he on a short
 		// axis (he < max_he) means un-expansion collapsed it to ~0. This is a
 		// telltale expansion artifact on non-cubic hulls (e.g. hull 1: 16x16x36).
-		if (any_h1_empty) {
+		{
 			bool small_axis_narrow = false;
 			for (int a = 0; a < 3; a++) {
 				if (he[a] < max_he && dim[a] >= 2.0f * he[a] - 1.0f && dim[a] <= 2.0f * he[a] + 1.0f) {
 					small_axis_narrow = true; break;
 				}
 			}
-			if (small_axis_narrow) continue;
+			if (small_axis_narrow) {
+				if (any_h1_empty) continue;  // strong artifact signal
+				// All verts h1 SOLID but at expansion boundary: only keep if
+				// centroid is also h1 SOLID (real clip brush). If centroid is
+				// h1 EMPTY, the cell spans across the h1 boundary — artifact.
+				int cent_h1 = classify_clip_hull(clipnodes, planes, hull1_root, cpt);
+				if (cent_h1 != goldsrc::CONTENTS_SOLID) continue;
+			}
 		}
 
 		// --- 1f. Tiered size checks ---

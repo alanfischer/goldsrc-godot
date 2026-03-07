@@ -28,6 +28,8 @@ void GoldSrcMDL::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_bodypart_count"), &GoldSrcMDL::get_bodypart_count);
 	ClassDB::bind_method(D_METHOD("get_bodypart_name", "index"), &GoldSrcMDL::get_bodypart_name);
 	ClassDB::bind_method(D_METHOD("get_bone_count"), &GoldSrcMDL::get_bone_count);
+	ClassDB::bind_method(D_METHOD("get_skin_count"), &GoldSrcMDL::get_skin_count);
+	ClassDB::bind_method(D_METHOD("set_skin", "family"), &GoldSrcMDL::set_skin);
 	ClassDB::bind_method(D_METHOD("set_scale_factor", "scale"), &GoldSrcMDL::set_scale_factor);
 	ClassDB::bind_method(D_METHOD("get_scale_factor"), &GoldSrcMDL::get_scale_factor);
 
@@ -103,6 +105,29 @@ int GoldSrcMDL::get_bone_count() const {
 	return (int)parser->get_data().bones.size();
 }
 
+int GoldSrcMDL::get_skin_count() const {
+	if (!parser) return 0;
+	return parser->get_data().num_skin_families;
+}
+
+void GoldSrcMDL::set_skin(int family) {
+	if (!parser) return;
+	const auto &mdl = parser->get_data();
+	if (family < 0 || family >= mdl.num_skin_families) return;
+
+	for (auto &[mesh_inst, skin_ref] : mesh_skin_refs) {
+		if (!mesh_inst || !UtilityFunctions::is_instance_valid(mesh_inst)) continue;
+		int tex_idx = skin_ref;
+		int table_idx = family * mdl.num_skin_ref + skin_ref;
+		if (table_idx >= 0 && table_idx < (int)mdl.skin_table.size()) {
+			tex_idx = mdl.skin_table[table_idx];
+		}
+		if (tex_idx >= 0 && tex_idx < (int)stored_materials.size()) {
+			mesh_inst->set_surface_override_material(0, stored_materials[tex_idx]);
+		}
+	}
+}
+
 Quaternion GoldSrcMDL::euler_to_quat(float x, float y, float z) {
 	// GoldSrc XYZ Euler angles — matches HL SDK AngleQuaternion exactly.
 	// angles[0]=X, angles[1]=Y, angles[2]=Z
@@ -174,9 +199,6 @@ vector<Transform3D> GoldSrcMDL::compute_bone_world_transforms(const goldsrc::Par
 void GoldSrcMDL::build_model() {
 	if (!parser || model_built) return;
 	model_built = true;
-
-	// No root rotation — coordinate conversion is applied inline
-	// in compute_bone_transform and build_meshes.
 
 	build_skeleton();
 	build_meshes();
@@ -265,6 +287,7 @@ void GoldSrcMDL::build_meshes() {
 
 		materials.push_back(mat);
 	}
+	stored_materials = materials;
 
 	// Build mesh for each bodypart (first model only for now)
 	for (int bp = 0; bp < (int)mdl.bodyparts.size(); bp++) {
@@ -385,6 +408,8 @@ void GoldSrcMDL::build_meshes() {
 			} else {
 				add_child(mesh_instance);
 			}
+
+			mesh_skin_refs.push_back({mesh_instance, skin_ref});
 		}
 	}
 }
@@ -412,7 +437,12 @@ void GoldSrcMDL::build_animations() {
 		anim->set_length(duration);
 
 		String seq_name = String(seq.name.c_str());
-		anim->set_loop_mode(Animation::LOOP_LINEAR);
+		// STUDIO_LOOPING = 0x0001: respect MDL per-sequence loop flag
+		if (seq.flags & 0x0001) {
+			anim->set_loop_mode(Animation::LOOP_LINEAR);
+		} else {
+			anim->set_loop_mode(Animation::LOOP_NONE);
+		}
 
 		for (int b = 0; b < (int)mdl.bones.size(); b++) {
 			String bone_name = String(mdl.bones[b].name.c_str());
