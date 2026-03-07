@@ -30,6 +30,7 @@ void GoldSrcMDL::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_bone_count"), &GoldSrcMDL::get_bone_count);
 	ClassDB::bind_method(D_METHOD("get_skin_count"), &GoldSrcMDL::get_skin_count);
 	ClassDB::bind_method(D_METHOD("set_skin", "family"), &GoldSrcMDL::set_skin);
+	ClassDB::bind_method(D_METHOD("get_skin_info"), &GoldSrcMDL::get_skin_info);
 	ClassDB::bind_method(D_METHOD("set_scale_factor", "scale"), &GoldSrcMDL::set_scale_factor);
 	ClassDB::bind_method(D_METHOD("get_scale_factor"), &GoldSrcMDL::get_scale_factor);
 
@@ -126,6 +127,32 @@ void GoldSrcMDL::set_skin(int family) {
 			mesh_inst->set_surface_override_material(0, stored_materials[tex_idx]);
 		}
 	}
+}
+
+String GoldSrcMDL::get_skin_info() const {
+	if (!parser) return "no parser";
+	const auto &mdl = parser->get_data();
+	String info = "Skin families: " + String::num_int64(mdl.num_skin_families) +
+		", skin refs: " + String::num_int64(mdl.num_skin_ref) +
+		", textures: " + String::num_int64(mdl.textures.size()) + "\n";
+	// List texture names
+	for (int i = 0; i < (int)mdl.textures.size(); i++) {
+		info += "  tex[" + String::num_int64(i) + "] = " + String(mdl.textures[i].name.c_str()) +
+			" (" + String::num_int64(mdl.textures[i].width) + "x" + String::num_int64(mdl.textures[i].height) + ")\n";
+	}
+	// Dump skin table
+	for (int f = 0; f < mdl.num_skin_families; f++) {
+		info += "  family " + String::num_int64(f) + ": [";
+		for (int r = 0; r < mdl.num_skin_ref; r++) {
+			int idx = f * mdl.num_skin_ref + r;
+			if (idx < (int)mdl.skin_table.size()) {
+				if (r > 0) info += ", ";
+				info += String::num_int64(mdl.skin_table[idx]);
+			}
+		}
+		info += "]\n";
+	}
+	return info;
 }
 
 Quaternion GoldSrcMDL::euler_to_quat(float x, float y, float z) {

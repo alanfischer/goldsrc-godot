@@ -33,6 +33,7 @@ public:
 	int get_bone_count() const;
 	int get_skin_count() const;
 	void set_skin(int family);
+	godot::String get_skin_info() const;
 
 	void set_scale_factor(float scale);
 	float get_scale_factor() const;
