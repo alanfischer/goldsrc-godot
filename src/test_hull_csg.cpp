@@ -152,6 +152,20 @@ static const TestPoint ww_ravine2_points[] = {
 	{{903.8f, -1889.1f, 540.0f}, "missing_6", true},
 };
 
+// ravine test points
+static const TestPoint ravine_points[] = {
+	{{317.9f, 1155.2f, 1848.0f}, "artifact_1", false},
+	{{427.4f, 865.5f, 1640.0f}, "artifact_2", false},
+	{{979.6f, 2368.0f, 1876.3f}, "artifact_3", false},
+	{{1272.0f, 1400.1f, 1732.1f}, "artifact_4", false},
+	{{648.0f, 1450.0f, 1732.3f}, "artifact_5", false},
+	{{887.0f, 765.6f, 1625.8f}, "artifact_6", false},
+	{{887.0f, 747.9f, 1622.9f}, "artifact_7", false},
+	{{1644.1f, -840.0f, 1630.1f}, "artifact_8", false},
+	{{1623.4f, -828.9f, 1616.0f}, "artifact_9", false},
+	{{1426.4f, -824.0f, 1621.8f}, "artifact_10", false},
+};
+
 // castle_rush test points
 static const TestPoint castle_rush_points[] = {
 	{{484.0f, -2880.1f, -38.9f}, "missing_1", true},
@@ -167,6 +181,8 @@ static const MapTestData all_maps[] = {
 		sizeof(ww_2fort_points)/sizeof(ww_2fort_points[0])},
 	{"../../../res/maps/ww_ravine2.bsp", "ww_ravine2", ww_ravine2_points,
 		sizeof(ww_ravine2_points)/sizeof(ww_ravine2_points[0])},
+	{"../../../res/maps/ravine.bsp", "ravine", ravine_points,
+		sizeof(ravine_points)/sizeof(ravine_points[0])},
 	{"../../../res/maps/castle_rush.bsp", "castle_rush", castle_rush_points,
 		sizeof(castle_rush_points)/sizeof(castle_rush_points[0])},
 };
@@ -366,6 +382,10 @@ static void run_tests(const PipelineResult &pipeline, const goldsrc::BSPData &bs
 			printf("  Player AABB overlaps %d result cells  %s\n", overlaps, ok ? "PASS" : "FAIL");
 			if (ok) pass++; else fail++;
 		} else {
+			// Check hull1 at player position
+			int h1_at_player = classify_h1(tp.gs);
+			printf("  hull1_at_player=%d (%s)\n", h1_at_player,
+				h1_at_player == goldsrc::CONTENTS_SOLID ? "SOLID" : "EMPTY");
 			int overlaps = 0;
 			for (size_t i = 0; i < pipeline.final_cells.size(); i++) {
 				if (aabb_overlaps_cell(tp.gs, he, pipeline.final_cells[i], EPSILON)) {

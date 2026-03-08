@@ -945,6 +945,56 @@ vector<ConvexCell> filter_clip_brush_cells(
 		for (const auto &v : verts) { rcpt[0]+=v.gs[0]; rcpt[1]+=v.gs[1]; rcpt[2]+=v.gs[2]; }
 		rcpt[0]/=verts.size(); rcpt[1]/=verts.size(); rcpt[2]/=verts.size();
 
+		// --- 2pre. Post-clip validity checks ---
+		// After hull 0 clipping, cells may have new vertices with different h1
+		// classifications. Re-check h1 status and thin dimensions.
+		{
+			bool any_h0s = false;
+			int h1e_count = 0;
+			for (const auto &v : verts) {
+				if (classify_hull0_tree(nodes, leafs, planes, hull0_root, v.gs) == goldsrc::CONTENTS_SOLID)
+					any_h0s = true;
+				if (classify_clip_hull(clipnodes, planes, hull1_root, v.gs) != goldsrc::CONTENTS_SOLID)
+					h1e_count++;
+			}
+			int cent_h1 = classify_clip_hull(clipnodes, planes, hull1_root, rcpt);
+			int cent_h0 = classify_hull0_tree(nodes, leafs, planes, hull0_root, rcpt);
+			// Cell straddles world boundary (h0 SOLID verts) AND h1 boundary
+			// (centroid h1 EMPTY + >= 50% h1 EMPTY verts), with centroid in
+			// open space (h0 EMPTY). This is an expansion ring artifact at a
+			// corner where the ring wraps around world geometry.
+			if (any_h0s && cent_h1 != goldsrc::CONTENTS_SOLID &&
+				cent_h0 != goldsrc::CONTENTS_SOLID &&
+				h1e_count * 2 >= (int)verts.size()) continue;
+			// No near-wall verts + h1 EMPTY verts: expansion ring artifact
+			// in open space. Kill if any dimension matches expansion width
+			// (2*he ±1) OR all dimensions < 256.
+			if (h1e_count > 0 && nw_count == 0) {
+				float max_dim = fmaxf(rdim[0], fmaxf(rdim[1], rdim[2]));
+				if (max_dim < 256.0f) continue;
+				for (int a = 0; a < 3; a++) {
+					if (fabsf(rdim[a] - 2.0f * he[a]) <= 1.0f) goto kill_2pre;
+				}
+			}
+			if (false) { kill_2pre: continue; }
+			// Multiple h1 EMPTY verts + not big on all axes + small cell
+			// (max dim < 256): expansion ring fragment at a corner. Real
+			// clip brushes this small should be entirely within hull1 SOLID.
+			if (h1e_count >= 2 && !r_big) {
+				float max_dim = fmaxf(rdim[0], fmaxf(rdim[1], rdim[2]));
+				if (max_dim < 256.0f) continue;
+			}
+			// Very thin (< half-extent) with h0 SOLID verts and minority
+			// near-wall: floating slab artifact from clipping.
+			if (any_h0s && nw_count * 2 < (int)verts.size()) {
+				bool too_thin = false;
+				for (int a = 0; a < 3; a++) {
+					if (rdim[a] < he[a]) { too_thin = true; break; }
+				}
+				if (too_thin) continue;
+			}
+		}
+
 		// --- 2a. All-near-wall check ---
 		// Every vertex has an AABB corner in world geometry. Almost certainly
 		// an expansion ring artifact. Rescue if centroid is h1 SOLID and not
@@ -1001,19 +1051,54 @@ vector<ConvexCell> filter_clip_brush_cells(
 		// and majority near-wall verts are thin tubes left from the ring.
 		int narrow_axes = 0;
 		for (int a = 0; a < 3; a++) { if (rdim[a] <= 2.0f * he[a] + 0.5f) narrow_axes++; }
-		if (narrow_axes >= 2 && nw_count > (int)verts.size()/2) continue;
+		if (narrow_axes >= 2 && (nw_count > (int)verts.size()/2 || nw_count == 0)) continue;
 		// Single narrow axis with majority near-wall: check centroid h1 at
 		// tight tolerance (2 units). If centroid barely outside h1, it's a ring
 		// artifact; if solidly inside, it's a real narrow clip brush.
+		// Exception: if the narrow dimension is exactly at the expansion width
+		// (2*he ±1), the cell sits flush on a surface and needs stronger evidence.
 		if (narrow_axes >= 1 && nw_count > (int)verts.size()/2) {
-			int rh1_tol = classify_clip_hull(clipnodes, planes, hull1_root, rcpt, 2.0f);
-			if (rh1_tol != goldsrc::CONTENTS_SOLID) continue;
+			bool has_exact_expansion_dim = false;
+			for (int a = 0; a < 3; a++) {
+				if (rdim[a] <= 2.0f * he[a] + 0.5f && fabsf(rdim[a] - 2.0f * he[a]) <= 1.0f) {
+					has_exact_expansion_dim = true; break;
+				}
+			}
+			if (has_exact_expansion_dim && nw_count * 5 >= (int)verts.size() * 4) {
+				// Very high near-wall ratio (>= 80%) with expansion-width dimension:
+				// need >= 2 non-near-wall h1 SOLID verts to prove clip brush overlap.
+				// A single free vert is not enough — expansion ring edges often have
+				// one outlier vert.
+				int free_solid_count = 0;
+				for (const auto &v : verts) {
+					if (!vert_near_wall(nodes, leafs, planes, hull0_root, v.gs, he) &&
+						classify_clip_hull(clipnodes, planes, hull1_root, v.gs) == goldsrc::CONTENTS_SOLID) {
+						free_solid_count++;
+					}
+				}
+				if (free_solid_count < 2) continue;
+			} else {
+				int rh1_tol = classify_clip_hull(clipnodes, planes, hull1_root, rcpt, 2.0f);
+				if (rh1_tol != goldsrc::CONTENTS_SOLID) continue;
+			}
 		}
 
 		// --- 2e. Complex non-big cells with significant near-wall fraction ---
 		// 6+ verts, >1/3 near wall, not big on all axes. Same rescue as 2c:
 		// need a non-near-wall h1 SOLID vert + big on 2+ axes + largest >= 256.
+		// Additionally, cells with h1 EMPTY verts are killed — they indicate
+		// expansion ring artifacts that extend past the clip hull boundary.
 		if (!r_big && verts.size() >= 6 && nw_count >= 3 && nw_count * 3 > (int)verts.size()) {
+			// Count h1 EMPTY verts — multiple h1 EMPTY verts indicate
+			// expansion ring artifacts extending past the clip hull boundary.
+			// A single h1 EMPTY vert can occur on legitimate clip brushes
+			// due to vertex placement near the hull1 boundary.
+			int h1e_2e = 0;
+			for (const auto &v : verts) {
+				if (classify_clip_hull(clipnodes, planes, hull1_root, v.gs) != goldsrc::CONTENTS_SOLID)
+					h1e_2e++;
+			}
+			if (h1e_2e >= 2) continue;
 			if (!has_large_clip_rescue(verts, rdim, big_axes)) continue;
 		}
 		final_cells.push_back(std::move(cell));
