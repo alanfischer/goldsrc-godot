@@ -984,6 +984,12 @@ vector<ConvexCell> filter_clip_brush_cells(
 				float max_dim = fmaxf(rdim[0], fmaxf(rdim[1], rdim[2]));
 				if (max_dim < 256.0f) continue;
 			}
+			// Small cell (all dims < 3*he) with h1 EMPTY verts: entirely
+			// within the expansion ring region. Too small to be a real
+			// clip brush — real brushes extend well beyond expansion width.
+			if (h1e_count > 0 &&
+				rdim[0] < 3.0f * he[0] && rdim[1] < 3.0f * he[1] && rdim[2] < 3.0f * he[2])
+				continue;
 			// Very thin (< half-extent) with h0 SOLID verts and minority
 			// near-wall: floating slab artifact from clipping.
 			if (any_h0s && nw_count * 2 < (int)verts.size()) {
@@ -1052,6 +1058,16 @@ vector<ConvexCell> filter_clip_brush_cells(
 		int narrow_axes = 0;
 		for (int a = 0; a < 3; a++) { if (rdim[a] <= 2.0f * he[a] + 0.5f) narrow_axes++; }
 		if (narrow_axes >= 2 && (nw_count > (int)verts.size()/2 || nw_count == 0)) continue;
+		// Narrow axis thinner than half-extent with no near-wall verts:
+		// thin expansion ring slab floating in open space. Real clip brushes
+		// this thin would be adjacent to world geometry.
+		if (narrow_axes >= 1 && nw_count == 0) {
+			bool sub_he = false;
+			for (int a = 0; a < 3; a++) {
+				if (rdim[a] <= 2.0f * he[a] + 0.5f && rdim[a] < he[a] * 0.6f) { sub_he = true; break; }
+			}
+			if (sub_he) continue;
+		}
 		// Single narrow axis with majority near-wall: check centroid h1 at
 		// tight tolerance (2 units). If centroid barely outside h1, it's a ring
 		// artifact; if solidly inside, it's a real narrow clip brush.

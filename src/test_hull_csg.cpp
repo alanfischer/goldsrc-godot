@@ -164,6 +164,11 @@ static const TestPoint ravine_points[] = {
 	{{1644.1f, -840.0f, 1630.1f}, "artifact_8", false},
 	{{1623.4f, -828.9f, 1616.0f}, "artifact_9", false},
 	{{1426.4f, -824.0f, 1621.8f}, "artifact_10", false},
+	{{797.2f, 873.6f, 1640.0f}, "artifact_11", false},
+	{{966.9f, 896.1f, 1640.0f}, "artifact_12", false},
+	{{1137.3f, 875.9f, 1640.0f}, "artifact_13", false},
+	{{1492.9f, -909.5f, 1640.0f}, "artifact_14", false},
+	{{1543.8f, -752.0f, 1594.2f}, "artifact_15", false},
 };
 
 // castle_rush test points

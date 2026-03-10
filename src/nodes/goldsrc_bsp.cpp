@@ -43,7 +43,7 @@ string str_to_lower(const string &s) {
 // Shader source for lightstyle blending (opaque variant)
 static const char *LIGHTSTYLE_SHADER_CODE = R"(
 shader_type spatial;
-render_mode unshaded;
+render_mode ambient_light_disabled, specular_disabled;
 
 uniform sampler2D albedo_texture : source_color;
 uniform sampler2D lm_layer0 : filter_linear;
@@ -72,14 +72,16 @@ void fragment() {
 	         + texture(lm_layer2, UV2).rgb * b2
 	         + texture(lm_layer3, UV2).rgb * b3;
 
-	ALBEDO = albedo.rgb * lm * overbright;
+	ALBEDO = albedo.rgb;
+	EMISSION = albedo.rgb * lm * overbright;
+	ROUGHNESS = 1.0;
 }
 )";
 
 // Alpha-scissor variant for '{' textures (fences, grates)
 static const char *LIGHTSTYLE_SHADER_ALPHA_CODE = R"(
 shader_type spatial;
-render_mode ambient_light_disabled;
+render_mode ambient_light_disabled, specular_disabled;
 
 uniform sampler2D albedo_texture : source_color;
 uniform sampler2D lm_layer0 : filter_linear;
@@ -109,7 +111,9 @@ void fragment() {
 	         + texture(lm_layer2, UV2).rgb * b2
 	         + texture(lm_layer3, UV2).rgb * b3;
 
-	ALBEDO = albedo.rgb * lm * overbright;
+	ALBEDO = albedo.rgb;
+	EMISSION = albedo.rgb * lm * overbright;
+	ROUGHNESS = 1.0;
 	ALPHA = albedo.a;
 	ALPHA_SCISSOR_THRESHOLD = alpha_scissor_threshold;
 }
@@ -1061,6 +1065,7 @@ void GoldSrcBSP::build_mesh() {
 			MeshInstance3D *mesh_instance = memnew(MeshInstance3D);
 			mesh_instance->set_name(String(tex_name.c_str()));
 			mesh_instance->set_mesh(arr_mesh);
+			mesh_instance->set_layer_mask(2); // Layer 2 only — map lights (layer 1) skip BSP, weapon lights (layers 1+2) hit it
 			group_parent->add_child(mesh_instance);
 			total_mesh_instances++;
 		}
