@@ -177,6 +177,13 @@ static const TestPoint castle_rush_points[] = {
 	{{376.0f, -1062.3f, 177.6f}, "missing_2", true},
 };
 
+// ww_chasm test points
+static const TestPoint ww_chasm_points[] = {
+	{{1440.1f, -3478.9f, -575.9f}, "missing_1", true},
+	{{-2521.5f, -1040.3f, 1045.3f}, "missing_2", true},
+	{{-1598.2f, 37.0f, 1044.3f}, "missing_3", true},
+};
+
 static const MapTestData all_maps[] = {
 	{"../../../res/maps/ww_golem.bsp", "ww_golem", ww_golem_points,
 		sizeof(ww_golem_points)/sizeof(ww_golem_points[0])},
@@ -190,6 +197,8 @@ static const MapTestData all_maps[] = {
 		sizeof(ravine_points)/sizeof(ravine_points[0])},
 	{"../../../res/maps/castle_rush.bsp", "castle_rush", castle_rush_points,
 		sizeof(castle_rush_points)/sizeof(castle_rush_points[0])},
+	{"../../../res/maps/ww_chasm.bsp", "ww_chasm", ww_chasm_points,
+		sizeof(ww_chasm_points)/sizeof(ww_chasm_points[0])},
 };
 
 // --- Pipeline: run full clip brush extraction on a BSP ---

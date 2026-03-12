@@ -896,7 +896,16 @@ vector<ConvexCell> filter_clip_brush_cells(
 		if (!big_per_he) {
 			int cent_h1 = classify_clip_hull(clipnodes, planes, hull1_root, cpt);
 			if (any_h1_empty || cent_h1 != goldsrc::CONTENTS_SOLID) continue;
-			if (verts.size() >= 6 && nw_count > 0) continue;
+			if (verts.size() >= 6 && nw_count > 0) {
+				// Rescue: cell is big on 2+ axes with max dim >= 256 and
+				// centroid h0 non-solid. Thin clip brushes (shorter than
+				// player height) near walls are real if all h1 SOLID.
+				int ba1f = 0;
+				float md1f = fmaxf(dim[0], fmaxf(dim[1], dim[2]));
+				for (int a = 0; a < 3; a++) { if (dim[a] >= 2.0f * he[a]) ba1f++; }
+				int ch0_1f = classify_hull0_tree(nodes, leafs, planes, hull0_root, cpt);
+				if (!(ba1f >= 2 && md1f >= 256.0f && ch0_1f != goldsrc::CONTENTS_SOLID)) continue;
+			}
 		} else if (!big_per_axis) {
 			int sub_axes = 0;
 			for (int a = 0; a < 3; a++) { if (dim[a] < 2.0f * he[a]) sub_axes++; }
@@ -1038,7 +1047,15 @@ vector<ConvexCell> filter_clip_brush_cells(
 			if (any_h0s) {
 				bool big4 = (rdim[0] >= 4.0f*he[0]) && (rdim[1] >= 4.0f*he[1]) && (rdim[2] >= 4.0f*he[2]);
 				int ch0_cnw = classify_hull0_tree(nodes, leafs, planes, hull0_root, rcpt);
-				if (!(big4 && ch0_cnw != goldsrc::CONTENTS_SOLID)) continue;
+				if (!(big4 && ch0_cnw != goldsrc::CONTENTS_SOLID)) {
+					// Secondary rescue: cell is big on 2+ axes with max dim >= 256
+					// and centroid h0 non-solid. Narrow clip brushes near walls
+					// (e.g. 32-wide barriers) are real if all verts are h1 SOLID.
+					int ba = 0;
+					float md = fmaxf(rdim[0], fmaxf(rdim[1], rdim[2]));
+					for (int a = 0; a < 3; a++) { if (rdim[a] >= 2.0f * he[a]) ba++; }
+					if (!(ba >= 2 && md >= 256.0f && ch0_cnw != goldsrc::CONTENTS_SOLID)) continue;
+				}
 			}
 		}
 
@@ -1049,7 +1066,17 @@ vector<ConvexCell> filter_clip_brush_cells(
 		int big_axes = 0;
 		for (int a = 0; a < 3; a++) { if (rdim[a] >= 2.0f * he[a]) big_axes++; }
 		if (!r_big && nw_count > (int)verts.size()/2) {
-			if (!has_large_clip_rescue(verts, rdim, big_axes)) continue;
+			if (!has_large_clip_rescue(verts, rdim, big_axes)) {
+				// Secondary rescue for all-near-wall cells: all h1 SOLID,
+				// centroid h0 non-solid, big on 2+ axes, max dim >= 256.
+				bool all_h1s_2c = true;
+				for (const auto &v : verts) {
+					if (classify_clip_hull(clipnodes, planes, hull1_root, v.gs) != goldsrc::CONTENTS_SOLID) { all_h1s_2c = false; break; }
+				}
+				int ch0_2c = classify_hull0_tree(nodes, leafs, planes, hull0_root, rcpt);
+				float md_2c = fmaxf(rdim[0], fmaxf(rdim[1], rdim[2]));
+				if (!(all_h1s_2c && ch0_2c != goldsrc::CONTENTS_SOLID && big_axes >= 2 && md_2c >= 256.0f)) continue;
+			}
 		}
 
 		// --- 2d. Expansion ring tubes ---
@@ -1115,7 +1142,14 @@ vector<ConvexCell> filter_clip_brush_cells(
 					h1e_2e++;
 			}
 			if (h1e_2e >= 2) continue;
-			if (!has_large_clip_rescue(verts, rdim, big_axes)) continue;
+			if (!has_large_clip_rescue(verts, rdim, big_axes)) {
+				// Secondary rescue (same as 2c): all h1 SOLID, centroid h0
+				// non-solid, big on 2+ axes, max dim >= 256.
+				bool all_h1s_2e = (h1e_2e == 0);
+				int ch0_2e = classify_hull0_tree(nodes, leafs, planes, hull0_root, rcpt);
+				float md_2e = fmaxf(rdim[0], fmaxf(rdim[1], rdim[2]));
+				if (!(all_h1s_2e && ch0_2e != goldsrc::CONTENTS_SOLID && big_axes >= 2 && md_2e >= 256.0f)) continue;
+			}
 		}
 		final_cells.push_back(std::move(cell));
 	}
