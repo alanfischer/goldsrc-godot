@@ -674,7 +674,16 @@ void GoldSrcBSP::build_mesh() {
 		}
 
 		// Store entity properties as metadata
-		if (m > 0) {
+		if (m == 0) {
+			// Worldspawn: first entity in the lump
+			if (!bsp_data.entities.empty()) {
+				Dictionary meta;
+				for (const auto &kv : bsp_data.entities[0].properties) {
+					meta[String(kv.first.c_str())] = String(kv.second.c_str());
+				}
+				model_node->set_meta("entity", meta);
+			}
+		} else {
 			auto ent_it = model_entities.find(model_key);
 			if (ent_it != model_entities.end()) {
 				Dictionary meta;
@@ -1094,8 +1103,54 @@ void GoldSrcBSP::build_mesh() {
 	}
 	log_timing("brush entity meshes + collision");
 
+	// Create Node3D for each point entity (no brush model).
+	// Brush entities already have nodes from the model loop above.
+	int point_entity_count = 0;
+	for (const auto &ent : bsp_data.entities) {
+		auto cn = ent.properties.find("classname");
+		if (cn == ent.properties.end()) continue;
+		if (cn->second == "worldspawn") continue;
+
+		// Skip brush entities — they already have nodes
+		auto model_it = ent.properties.find("model");
+		if (model_it != ent.properties.end() && !model_it->second.empty()
+				&& model_it->second[0] == '*') {
+			continue;
+		}
+
+		Node3D *node = memnew(Node3D);
+
+		// Set position from "origin" key
+		auto origin_it = ent.properties.find("origin");
+		if (origin_it != ent.properties.end()) {
+			float x = 0, y = 0, z = 0;
+			sscanf(origin_it->second.c_str(), "%f %f %f", &x, &y, &z);
+			node->set_position(goldsrc_to_godot(x, y, z));
+		}
+
+		// Store entity properties as metadata
+		Dictionary meta;
+		for (const auto &kv : ent.properties) {
+			meta[String(kv.first.c_str())] = String(kv.second.c_str());
+		}
+		node->set_meta("entity", meta);
+
+		// Name: classname_targetname or just classname
+		auto tn = ent.properties.find("targetname");
+		String node_name = String(cn->second.c_str());
+		if (tn != ent.properties.end() && !tn->second.empty()) {
+			node_name = node_name + "_" + String(tn->second.c_str());
+		}
+		node->set_name(node_name);
+
+		add_child(node);
+		point_entity_count++;
+	}
+	log_timing("point entity nodes");
+
 	UtilityFunctions::print("[GoldSrc] Built BSP: ",
 		(int64_t)num_models, " models, ",
+		(int64_t)point_entity_count, " point entities, ",
 		(int64_t)bsp_data.faces.size(), " faces, ",
 		(int64_t)lm_atlases.size(), " lightmap atlases");
 }
