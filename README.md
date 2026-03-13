@@ -2,6 +2,8 @@
 
 A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP maps, MDL models, SPR sprites, and WAD texture archives.
 
+![TFC ravine.bsp loaded in the Godot editor](docs/ravine_godot_editor.png)
+
 ## Features
 
 ### BSP Maps
@@ -9,9 +11,14 @@ A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
 - Atlas-packed lightmaps with 64 lightstyle channels and runtime rebaking
 - Embedded and WAD-referenced textures with transparency (`{` prefix alpha-scissor)
 - Hull 0 collision (StaticBody3D + ConcavePolygonShape3D)
+- Clip brush reconstruction from hull 1 clipping data — un-expands Minkowski-expanded hull planes back to original brush geometry, then clips against hull 0 to recover invisible collision brushes that have no render faces
 - Water volume extraction as Area3D with ConvexPolygonShape3D
-- Brush entity geometry with model/origin support
+- Automatic occluder generation (OccluderInstance3D + PolygonOccluder3D) — identifies large opaque faces, merges coplanar groups into combined occluders, with fallback to individual face occluders
+- Worldspawn spatial splitting — walks the BSP tree to group faces into spatial clusters, producing separate MeshInstance3D nodes per group for better frustum culling
+- Brush entity geometry with per-entity collision shapes and model/origin support
+- Point entity nodes (Node3D) with entity properties stored as metadata — classname, targetname, origin, angles, and all other key-value pairs are accessible from GDScript via `node.get_meta("entity")`
 - Entity lump parsing (key-value dictionaries accessible from GDScript)
+- Debug hull visualization meshes (optional) — renders solid/empty cells for collision debugging
 
 ### MDL Models
 - Skeleton3D with full bone hierarchy
@@ -43,21 +50,33 @@ Drop files into a project and they auto-import:
 | SPR | `.spr` | `.tres` | SpriteFrames resource with all frames |
 | WAD | `.wad` | `.png` files | Extracts individual textures as PNGs |
 
-All imported scenes contain only standard Godot types (Node3D, MeshInstance3D, ArrayMesh, Skeleton3D, AnimationPlayer, etc.) and do **not** require the GDExtension at runtime.
+All imported scenes contain only standard Godot types (Node3D, MeshInstance3D, ArrayMesh, Skeleton3D, AnimationPlayer, StaticBody3D, OccluderInstance3D, etc.) and do **not** require the GDExtension at runtime.
 
 ### Headless Batch Conversion
 
 Convert BSP maps from the command line without opening the editor:
 
 ```bash
-godot --path <project-dir> --headless --script res://tools/batch_convert_bsp.gd -- \
+godot --path <project-dir> --script res://tools/batch_convert_bsp.gd -- \
   --bsp map1.bsp --bsp map2.bsp \
   --wad-dir /path/to/wads \
   --output-dir /path/to/output \
-  --scale 0.025
+  --scale 0.025 \
+  --shader-lightstyles \
+  --overbright 2.0 \
+  --rotate
 ```
 
-Outputs `.scn` scene files and `.entities.json` for each map.
+Options:
+- `--bsp` — input BSP file (repeat for multiple maps)
+- `--wad-dir` — directory containing `.wad` files for texture lookup
+- `--output-dir` — where to write `.scn` files
+- `--scale` — coordinate scale factor (default: `0.025`)
+- `--shader-lightstyles` — use shader-based lightstyle animation
+- `--overbright` — lightmap brightness multiplier (default: `1.0`)
+- `--rotate` — rotate 180 degrees around Y to match alternate coordinate conventions
+
+Outputs a `.scn` PackedScene file per map with all geometry, collision, occluders, and entity nodes baked in.
 
 ## Building
 
@@ -88,7 +107,18 @@ bsp.add_wad(wad)
 bsp.load_bsp("map.bsp")
 bsp.build_mesh()
 
+# Entity data is on the child nodes as metadata:
+for child in bsp.get_children():
+    if child.has_meta("entity"):
+        var ent = child.get_meta("entity")  # Dictionary
+        print(ent.get("classname", ""))
+        print(ent.get("targetname", ""))
+
+# Or get raw entity dictionaries:
 var entities = bsp.get_entities()  # Array of Dictionaries
+
+# Optional: debug visualization of clip hull collision cells
+bsp.build_debug_hull_meshes(1)  # hull index 1-3
 ```
 
 ### GoldSrcMDL
