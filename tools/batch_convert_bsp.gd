@@ -118,6 +118,7 @@ func _convert_one(bsp_path: String, wads: Array[GoldSrcWAD],
 	for child in children:
 		bsp.remove_child(child)
 		root.add_child(child)
+	bsp.free()
 	_set_owner_recursive(root, root)
 
 	# Optionally rotate 180 deg around Y so C++ convention (-x, z, y) matches
@@ -129,49 +130,19 @@ func _convert_one(bsp_path: String, wads: Array[GoldSrcWAD],
 	var pack_err := scene.pack(root)
 	if pack_err != OK:
 		printerr("Failed to pack %s: %s" % [basename, error_string(pack_err)])
+		root.free()
 		return false
 
 	var scn_path := output_dir.path_join(basename + ".scn")
 	var save_err := ResourceSaver.save(scene, scn_path)
+	root.free()
 	if save_err != OK:
 		printerr("Failed to save %s: %s" % [scn_path, error_string(save_err)])
 		return false
 	_log_time("save_scene", t1)
 
-	# --- Save .entities.json ---
-	t1 = Time.get_ticks_msec()
-	var entities := bsp.get_entities()
-	var scaled_entities: Array = []
-	for ent in entities:
-		var d: Dictionary = ent.duplicate()
-		# With --rotate, convert origins to Python convention.
-		# Default: keep raw GoldSrc origin string (consumer does its own conversion).
-		if do_rotate and d.has("origin"):
-			var parts: PackedStringArray = str(d["origin"]).split(" ")
-			if parts.size() >= 3:
-				var x := float(parts[0])
-				var y := float(parts[1])
-				var z := float(parts[2])
-				# Python convention: (x, y, z) -> (x*s, z*s, -y*s)
-				var gx := x * scale
-				var gy := z * scale
-				var gz := -y * scale
-				d["origin"] = "%s %s %s" % [gx, gy, gz]
-				d["origin_vec"] = [gx, gy, gz]
-		scaled_entities.append(d)
-
-	var json_path := output_dir.path_join(basename + ".entities.json")
-	var json_str := JSON.stringify(scaled_entities, "  ")
-	var file := FileAccess.open(json_path, FileAccess.WRITE)
-	if file == null:
-		printerr("Failed to write %s" % json_path)
-		return false
-	file.store_string(json_str)
-	file.close()
-	_log_time("save_entities", t1)
-
 	var total := Time.get_ticks_msec() - t0
-	print("  Done: %s (%dms, %d entities)" % [scn_path, total, scaled_entities.size()])
+	print("  Done: %s (%dms)" % [scn_path, total])
 	return true
 
 

@@ -1135,12 +1135,13 @@ void GoldSrcBSP::build_mesh() {
 		}
 		node->set_meta("entity", meta);
 
-		// Name: classname_targetname or just classname
+		// Name: classname_targetname_N or classname_N (unique to avoid @ prefix)
 		auto tn = ent.properties.find("targetname");
 		String node_name = String(cn->second.c_str());
 		if (tn != ent.properties.end() && !tn->second.empty()) {
 			node_name = node_name + "_" + String(tn->second.c_str());
 		}
+		node_name = node_name + "_" + String::num_int64(point_entity_count);
 		node->set_name(node_name);
 
 		add_child(node);
