@@ -1026,12 +1026,13 @@ vector<ConvexCell> filter_clip_brush_cells(
 				}
 				int ch0_anw = classify_hull0_tree(nodes, leafs, planes, hull0_root, rcpt);
 				float anw_max_dim = fmaxf(rdim[0], fmaxf(rdim[1], rdim[2]));
-				// Also reject if any dim < min half-extent — too thin to be a
-				// real un-expanded clip brush (expansion ring sliver).
 				float min_he = fminf(he[0], fminf(he[1], he[2]));
 				bool anw_sub_he = false;
 				for (int a = 0; a < 3; a++) { if (rdim[a] < min_he) { anw_sub_he = true; break; } }
-				if (!(all_h1s_anw && ch0_anw != goldsrc::CONTENTS_SOLID && anw_max_dim >= 256.0f && !anw_sub_he)) continue;
+				// Also kill if centroid h0 is EMPTY (not CLIP) — expansion ring
+				// in open space, not overlapping a real clip brush.
+				bool h0_empty = (ch0_anw == goldsrc::CONTENTS_EMPTY);
+				if (!(all_h1s_anw && ch0_anw != goldsrc::CONTENTS_SOLID && anw_max_dim >= 256.0f && !anw_sub_he && !h0_empty)) continue;
 			}
 		}
 
@@ -1049,18 +1050,26 @@ vector<ConvexCell> filter_clip_brush_cells(
 				if (classify_clip_hull(clipnodes, planes, hull1_root, v.gs) != goldsrc::CONTENTS_SOLID) { all_h1s = false; break; }
 			}
 			if (!all_h1s) continue;
+			// Centroid near wall + all h1 SOLID: could be expansion ring or
+			// real clip brush flush with wall. Require centroid solidly inside
+			// h1 (4-unit tolerance) to survive — expansion ring centroids are
+			// barely inside h1 at the ring boundary.
+			int rh1_cnw = classify_clip_hull(clipnodes, planes, hull1_root, rcpt, 4.0f);
 			if (any_h0s) {
 				bool big4 = (rdim[0] >= 4.0f*he[0]) && (rdim[1] >= 4.0f*he[1]) && (rdim[2] >= 4.0f*he[2]);
 				int ch0_cnw = classify_hull0_tree(nodes, leafs, planes, hull0_root, rcpt);
-				if (!(big4 && ch0_cnw != goldsrc::CONTENTS_SOLID)) {
-					// Secondary rescue: cell is big on 2+ axes with max dim >= 256
-					// and centroid h0 non-solid. Narrow clip brushes near walls
-					// (e.g. 32-wide barriers) are real if all verts are h1 SOLID.
+				if (!(big4 && ch0_cnw != goldsrc::CONTENTS_SOLID && rh1_cnw == goldsrc::CONTENTS_SOLID)) {
+					// Secondary rescue: cell is big on 2+ axes with max dim >= 256,
+					// centroid h0 non-solid, AND centroid solidly inside h1.
 					int ba = 0;
 					float md = fmaxf(rdim[0], fmaxf(rdim[1], rdim[2]));
 					for (int a = 0; a < 3; a++) { if (rdim[a] >= 2.0f * he[a]) ba++; }
-					if (!(ba >= 2 && md >= 256.0f && ch0_cnw != goldsrc::CONTENTS_SOLID)) continue;
+					if (!(ba >= 2 && md >= 256.0f && ch0_cnw != goldsrc::CONTENTS_SOLID
+						&& ch0_cnw != goldsrc::CONTENTS_EMPTY && rh1_cnw == goldsrc::CONTENTS_SOLID)) continue;
 				}
+			} else {
+				// No h0 SOLID verts: still require centroid solidly inside h1.
+				if (rh1_cnw != goldsrc::CONTENTS_SOLID) continue;
 			}
 		}
 
