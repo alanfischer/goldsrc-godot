@@ -1026,7 +1026,12 @@ vector<ConvexCell> filter_clip_brush_cells(
 				}
 				int ch0_anw = classify_hull0_tree(nodes, leafs, planes, hull0_root, rcpt);
 				float anw_max_dim = fmaxf(rdim[0], fmaxf(rdim[1], rdim[2]));
-				if (!(all_h1s_anw && ch0_anw != goldsrc::CONTENTS_SOLID && anw_max_dim >= 256.0f)) continue;
+				// Also reject if any dim < min half-extent — too thin to be a
+				// real un-expanded clip brush (expansion ring sliver).
+				float min_he = fminf(he[0], fminf(he[1], he[2]));
+				bool anw_sub_he = false;
+				for (int a = 0; a < 3; a++) { if (rdim[a] < min_he) { anw_sub_he = true; break; } }
+				if (!(all_h1s_anw && ch0_anw != goldsrc::CONTENTS_SOLID && anw_max_dim >= 256.0f && !anw_sub_he)) continue;
 			}
 		}
 
@@ -1107,6 +1112,11 @@ vector<ConvexCell> filter_clip_brush_cells(
 					has_exact_expansion_dim = true; break;
 				}
 			}
+			// Expansion-width dim + centroid near wall: the cell sits flush at
+			// the expansion ring boundary against a wall. Kill — a real clip
+			// brush at expansion width would not have its centroid near wall.
+			if (has_exact_expansion_dim &&
+				vert_near_wall(nodes, leafs, planes, hull0_root, rcpt, he)) continue;
 			if (has_exact_expansion_dim && nw_count * 5 >= (int)verts.size() * 4) {
 				// Very high near-wall ratio (>= 80%) with expansion-width dimension:
 				// need >= 2 non-near-wall h1 SOLID verts to prove clip brush overlap.
