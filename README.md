@@ -19,6 +19,7 @@ A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
 - Point entity nodes (Node3D) with entity properties stored as metadata — classname, targetname, origin, angles, and all other key-value pairs are accessible from GDScript via `node.get_meta("entity")`
 - Entity lump parsing (key-value dictionaries accessible from GDScript)
 - Debug hull visualization meshes (optional) — renders solid/empty cells for collision debugging
+- **Ambient cube light grid baking** — traces rays in 6 directions from a 3D grid through the BSP tree, samples lightmaps at hit points, and outputs slice images for `ImageTexture3D` construction. Includes flood-fill of solid cells to prevent trilinear interpolation artifacts. Provides spatially-varying directional ambient lighting for dynamic models
 
 ### MDL Models
 - Skeleton3D with full bone hierarchy
@@ -119,6 +120,16 @@ var entities = bsp.get_entities()  # Array of Dictionaries
 
 # Optional: debug visualization of clip hull collision cells
 bsp.build_debug_hull_meshes(1)  # hull index 1-3
+
+# Bake ambient cube light grid (call after build_mesh)
+var grid = bsp.bake_light_grid(32.0)  # cell size in GoldSrc units
+# Returns Dictionary with:
+#   grid_origin: Vector3 — world-space origin in Godot coords
+#   grid_dims: Vector3i — grid dimensions in Godot coords (X, Y, Z)
+#   cell_size: float — cell size in Godot units
+#   dir_slices: Array of 6 Arrays of Images — one per axis direction
+#     (+X, -X, +Y, -Y, +Z, -Z), each array contains depth-slice Images
+#     for ImageTexture3D construction
 ```
 
 ### GoldSrcMDL
