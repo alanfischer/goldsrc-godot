@@ -2189,6 +2189,59 @@ Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 		{ 0, 0, 1}, { 0, 0,-1}
 	};
 
+	// Extract light_environment sky color and sun direction for rays that escape the map.
+	// HLRAD uses this as the sky light when compiling lightmaps, so surfaces hit by sunlight
+	// have bright values, but rays going up into the sky need to return the sky contribution.
+	float sky_color[3] = {0, 0, 0};
+	float sun_dir[3] = {0, 0, -1}; // default: straight down
+	bool has_sky_light = false;
+	for (const auto &ent : bsp_data.entities) {
+		auto cn = ent.properties.find("classname");
+		if (cn == ent.properties.end() || cn->second != "light_environment") continue;
+
+		// Parse "_light" as "R G B [brightness]"
+		auto lp = ent.properties.find("_light");
+		if (lp != ent.properties.end()) {
+			float lr = 0, lg = 0, lb = 0, lbright = 200.0f;
+			if (sscanf(lp->second.c_str(), "%f %f %f %f", &lr, &lg, &lb, &lbright) >= 3) {
+				// Normalize and scale by brightness (match light_environment.gd logic)
+				float peak = fmaxf(lr, fmaxf(lg, lb));
+				if (peak > 0) {
+					sky_color[0] = (lr / peak) * (lbright / 200.0f) * peak / 255.0f;
+					sky_color[1] = (lg / peak) * (lbright / 200.0f) * peak / 255.0f;
+					sky_color[2] = (lb / peak) * (lbright / 200.0f) * peak / 255.0f;
+				}
+			}
+		}
+
+		// Parse sun direction from "angles" (yaw) and "pitch"
+		float yaw_deg = 0, pitch_deg = 0;
+		auto ap = ent.properties.find("angles");
+		if (ap != ent.properties.end()) {
+			float a0, a1;
+			if (sscanf(ap->second.c_str(), "%f %f", &a0, &a1) >= 2)
+				yaw_deg = a1;
+		} else {
+			auto angp = ent.properties.find("angle");
+			if (angp != ent.properties.end())
+				yaw_deg = atof(angp->second.c_str());
+		}
+		auto pp = ent.properties.find("pitch");
+		if (pp != ent.properties.end())
+			pitch_deg = atof(pp->second.c_str());
+
+		// Convert to GoldSrc direction vector pointing TOWARD the sun.
+		// The angle/pitch specify the direction light TRAVELS (from sun to ground).
+		// We negate to get the direction FROM ground TOWARD the sun, for visibility checks.
+		float pitch_rad = pitch_deg * 3.14159265f / 180.0f;
+		float yaw_rad = yaw_deg * 3.14159265f / 180.0f;
+		sun_dir[0] = -(cosf(pitch_rad) * cosf(yaw_rad));
+		sun_dir[1] = -(cosf(pitch_rad) * sinf(yaw_rad));
+		sun_dir[2] = sinf(pitch_rad);
+		has_sky_light = true;
+		break; // use first light_environment only
+	}
+
 	// 3D texture layout: each direction gets dims[2] slices (GoldSrc Z = Godot Y),
 	// each slice is dims[0] x dims[1] (GoldSrc XY = Godot XZ), RGB8.
 	int slice_w = dims[0];
@@ -2208,6 +2261,7 @@ Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 	int head_node = bsp_data.models[0].headnode[0];
 	int cells_traced = 0;
 	int cells_solid = 0;
+	int cells_sunlit = 0;
 
 	for (int gz = 0; gz < dims[2]; gz++) {
 		for (int gy = 0; gy < dims[1]; gy++) {
@@ -2244,6 +2298,7 @@ Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 				// Pixel offset within slice gz: row gy, column gx
 				size_t px_ofs = (size_t)gz * slice_bytes + ((size_t)gy * slice_w + gx) * 3;
 
+				// Trace the 6 axis-aligned directions
 				for (int d = 0; d < 6; d++) {
 					LightGridRayHit hit;
 					trace_ray_bsp(bsp_data, head_node, gs_pos, directions[d],
@@ -2256,6 +2311,46 @@ Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 						pixel_data[d][px_ofs + 0] = (uint8_t)clamp(r, 0.0f, 255.0f);
 						pixel_data[d][px_ofs + 1] = (uint8_t)clamp(g, 0.0f, 255.0f);
 						pixel_data[d][px_ofs + 2] = (uint8_t)clamp(b, 0.0f, 255.0f);
+					} else if (has_sky_light) {
+						// Ray escaped — ambient sky fill for non-sun directions
+						float ambient_sky = 0.15f;
+						float r = sky_color[0] * ambient_sky * 255.0f;
+						float g = sky_color[1] * ambient_sky * 255.0f;
+						float b = sky_color[2] * ambient_sky * 255.0f;
+						pixel_data[d][px_ofs + 0] = (uint8_t)clamp(r, 0.0f, 255.0f);
+						pixel_data[d][px_ofs + 1] = (uint8_t)clamp(g, 0.0f, 255.0f);
+						pixel_data[d][px_ofs + 2] = (uint8_t)clamp(b, 0.0f, 255.0f);
+					}
+				}
+
+				// Trace one extra ray toward the sun. If it escapes (hits sky),
+				// this cell has direct sunlight — add sun color to each cube face
+				// weighted by alignment with the sun direction.
+				if (has_sky_light) {
+					LightGridRayHit sun_hit;
+					trace_ray_bsp(bsp_data, head_node, gs_pos, sun_dir,
+						0.0f, max_trace_dist, sun_hit);
+
+					if (sun_hit.face_index < 0) {
+						cells_sunlit++;
+						// Cell has direct sunlight — distribute sun color to cube faces
+						// weighted by alignment toward the sun
+						for (int d = 0; d < 6; d++) {
+							float dot = directions[d][0] * sun_dir[0]
+							          + directions[d][1] * sun_dir[1]
+							          + directions[d][2] * sun_dir[2];
+							float weight = fmaxf(dot, 0.0f);
+							if (weight <= 0.0f) continue;
+							float sr = sky_color[0] * weight * 255.0f;
+							float sg = sky_color[1] * weight * 255.0f;
+							float sb = sky_color[2] * weight * 255.0f;
+							pixel_data[d][px_ofs + 0] = (uint8_t)clamp(
+								pixel_data[d][px_ofs + 0] + sr, 0.0f, 255.0f);
+							pixel_data[d][px_ofs + 1] = (uint8_t)clamp(
+								pixel_data[d][px_ofs + 1] + sg, 0.0f, 255.0f);
+							pixel_data[d][px_ofs + 2] = (uint8_t)clamp(
+								pixel_data[d][px_ofs + 2] + sb, 0.0f, 255.0f);
+						}
 					}
 				}
 			}
@@ -2355,7 +2450,7 @@ Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 	uint64_t elapsed = Time::get_singleton()->get_ticks_msec() - t0;
 	UtilityFunctions::print("[GoldSrc] Light grid baked: ", dims[0], "x", dims[1], "x", dims[2],
 		" (", (int64_t)cells_traced, " traced, ", (int64_t)cells_solid, " solid, ",
-		(int64_t)elapsed, "ms)");
+		(int64_t)cells_sunlit, " sunlit, ", (int64_t)elapsed, "ms)");
 
 	return result;
 }
