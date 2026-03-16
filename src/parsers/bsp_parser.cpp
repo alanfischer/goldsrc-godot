@@ -175,6 +175,8 @@ void BSPParser::parse_faces(const uint8_t *data, size_t size) {
 		pface.normal[0] = nx; pface.normal[1] = ny; pface.normal[2] = nz;
 		pface.s_axis[0] = ti.vecs[0][0]; pface.s_axis[1] = ti.vecs[0][1]; pface.s_axis[2] = ti.vecs[0][2];
 		pface.t_axis[0] = ti.vecs[1][0]; pface.t_axis[1] = ti.vecs[1][1]; pface.t_axis[2] = ti.vecs[1][2];
+		pface.s_offset = ti.vecs[0][3];
+		pface.t_offset = ti.vecs[1][3];
 
 		// Compute lightmap extents
 		float min_s = 1e30f, min_t = 1e30f;
@@ -248,6 +250,8 @@ void BSPParser::parse_faces(const uint8_t *data, size_t size) {
 		int lm_maxs_t = (int)ceil(max_t / 16.0f);
 		pface.lightmap_width = lm_maxs_s - lm_mins_s + 1;
 		pface.lightmap_height = lm_maxs_t - lm_mins_t + 1;
+		pface.lm_mins_s = lm_mins_s;
+		pface.lm_mins_t = lm_mins_t;
 
 		// Adjust lightmap UVs to [0,1] range within the per-face lightmap
 		for (auto &v : verts) {

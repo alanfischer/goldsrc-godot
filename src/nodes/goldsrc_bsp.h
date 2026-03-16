@@ -56,6 +56,11 @@ public:
 	// Returns Array [s_axis: Vector3, t_axis: Vector3] in Godot coords, or empty if not found.
 	godot::Array get_face_axes(godot::Vector3 godot_pos, godot::Vector3 godot_normal) const;
 
+	// Bake ambient cube light grid from BSP lightmaps.
+	// Returns Dictionary {grid_origin: Vector3, grid_dims: Vector3i, cell_size: float, images: Array[Image]}
+	// Images are 6 RGB8 images (one per axis: +X, -X, +Y, -Y, +Z, -Z in Godot coords).
+	godot::Dictionary bake_light_grid(float cell_size_gs = 32.0f) const;
+
 private:
 	godot::Ref<godot::ImageTexture> find_texture(const std::string &name) const;
 	godot::Vector3 goldsrc_to_godot(float x, float y, float z) const;

@@ -241,6 +241,7 @@ void GoldSrcBSP::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("build_debug_hull_meshes", "hull_index"), &GoldSrcBSP::build_debug_hull_meshes);
 	ClassDB::bind_method(D_METHOD("set_shader_lightstyles", "enabled"), &GoldSrcBSP::set_shader_lightstyles);
 	ClassDB::bind_method(D_METHOD("get_shader_lightstyles"), &GoldSrcBSP::get_shader_lightstyles);
+	ClassDB::bind_method(D_METHOD("bake_light_grid", "cell_size"), &GoldSrcBSP::bake_light_grid);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "scale_factor"), "set_scale_factor", "get_scale_factor");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "shader_lightstyles"), "set_shader_lightstyles", "get_shader_lightstyles");
 }
@@ -1254,10 +1255,6 @@ void GoldSrcBSP::build_brush_collision(AnimatableBody3D *body, int model_index) 
 	col->set_shape(shape);
 	body->add_child(col);
 
-	UtilityFunctions::print("[GoldSrc] Brush collision: ",
-		(int64_t)face_count, " faces (",
-		(int64_t)(all_tris.size() / 3), " tris) for model ",
-		(int64_t)model_index);
 }
 
 void GoldSrcBSP::build_water_volumes(Node3D *parent) {
@@ -1995,5 +1992,371 @@ void GoldSrcBSP::rebake_lightstyle(int style_index) {
 			false, Image::FORMAT_RGB8, img_data);
 		atlas.texture->update(atlas.image);
 	}
+}
+
+// --- Ambient cube light grid baking ---
+
+namespace {
+
+struct LightGridRayHit {
+	int face_index = -1;
+	float t = 1e30f;
+	float hit_pos[3] = {0, 0, 0};
+};
+
+// Ray-polygon intersection: check if ray hits a convex polygon.
+// Returns distance along ray, or -1 if no hit.
+static float ray_polygon_intersect(
+	const float origin[3], const float dir[3],
+	const goldsrc::ParsedFace &face)
+{
+	// Plane: dot(normal, P) = dot(normal, v0)
+	float denom = face.normal[0] * dir[0] + face.normal[1] * dir[1] + face.normal[2] * dir[2];
+	if (fabsf(denom) < 1e-8f) return -1.0f; // parallel
+
+	const auto &v0 = face.vertices[0];
+	float plane_d = face.normal[0] * v0.pos[0] + face.normal[1] * v0.pos[1] + face.normal[2] * v0.pos[2];
+	float origin_d = face.normal[0] * origin[0] + face.normal[1] * origin[1] + face.normal[2] * origin[2];
+	float t = (plane_d - origin_d) / denom;
+	if (t <= 0.001f) return -1.0f; // behind or at origin
+
+	// Hit point on plane
+	float hx = origin[0] + dir[0] * t;
+	float hy = origin[1] + dir[1] * t;
+	float hz = origin[2] + dir[2] * t;
+
+	// Point-in-polygon via cross-product winding test.
+	// Vertices may be wound CW or CCW relative to the stored normal (depends on
+	// face.side in BSP), so check that all edges give the same sign, not a fixed sign.
+	int n = (int)face.vertices.size();
+	int pos_count = 0, neg_count = 0;
+	for (int i = 0; i < n; i++) {
+		const auto &a = face.vertices[i];
+		const auto &b = face.vertices[(i + 1) % n];
+		float ex = b.pos[0] - a.pos[0];
+		float ey = b.pos[1] - a.pos[1];
+		float ez = b.pos[2] - a.pos[2];
+		float px = hx - a.pos[0];
+		float py = hy - a.pos[1];
+		float pz = hz - a.pos[2];
+		float cx = ey * pz - ez * py;
+		float cy = ez * px - ex * pz;
+		float cz = ex * py - ey * px;
+		float d = cx * face.normal[0] + cy * face.normal[1] + cz * face.normal[2];
+		if (d > 0.1f) pos_count++;
+		else if (d < -0.1f) neg_count++;
+		if (pos_count > 0 && neg_count > 0) return -1.0f; // outside
+	}
+
+	return t;
+}
+
+// Sample lightmap color at a GoldSrc world position on a given face.
+// Returns RGB [0..255] range.
+static void sample_lightmap_at(
+	const goldsrc::ParsedFace &face,
+	const float hit_pos[3],
+	const vector<uint8_t> &lighting,
+	float &out_r, float &out_g, float &out_b)
+{
+	out_r = out_g = out_b = 0;
+
+	if (face.lightmap_offset < 0) return;
+	if (face.lightmap_width <= 0 || face.lightmap_height <= 0) return;
+
+	// Compute texture S/T at hit position
+	float s = hit_pos[0] * face.s_axis[0] + hit_pos[1] * face.s_axis[1] + hit_pos[2] * face.s_axis[2] + face.s_offset;
+	float t = hit_pos[0] * face.t_axis[0] + hit_pos[1] * face.t_axis[1] + hit_pos[2] * face.t_axis[2] + face.t_offset;
+
+	// Convert to lightmap pixel coords
+	float lm_u = s / 16.0f - face.lm_mins_s;
+	float lm_v = t / 16.0f - face.lm_mins_t;
+
+	int px = clamp((int)roundf(lm_u), 0, face.lightmap_width - 1);
+	int py = clamp((int)roundf(lm_v), 0, face.lightmap_height - 1);
+
+	// Sample style 0 only (static lighting)
+	size_t pixel_count = (size_t)face.lightmap_width * face.lightmap_height;
+	size_t ofs = (size_t)face.lightmap_offset + (size_t)(py * face.lightmap_width + px) * 3;
+	if (ofs + 2 >= lighting.size()) return;
+
+	out_r = (float)lighting[ofs + 0];
+	out_g = (float)lighting[ofs + 1];
+	out_b = (float)lighting[ofs + 2];
+}
+
+// BSP-accelerated ray trace: walk the BSP node tree with a ray,
+// testing faces at each visited node.
+static void trace_ray_bsp(
+	const goldsrc::BSPData &bsp_data,
+	int node_index,
+	const float origin[3], const float dir[3],
+	float t_min, float t_max,
+	LightGridRayHit &best_hit)
+{
+	if (t_min >= t_max) return;
+	if (node_index < 0) return; // leaf — hull 0 stores faces on nodes, not leaves
+
+	if ((size_t)node_index >= bsp_data.nodes.size()) return;
+	const auto &node = bsp_data.nodes[node_index];
+	if (node.planenum < 0 || (size_t)node.planenum >= bsp_data.planes.size()) return;
+	const auto &plane = bsp_data.planes[node.planenum];
+
+	// Test this node's faces
+	for (uint16_t i = 0; i < node.numfaces; i++) {
+		int raw_idx = (int)node.firstface + i;
+		if (raw_idx >= (int)bsp_data.raw_to_parsed.size()) continue;
+		int parsed = bsp_data.raw_to_parsed[raw_idx];
+		if (parsed < 0) continue;
+
+		const auto &face = bsp_data.faces[parsed];
+		if (face.model_index != 0) continue; // worldspawn only
+		if (face.vertices.size() < 3) continue;
+
+		float t = ray_polygon_intersect(origin, dir, face);
+		if (t > 0 && t < best_hit.t && t >= t_min && t <= t_max) {
+			best_hit.face_index = parsed;
+			best_hit.t = t;
+			best_hit.hit_pos[0] = origin[0] + dir[0] * t;
+			best_hit.hit_pos[1] = origin[1] + dir[1] * t;
+			best_hit.hit_pos[2] = origin[2] + dir[2] * t;
+		}
+	}
+
+	// Classify ray endpoints against the plane
+	float d_start = plane.normal[0] * (origin[0] + dir[0] * t_min) +
+	                plane.normal[1] * (origin[1] + dir[1] * t_min) +
+	                plane.normal[2] * (origin[2] + dir[2] * t_min) - plane.dist;
+	float d_end   = plane.normal[0] * (origin[0] + dir[0] * t_max) +
+	                plane.normal[1] * (origin[1] + dir[1] * t_max) +
+	                plane.normal[2] * (origin[2] + dir[2] * t_max) - plane.dist;
+
+	if (d_start >= 0 && d_end >= 0) {
+		trace_ray_bsp(bsp_data, node.children[0], origin, dir, t_min, t_max, best_hit);
+	} else if (d_start < 0 && d_end < 0) {
+		trace_ray_bsp(bsp_data, node.children[1], origin, dir, t_min, t_max, best_hit);
+	} else {
+		// Ray crosses the plane — compute split point
+		float denom = plane.normal[0] * dir[0] + plane.normal[1] * dir[1] + plane.normal[2] * dir[2];
+		float t_split;
+		if (fabsf(denom) < 1e-8f) {
+			t_split = (t_min + t_max) * 0.5f;
+		} else {
+			float origin_d = plane.normal[0] * origin[0] + plane.normal[1] * origin[1] + plane.normal[2] * origin[2];
+			t_split = (plane.dist - origin_d) / denom;
+			t_split = clamp(t_split, t_min, t_max);
+		}
+
+		int near_child = d_start >= 0 ? 0 : 1;
+		int far_child = 1 - near_child;
+		trace_ray_bsp(bsp_data, node.children[near_child], origin, dir, t_min, t_split, best_hit);
+		trace_ray_bsp(bsp_data, node.children[far_child], origin, dir, t_split, t_max, best_hit);
+	}
+}
+
+} // anonymous namespace
+
+Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
+	if (!parser) return Dictionary();
+	const auto &bsp_data = parser->get_data();
+	if (bsp_data.models.empty() || bsp_data.lighting.empty()) return Dictionary();
+
+	uint64_t t0 = Time::get_singleton()->get_ticks_msec();
+
+	// Grid bounds from model 0 (worldspawn), padded by 1 cell
+	float mins[3] = {
+		bsp_data.models[0].mins[0] - cell_size_gs,
+		bsp_data.models[0].mins[1] - cell_size_gs,
+		bsp_data.models[0].mins[2] - cell_size_gs
+	};
+	float maxs[3] = {
+		bsp_data.models[0].maxs[0] + cell_size_gs,
+		bsp_data.models[0].maxs[1] + cell_size_gs,
+		bsp_data.models[0].maxs[2] + cell_size_gs
+	};
+
+	int dims[3];
+	for (int i = 0; i < 3; i++) {
+		dims[i] = (int)ceilf((maxs[i] - mins[i]) / cell_size_gs);
+		if (dims[i] < 1) dims[i] = 1;
+	}
+
+	// GoldSrc directions for ambient cube:
+	// Index 0: +X_gs, 1: -X_gs, 2: +Y_gs, 3: -Y_gs, 4: +Z_gs, 5: -Z_gs
+	static const float directions[6][3] = {
+		{ 1, 0, 0}, {-1, 0, 0},
+		{ 0, 1, 0}, { 0,-1, 0},
+		{ 0, 0, 1}, { 0, 0,-1}
+	};
+
+	// 3D texture layout: each direction gets dims[2] slices (GoldSrc Z = Godot Y),
+	// each slice is dims[0] x dims[1] (GoldSrc XY = Godot XZ), RGB8.
+	int slice_w = dims[0];
+	int slice_h = dims[1];
+	int num_slices = dims[2];
+	size_t slice_bytes = (size_t)slice_w * slice_h * 3;
+
+	// Allocate 6 direction buffers, each with num_slices * slice_bytes
+	size_t vol_bytes = slice_bytes * num_slices;
+	vector<vector<uint8_t>> pixel_data(6, vector<uint8_t>(vol_bytes, 0));
+
+	// Track which cells have valid data (non-solid, traced)
+	size_t total_cells = (size_t)dims[0] * dims[1] * dims[2];
+	vector<bool> cell_valid(total_cells, false);
+
+	float max_trace_dist = 8192.0f;
+	int head_node = bsp_data.models[0].headnode[0];
+	int cells_traced = 0;
+	int cells_solid = 0;
+
+	for (int gz = 0; gz < dims[2]; gz++) {
+		for (int gy = 0; gy < dims[1]; gy++) {
+			for (int gx = 0; gx < dims[0]; gx++) {
+				float cx = mins[0] + (gx + 0.5f) * cell_size_gs;
+				float cy = mins[1] + (gy + 0.5f) * cell_size_gs;
+				float cz = mins[2] + (gz + 0.5f) * cell_size_gs;
+
+				// Check if cell is in solid
+				float gs_pos[3] = {cx, cy, cz};
+				{
+					int node_idx = head_node;
+					while (node_idx >= 0) {
+						if ((size_t)node_idx >= bsp_data.nodes.size()) break;
+						const auto &node = bsp_data.nodes[node_idx];
+						if (node.planenum < 0 || (size_t)node.planenum >= bsp_data.planes.size()) break;
+						const auto &plane = bsp_data.planes[node.planenum];
+						float d = plane.normal[0] * cx + plane.normal[1] * cy + plane.normal[2] * cz;
+						node_idx = (d >= plane.dist) ? node.children[0] : node.children[1];
+					}
+					int leaf_idx = -(node_idx + 1);
+					if (leaf_idx >= 0 && (size_t)leaf_idx < bsp_data.leafs.size()) {
+						if (bsp_data.leafs[leaf_idx].contents == goldsrc::CONTENTS_SOLID) {
+							cells_solid++;
+							continue;
+						}
+					}
+				}
+
+				cells_traced++;
+				size_t cell_idx = (size_t)gz * dims[0] * dims[1] + (size_t)gy * dims[0] + gx;
+				cell_valid[cell_idx] = true;
+
+				// Pixel offset within slice gz: row gy, column gx
+				size_t px_ofs = (size_t)gz * slice_bytes + ((size_t)gy * slice_w + gx) * 3;
+
+				for (int d = 0; d < 6; d++) {
+					LightGridRayHit hit;
+					trace_ray_bsp(bsp_data, head_node, gs_pos, directions[d],
+						0.0f, max_trace_dist, hit);
+
+					if (hit.face_index >= 0) {
+						float r, g, b;
+						sample_lightmap_at(bsp_data.faces[hit.face_index],
+							hit.hit_pos, bsp_data.lighting, r, g, b);
+						pixel_data[d][px_ofs + 0] = (uint8_t)clamp(r, 0.0f, 255.0f);
+						pixel_data[d][px_ofs + 1] = (uint8_t)clamp(g, 0.0f, 255.0f);
+						pixel_data[d][px_ofs + 2] = (uint8_t)clamp(b, 0.0f, 255.0f);
+					}
+				}
+			}
+		}
+	}
+
+	// Flood-fill invalid (solid) cells from nearest valid neighbors.
+	// This prevents trilinear filtering from interpolating toward black at boundaries.
+	{
+		static const int offsets[6][3] = {
+			{-1,0,0},{1,0,0},{0,-1,0},{0,1,0},{0,0,-1},{0,0,1}
+		};
+		int cells_filled = 0;
+		// Iterate multiple passes until no more cells are filled
+		for (int pass = 0; pass < 4; pass++) {
+			int filled_this_pass = 0;
+			for (int gz = 0; gz < dims[2]; gz++) {
+				for (int gy = 0; gy < dims[1]; gy++) {
+					for (int gx = 0; gx < dims[0]; gx++) {
+						size_t idx = (size_t)gz * dims[0] * dims[1] + (size_t)gy * dims[0] + gx;
+						if (cell_valid[idx]) continue;
+
+						// Average all valid neighbors
+						int count = 0;
+						float accum[6][3] = {};
+						for (int n = 0; n < 6; n++) {
+							int nx = gx + offsets[n][0];
+							int ny = gy + offsets[n][1];
+							int nz = gz + offsets[n][2];
+							if (nx < 0 || nx >= dims[0] || ny < 0 || ny >= dims[1] ||
+								nz < 0 || nz >= dims[2]) continue;
+							size_t nidx = (size_t)nz * dims[0] * dims[1] + (size_t)ny * dims[0] + nx;
+							if (!cell_valid[nidx]) continue;
+							count++;
+							size_t npx = (size_t)nz * slice_bytes + ((size_t)ny * slice_w + nx) * 3;
+							for (int d = 0; d < 6; d++) {
+								accum[d][0] += pixel_data[d][npx + 0];
+								accum[d][1] += pixel_data[d][npx + 1];
+								accum[d][2] += pixel_data[d][npx + 2];
+							}
+						}
+						if (count == 0) continue;
+
+						float inv = 1.0f / count;
+						size_t px_ofs = (size_t)gz * slice_bytes + ((size_t)gy * slice_w + gx) * 3;
+						for (int d = 0; d < 6; d++) {
+							pixel_data[d][px_ofs + 0] = (uint8_t)(accum[d][0] * inv);
+							pixel_data[d][px_ofs + 1] = (uint8_t)(accum[d][1] * inv);
+							pixel_data[d][px_ofs + 2] = (uint8_t)(accum[d][2] * inv);
+						}
+						cell_valid[idx] = true;
+						filled_this_pass++;
+					}
+				}
+			}
+			cells_filled += filled_this_pass;
+			if (filled_this_pass == 0) break;
+		}
+		UtilityFunctions::print("[GoldSrc] Light grid flood-fill: ", (int64_t)cells_filled, " cells filled");
+	}
+
+	// Build 6 arrays of slice Images for Texture3D construction.
+	// GoldSrc → Godot direction mapping:
+	// GS +X → Godot -X,  GS -X → Godot +X
+	// GS +Y → Godot +Z,  GS -Y → Godot -Z
+	// GS +Z → Godot +Y,  GS -Z → Godot -Y
+	// Godot order [+X, -X, +Y, -Y, +Z, -Z] = GS indices [1, 0, 4, 5, 2, 3]
+	static const int gs_to_godot[6] = {1, 0, 4, 5, 2, 3};
+
+	// Each direction produces an Array of num_slices Images (sliced along GoldSrc Z = Godot Y)
+	Array dir_slices; // Array of 6 Arrays, each containing num_slices Images
+	dir_slices.resize(6);
+	for (int godot_dir = 0; godot_dir < 6; godot_dir++) {
+		int gs_dir = gs_to_godot[godot_dir];
+		Array slices;
+		slices.resize(num_slices);
+		for (int s = 0; s < num_slices; s++) {
+			PackedByteArray pba;
+			pba.resize(slice_bytes);
+			memcpy(pba.ptrw(), pixel_data[gs_dir].data() + (size_t)s * slice_bytes, slice_bytes);
+			slices[s] = Image::create_from_data(slice_w, slice_h, false, Image::FORMAT_RGB8, pba);
+		}
+		dir_slices[godot_dir] = slices;
+	}
+
+	// Grid origin in Godot coords: GS(mins) → Godot(-mins[0]*sf, mins[2]*sf, mins[1]*sf)
+	Vector3 grid_origin(-mins[0] * scale_factor, mins[2] * scale_factor, mins[1] * scale_factor);
+	// Grid dims in Godot coords: GS(x,y,z) → Godot(x, z, y)
+	Vector3i grid_dims(dims[0], dims[2], dims[1]);
+
+	Dictionary result;
+	result["grid_origin"] = grid_origin;
+	result["grid_dims"] = grid_dims;
+	result["cell_size"] = (double)(cell_size_gs * scale_factor);
+	result["dir_slices"] = dir_slices; // 6 arrays of Images for Texture3D
+
+	uint64_t elapsed = Time::get_singleton()->get_ticks_msec() - t0;
+	UtilityFunctions::print("[GoldSrc] Light grid baked: ", dims[0], "x", dims[1], "x", dims[2],
+		" (", (int64_t)cells_traced, " traced, ", (int64_t)cells_solid, " solid, ",
+		(int64_t)elapsed, "ms)");
+
+	return result;
 }
 

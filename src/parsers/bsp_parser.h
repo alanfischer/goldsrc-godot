@@ -148,6 +148,10 @@ struct ParsedFace {
 	float normal[3] = {0, 0, 0}; // face normal (GoldSrc coords)
 	float s_axis[3] = {1, 0, 0}; // texture S axis (GoldSrc coords)
 	float t_axis[3] = {0, 1, 0}; // texture T axis (GoldSrc coords)
+	float s_offset = 0; // texinfo vecs[0][3] — S axis offset
+	float t_offset = 0; // texinfo vecs[1][3] — T axis offset
+	int lm_mins_s = 0;  // floor(min_s / 16) — lightmap origin in texel space
+	int lm_mins_t = 0;  // floor(min_t / 16)
 };
 
 struct ParsedEntity {
