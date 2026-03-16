@@ -4,9 +4,13 @@ cmake-build-*/
 
 # Compiled binaries
 addons/goldsrc/bin/
+build-release/
+src/test_hull_csg
 
 # Godot
+.godot/
 demo/.godot/
+*.uid
 
 # Game assets (user-provided)
 *.bsp
@@ -19,6 +23,9 @@ demo/.godot/
 .idea/
 *.swp
 *~
+
+# Debug logs
+*.txt
 
 # OS
 .DS_Store
