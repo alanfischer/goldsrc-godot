@@ -10,12 +10,12 @@ A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
 - Full BSP30 format with face-based mesh generation
 - Atlas-packed lightmaps with 64 lightstyle channels and runtime rebaking
 - Embedded and WAD-referenced textures with transparency (`{` prefix alpha-scissor)
-- Hull 0 collision (StaticBody3D + ConcavePolygonShape3D)
+- Hull 0 collision (StaticBody3D for worldspawn, AnimatableBody3D for brush entities)
 - Clip brush reconstruction from hull 1 clipping data — un-expands Minkowski-expanded hull planes back to original brush geometry, then clips against hull 0 to recover invisible collision brushes that have no render faces
 - Water volume extraction as Area3D with ConvexPolygonShape3D
 - Automatic occluder generation (OccluderInstance3D + PolygonOccluder3D) — identifies large opaque faces, merges coplanar groups into combined occluders, with fallback to individual face occluders
 - Worldspawn spatial splitting — walks the BSP tree to group faces into spatial clusters, producing separate MeshInstance3D nodes per group for better frustum culling
-- Brush entity geometry with per-entity collision shapes and model/origin support
+- Brush entity geometry wrapped in AnimatableBody3D ("Body") with meshes and collision inside, ready for GDScript movement without body conversion
 - Point entity nodes (Node3D) with entity properties stored as metadata — classname, targetname, origin, angles, and all other key-value pairs are accessible from GDScript via `node.get_meta("entity")`
 - Entity lump parsing (key-value dictionaries accessible from GDScript)
 - Debug hull visualization meshes (optional) — renders solid/empty cells for collision debugging
@@ -50,7 +50,7 @@ Drop files into a project and they auto-import:
 | SPR | `.spr` | `.tres` | SpriteFrames resource with all frames |
 | WAD | `.wad` | `.png` files | Extracts individual textures as PNGs |
 
-All imported scenes contain only standard Godot types (Node3D, MeshInstance3D, ArrayMesh, Skeleton3D, AnimationPlayer, StaticBody3D, OccluderInstance3D, etc.) and do **not** require the GDExtension at runtime.
+All imported scenes contain only standard Godot types (Node3D, MeshInstance3D, ArrayMesh, Skeleton3D, AnimationPlayer, StaticBody3D, AnimatableBody3D, OccluderInstance3D, etc.) and do **not** require the GDExtension at runtime.
 
 ### Headless Batch Conversion
 
