@@ -148,10 +148,8 @@ func _convert_one(bsp_path: String, wads: Array[GoldSrcWAD],
 
 func _apply_overbright(node: Node, scale: float) -> void:
 	for child in node.get_children():
-		for mesh_child in child.get_children():
-			if not mesh_child is MeshInstance3D:
-				continue
-			var mesh: Mesh = mesh_child.mesh
+		if child is MeshInstance3D:
+			var mesh: Mesh = child.mesh
 			if not mesh:
 				continue
 			for surf_idx in mesh.get_surface_count():
@@ -160,6 +158,8 @@ func _apply_overbright(node: Node, scale: float) -> void:
 					mat.set_shader_parameter("overbright", scale)
 				elif mat is StandardMaterial3D and mat.detail_enabled:
 					mat.albedo_color = Color(scale, scale, scale)
+		else:
+			_apply_overbright(child, scale)
 
 
 func _log_time(label: String, since: int) -> void:

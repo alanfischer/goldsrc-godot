@@ -7,6 +7,7 @@
 #include <godot_cpp/classes/shader_material.hpp>
 #include <godot_cpp/classes/shader.hpp>
 #include <godot_cpp/classes/static_body3d.hpp>
+#include <godot_cpp/classes/animatable_body3d.hpp>
 #include <godot_cpp/classes/area3d.hpp>
 #include <godot_cpp/classes/concave_polygon_shape3d.hpp>
 #include <godot_cpp/classes/convex_polygon_shape3d.hpp>
@@ -758,13 +759,24 @@ void GoldSrcBSP::build_mesh() {
 
 		int total_mesh_instances = 0;
 
+		// For brush entities (m > 0), wrap meshes + collision in AnimatableBody3D
+		// so GDScript can move them without body conversion.
+		AnimatableBody3D *body_node = nullptr;
+		if (m > 0) {
+			body_node = memnew(AnimatableBody3D);
+			body_node->set_name("Body");
+			body_node->set_collision_layer(1);
+			body_node->set_collision_mask(0);
+			model_node->add_child(body_node);
+		}
+
 		for (size_t sg_idx = 0; sg_idx < spatial_groups.size(); sg_idx++) {
 			const auto &sg = spatial_groups[sg_idx];
 
 			// For worldspawn spatial groups, create an intermediate Node3D
 			// so each texture-group MeshInstance3D gets a localized AABB.
-			// For brush entities, parent directly to model_node.
-			Node3D *group_parent = model_node;
+			// For brush entities, meshes go inside the AnimatableBody3D.
+			Node3D *group_parent = (m > 0) ? (Node3D *)body_node : model_node;
 			if (m == 0 && spatial_groups.size() > 1) {
 				group_parent = memnew(Node3D);
 				group_parent->set_name(String(sg.label.c_str()));
@@ -1096,9 +1108,8 @@ void GoldSrcBSP::build_mesh() {
 			build_occluders(model_node);
 			log_timing("water + occluders");
 		} else {
-			// Brush entities: hull 0 collision on layer 1 (GDScript converts
-			// to Area3D for triggers/ladders by reparenting the CollisionShape3D)
-			build_hull_collision(model_node, m, 0, "StaticBody3D", 1);
+			// Brush entities: collision goes inside the AnimatableBody3D
+			build_brush_collision(body_node, m);
 		}
 	}
 	log_timing("brush entity meshes + collision");
@@ -1203,6 +1214,47 @@ void GoldSrcBSP::build_hull_collision(Node3D *parent, int model_index,
 
 	parent->add_child(body);
 	UtilityFunctions::print("[GoldSrc] Hull 0 collision: ",
+		(int64_t)face_count, " faces (",
+		(int64_t)(all_tris.size() / 3), " tris) for model ",
+		(int64_t)model_index);
+}
+
+void GoldSrcBSP::build_brush_collision(AnimatableBody3D *body, int model_index) {
+	const auto &bsp_data = parser->get_data();
+
+	if (model_index < 0 || model_index >= (int)bsp_data.models.size()) return;
+
+	PackedVector3Array all_tris;
+	int face_count = 0;
+
+	for (const auto &face : bsp_data.faces) {
+		if (face.model_index != model_index) continue;
+		if (!face.texture_name.empty() && face.texture_name[0] == '!') continue;
+		int nv = (int)face.vertices.size();
+		if (nv < 3) continue;
+		for (int i = 2; i < nv; i++) {
+			const auto &v0 = face.vertices[0];
+			const auto &v1 = face.vertices[i - 1];
+			const auto &v2 = face.vertices[i];
+			all_tris.push_back(goldsrc_to_godot(v0.pos[0], v0.pos[1], v0.pos[2]));
+			all_tris.push_back(goldsrc_to_godot(v1.pos[0], v1.pos[1], v1.pos[2]));
+			all_tris.push_back(goldsrc_to_godot(v2.pos[0], v2.pos[1], v2.pos[2]));
+		}
+		face_count++;
+	}
+
+	if (all_tris.is_empty()) return;
+
+	Ref<ConcavePolygonShape3D> shape;
+	shape.instantiate();
+	shape->set_faces(all_tris);
+
+	CollisionShape3D *col = memnew(CollisionShape3D);
+	col->set_name("CollisionShape3D");
+	col->set_shape(shape);
+	body->add_child(col);
+
+	UtilityFunctions::print("[GoldSrc] Brush collision: ",
 		(int64_t)face_count, " faces (",
 		(int64_t)(all_tris.size() / 3), " tris) for model ",
 		(int64_t)model_index);

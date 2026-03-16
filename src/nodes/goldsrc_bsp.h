@@ -1,6 +1,7 @@
 #pragma once
 
 #include <godot_cpp/classes/node3d.hpp>
+#include <godot_cpp/classes/animatable_body3d.hpp>
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/variant/string.hpp>
@@ -61,6 +62,7 @@ private:
 	void build_hull_collision(godot::Node3D *parent, int model_index,
 		int hull_index, const godot::String &body_name,
 		uint32_t collision_layer);
+	void build_brush_collision(godot::AnimatableBody3D *body, int model_index);
 	void build_water_volumes(godot::Node3D *parent);
 	void build_occluders(godot::Node3D *parent);
 	void rebake_lightstyle(int style_index);
