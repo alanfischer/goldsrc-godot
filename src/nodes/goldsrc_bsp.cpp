@@ -2237,7 +2237,7 @@ Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 		float yaw_rad = yaw_deg * 3.14159265f / 180.0f;
 		sun_dir[0] = -(cosf(pitch_rad) * cosf(yaw_rad));
 		sun_dir[1] = -(cosf(pitch_rad) * sinf(yaw_rad));
-		sun_dir[2] = sinf(pitch_rad);
+		sun_dir[2] = -sinf(pitch_rad);
 		has_sky_light = true;
 		break; // use first light_environment only
 	}
