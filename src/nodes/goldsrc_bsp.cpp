@@ -1105,12 +1105,44 @@ void GoldSrcBSP::build_mesh() {
 			// Hull 0: face-based collision (exact visible geometry)
 			build_hull_collision(model_node, m, 0, "WorldCollision", 1);
 			log_timing("hull 0 collision");
-			build_water_volumes(model_node);
+			{
+				Area3D *water = memnew(Area3D);
+				water->set_name("WaterVolumes");
+				water->set_collision_layer(1 << 2);
+				water->set_collision_mask(0);
+				water->set_monitorable(true);
+				water->set_monitoring(false);
+				build_brush_convex(water, 0, goldsrc::CONTENTS_WATER);
+				if (water->get_child_count() > 0) {
+					model_node->add_child(water);
+				} else {
+					memdelete(water);
+				}
+			}
 			build_occluders(model_node);
 			log_timing("water + occluders");
 		} else {
-			// Brush entities: collision goes inside the AnimatableBody3D
-			build_brush_collision(body_node, m);
+			// Brush entity collision: convex shapes from BSP leaf decomposition.
+			// To revert to triangle-soup collision: change to build_brush_concave.
+			build_brush_convex(body_node, m);
+			// Volume Area3D shares the same shape resources for containment detection.
+			if (body_node->get_child_count() > 0) {
+				Area3D *vol = memnew(Area3D);
+				vol->set_name("Volume");
+				vol->set_collision_layer(0);
+				vol->set_collision_mask(0);
+				vol->set_monitorable(false);
+				vol->set_monitoring(false);
+				for (int i = 0; i < body_node->get_child_count(); i++) {
+					CollisionShape3D *src = Object::cast_to<CollisionShape3D>(body_node->get_child(i));
+					if (!src) continue;
+					CollisionShape3D *col = memnew(CollisionShape3D);
+					col->set_name(src->get_name());
+					col->set_shape(src->get_shape()); // shared Ref, not duplicated
+					vol->add_child(col);
+				}
+				model_node->add_child(vol);
+			}
 		}
 	}
 	log_timing("brush entity meshes + collision");
@@ -1220,7 +1252,7 @@ void GoldSrcBSP::build_hull_collision(Node3D *parent, int model_index,
 		(int64_t)model_index);
 }
 
-void GoldSrcBSP::build_brush_collision(AnimatableBody3D *body, int model_index) {
+void GoldSrcBSP::build_brush_concave(Node3D *parent, int model_index) {
 	const auto &bsp_data = parser->get_data();
 
 	if (model_index < 0 || model_index >= (int)bsp_data.models.size()) return;
@@ -1253,46 +1285,51 @@ void GoldSrcBSP::build_brush_collision(AnimatableBody3D *body, int model_index) 
 	CollisionShape3D *col = memnew(CollisionShape3D);
 	col->set_name("CollisionShape3D");
 	col->set_shape(shape);
-	body->add_child(col);
-
+	parent->add_child(col);
 }
 
-void GoldSrcBSP::build_water_volumes(Node3D *parent) {
+void GoldSrcBSP::build_brush_convex(Node3D *parent, int model_index,
+		int contents_filter) {
 	const auto &bsp_data = parser->get_data();
-	if (bsp_data.models.empty()) return;
+	if (model_index < 0 || model_index >= (int)bsp_data.models.size()) return;
 
-	const auto &bmodel = bsp_data.models[0]; // worldspawn
+	const auto &mdl = bsp_data.models[model_index];
 
-	// Bounding box planes (padded)
+	// Bounding box planes from the model (padded slightly)
 	HullPlane bbox_planes[6];
-	bbox_planes[0] = {{ 1, 0, 0}, bmodel.maxs[0] + 1.0f};
-	bbox_planes[1] = {{-1, 0, 0}, -bmodel.mins[0] + 1.0f};
-	bbox_planes[2] = {{ 0, 1, 0}, bmodel.maxs[1] + 1.0f};
-	bbox_planes[3] = {{ 0,-1, 0}, -bmodel.mins[1] + 1.0f};
-	bbox_planes[4] = {{ 0, 0, 1}, bmodel.maxs[2] + 1.0f};
-	bbox_planes[5] = {{ 0, 0,-1}, -bmodel.mins[2] + 1.0f};
+	bbox_planes[0] = {{ 1, 0, 0}, mdl.maxs[0] + 1.0f};
+	bbox_planes[1] = {{-1, 0, 0}, -mdl.mins[0] + 1.0f};
+	bbox_planes[2] = {{ 0, 1, 0}, mdl.maxs[1] + 1.0f};
+	bbox_planes[3] = {{ 0,-1, 0}, -mdl.mins[1] + 1.0f};
+	bbox_planes[4] = {{ 0, 0, 1}, mdl.maxs[2] + 1.0f};
+	bbox_planes[5] = {{ 0, 0,-1}, -mdl.mins[2] + 1.0f};
 
-	const float EPSILON = 0.1f; // slightly larger epsilon for water volumes
+	// Collect matching leaf content types.
+	// contents_filter == 0: match all non-empty contents (SOLID, WATER, etc.)
+	// Otherwise: match only the specified content type.
+	vector<int> target_types;
+	if (contents_filter == 0) {
+		target_types = {goldsrc::CONTENTS_SOLID, goldsrc::CONTENTS_WATER};
+	} else {
+		target_types = {contents_filter};
+	}
 
-	// Walk hull 0 BSP tree collecting CONTENTS_WATER leaves
-	int root = bmodel.headnode[0];
-	vector<HullPlane> accumulated;
-	vector<ConvexCell> cells;
-	goldsrc_hull::walk_bsp_tree(bsp_data.nodes, bsp_data.leafs, bsp_data.planes,
-		root, accumulated, cells, goldsrc::CONTENTS_WATER);
+	vector<ConvexCell> all_cells;
+	for (int tc : target_types) {
+		vector<HullPlane> accumulated;
+		vector<ConvexCell> cells;
+		goldsrc_hull::walk_bsp_tree(bsp_data.nodes, bsp_data.leafs, bsp_data.planes,
+			mdl.headnode[0], accumulated, cells, tc);
+		all_cells.insert(all_cells.end(),
+			std::make_move_iterator(cells.begin()),
+			std::make_move_iterator(cells.end()));
+	}
 
-	if (cells.empty()) return;
+	if (all_cells.empty()) return;
 
-	// Create a single Area3D for all water volumes
-	Area3D *water_area = memnew(Area3D);
-	water_area->set_name("WaterVolumes");
-	water_area->set_collision_layer(1 << 2); // layer 3
-	water_area->set_collision_mask(0);
-	water_area->set_monitorable(true);
-	water_area->set_monitoring(false);
-
+	const float EPSILON = 0.1f;
 	int shape_count = 0;
-	for (auto &cell : cells) {
+	for (auto &cell : all_cells) {
 		for (int i = 0; i < 6; i++) {
 			cell.planes.push_back(bbox_planes[i]);
 		}
@@ -1310,19 +1347,10 @@ void GoldSrcBSP::build_water_volumes(Node3D *parent) {
 		shape->set_points(points);
 
 		CollisionShape3D *col = memnew(CollisionShape3D);
-		col->set_name(String("WaterShape_") + String::num_int64(shape_count));
+		col->set_name(String("ConvexShape_") + String::num_int64(shape_count));
 		col->set_shape(shape);
-		water_area->add_child(col);
+		parent->add_child(col);
 		shape_count++;
-	}
-
-	if (shape_count > 0) {
-		parent->add_child(water_area);
-		UtilityFunctions::print("[GoldSrc] Water volumes: ",
-			(int64_t)shape_count, " convex shapes from ",
-			(int64_t)cells.size(), " BSP leaves");
-	} else {
-		memdelete(water_area);
 	}
 }
 

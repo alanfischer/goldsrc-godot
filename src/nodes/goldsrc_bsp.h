@@ -67,8 +67,13 @@ private:
 	void build_hull_collision(godot::Node3D *parent, int model_index,
 		int hull_index, const godot::String &body_name,
 		uint32_t collision_layer);
-	void build_brush_collision(godot::AnimatableBody3D *body, int model_index);
-	void build_water_volumes(godot::Node3D *parent);
+	// Brush entity collision: two approaches (swap at the call site to compare).
+	// Concave: triangle soup from face geometry (ConcavePolygonShape3D).
+	// Convex: solid cells from BSP leaf decomposition (ConvexPolygonShape3D).
+	// Both add CollisionShape3D children directly to parent.
+	void build_brush_concave(godot::Node3D *parent, int model_index);
+	void build_brush_convex(godot::Node3D *parent, int model_index,
+		int contents_filter = 0);
 	void build_occluders(godot::Node3D *parent);
 	void rebake_lightstyle(int style_index);
 

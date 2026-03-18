@@ -2,6 +2,7 @@
 #include "texture_decode.h"
 #include <cstring>
 #include <cmath>
+#include <set>
 
 using namespace std;
 
@@ -135,6 +136,23 @@ void BSPParser::parse_faces(const uint8_t *data, size_t size) {
 
 	bsp_data.raw_to_parsed.assign(raw_faces.size(), -1);
 
+	// Pre-identify which models are water brush entities by scanning face
+	// textures. Used to detect internal faces between adjacent water volumes
+	// (without culling exposed faces like waterfalls).
+	set<int> water_model_set;
+	for (size_t i = 0; i < raw_faces.size(); i++) {
+		int mi = face_to_model[i];
+		if (mi <= 0) continue;
+		if (raw_faces[i].texinfo < 0 || (size_t)raw_faces[i].texinfo >= texinfos.size()) continue;
+		int ti_idx = texinfos[raw_faces[i].texinfo].miptex;
+		if (ti_idx < 0 || ti_idx >= (int)bsp_data.textures.size()) continue;
+		const auto &tn = bsp_data.textures[ti_idx].name;
+		if (tn.find("water") != string::npos ||
+		    (!tn.empty() && (tn[0] == '!' || tn[0] == '*')))
+			water_model_set.insert(mi);
+	}
+
+	int water_faces_culled = 0;
 	for (size_t f = 0; f < raw_faces.size(); f++) {
 		const BSPFace &face = raw_faces[f];
 
@@ -153,6 +171,129 @@ void BSPParser::parse_faces(const uint8_t *data, size_t size) {
 		// Skip tool textures on worldspawn (they have no visible geometry or
 		// face-based collision). Keep them on brush entities (e.g. func_ladder).
 		if (is_tool_texture(tex.name) && face_to_model[f] == 0) continue;
+
+		// Cull internal water faces. In GoldSrc, water brush entities only show
+		// their top surface — side and bottom faces are hidden behind pool
+		// geometry. For worldspawn water, check both sides against the BSP tree.
+		if (face.planenum >= 0 && (size_t)face.planenum < planes.size()) {
+			const auto &pl = planes[face.planenum];
+			float nx = pl.normal[0], ny = pl.normal[1], nz = pl.normal[2];
+			if (face.side) { nx = -nx; ny = -ny; nz = -nz; }
+
+			// For water brush entity faces: cull if the outside of this face
+			// is inside another water model's BSP volume (internal seam between
+			// adjacent water volumes). Keep exposed faces (e.g. waterfalls).
+			if (water_model_set.count(face_to_model[f])) {
+				// Compute face center
+				float wcx = 0, wcy = 0, wcz = 0;
+				int wnv = 0;
+				for (int e = 0; e < face.numedges; e++) {
+					size_t se_idx = (size_t)face.firstedge + e;
+					if (se_idx >= surfedges.size()) break;
+					int32_t se = surfedges[se_idx];
+					size_t ei = (size_t)(se >= 0 ? se : -se);
+					if (ei >= edges.size()) break;
+					uint16_t vi = se >= 0 ? edges[ei].v[0] : edges[ei].v[1];
+					if ((size_t)vi >= vertexes.size()) break;
+					wcx += vertexes[vi].point[0];
+					wcy += vertexes[vi].point[1];
+					wcz += vertexes[vi].point[2];
+					wnv++;
+				}
+				if (wnv > 0) {
+					wcx /= wnv; wcy /= wnv; wcz /= wnv;
+					// Probe both sides of the face. For each direction, walk
+					// hull 0 (exact BSP geometry) of every OTHER water model.
+					// If the probe lands inside another water entity, this
+					// face is an internal seam between adjacent water entities.
+					// Note: hull 0 uses the exact brush geometry (nodes/leafs),
+					// NOT hull 1 (clipnodes) which is expanded by player bbox
+					// and would false-positive on nearby but non-overlapping
+					// brushes (e.g. waterfall next to a pool).
+					bool inside_other = false;
+					for (int ps = 0; ps < 2 && !inside_other; ps++) {
+						float sign = ps == 0 ? 1.0f : -1.0f;
+						float probe[3] = {
+							wcx + nx * sign * 2.0f,
+							wcy + ny * sign * 2.0f,
+							wcz + nz * sign * 2.0f
+						};
+						for (int wmi : water_model_set) {
+							if (wmi == face_to_model[f]) continue;
+							// Walk hull 0 (nodes/leafs) of the other water model
+							int ni = raw_models[wmi].headnode[0];
+							while (ni >= 0 && (size_t)ni < nodes.size()) {
+								const auto &nd = nodes[ni];
+								if (nd.planenum < 0 || (size_t)nd.planenum >= planes.size()) break;
+								const auto &np = planes[nd.planenum];
+								float d = np.normal[0] * probe[0] + np.normal[1] * probe[1]
+								        + np.normal[2] * probe[2] - np.dist;
+								ni = d >= 0 ? nd.children[0] : nd.children[1];
+							}
+							// Negative ni = leaf index: -(ni+1)
+							int li = -(ni + 1);
+							if (li >= 0 && (size_t)li < leafs.size() &&
+							    leafs[li].contents == CONTENTS_SOLID) {
+								inside_other = true;
+								break;
+							}
+						}
+					}
+					if (inside_other) {
+						water_faces_culled++;
+						continue; // internal seam — skip
+					}
+				}
+			}
+
+			// For worldspawn faces, check BSP leaf contents on both sides
+			if (face_to_model[f] == 0) {
+				float cx = 0, cy = 0, cz = 0;
+				int nv_center = 0;
+				for (int e = 0; e < face.numedges; e++) {
+					size_t se_idx = (size_t)face.firstedge + e;
+					if (se_idx >= surfedges.size()) break;
+					int32_t se = surfedges[se_idx];
+					size_t ei = (size_t)(se >= 0 ? se : -se);
+					if (ei >= edges.size()) break;
+					uint16_t vi = se >= 0 ? edges[ei].v[0] : edges[ei].v[1];
+					if ((size_t)vi >= vertexes.size()) break;
+					cx += vertexes[vi].point[0];
+					cy += vertexes[vi].point[1];
+					cz += vertexes[vi].point[2];
+					nv_center++;
+				}
+				if (nv_center > 0) {
+					cx /= nv_center; cy /= nv_center; cz /= nv_center;
+					int root_node = bsp_data.models[0].headnode[0];
+					bool both_water = true;
+					for (int s = 0; s < 2; s++) {
+						float sign = s == 0 ? 1.0f : -1.0f;
+						float probe[3] = {
+							cx + nx * sign * 2.0f,
+							cy + ny * sign * 2.0f,
+							cz + nz * sign * 2.0f
+						};
+						int ni = root_node;
+						while (ni >= 0 && (size_t)ni < nodes.size()) {
+							const auto &nd = nodes[ni];
+							if (nd.planenum < 0 || (size_t)nd.planenum >= planes.size()) break;
+							const auto &np = planes[nd.planenum];
+							float d = np.normal[0] * probe[0] + np.normal[1] * probe[1]
+							        + np.normal[2] * probe[2] - np.dist;
+							ni = d >= 0 ? nd.children[0] : nd.children[1];
+						}
+						int li = -(ni + 1);
+						if (li < 0 || (size_t)li >= leafs.size() ||
+						    leafs[li].contents != CONTENTS_WATER) {
+							both_water = false;
+							break;
+						}
+					}
+					if (both_water) { water_faces_culled++; continue; }
+				}
+			}
+		}
 
 		// Bounds check plane index
 		if (face.planenum < 0 || (size_t)face.planenum >= planes.size()) continue;
@@ -264,6 +405,10 @@ void BSPParser::parse_faces(const uint8_t *data, size_t size) {
 		pface.vertices = std::move(verts);
 		bsp_data.raw_to_parsed[f] = (int)bsp_data.faces.size();
 		bsp_data.faces.push_back(std::move(pface));
+	}
+
+	if (water_faces_culled > 0) {
+		fprintf(stderr, "[BSP] Culled %d internal water faces\n", water_faces_culled);
 	}
 }
 
