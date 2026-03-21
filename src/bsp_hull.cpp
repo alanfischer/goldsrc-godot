@@ -1043,13 +1043,26 @@ vector<ConvexCell> filter_clip_brush_cells(
 		// large (4x half-extents per axis) with centroid h0 non-solid to be
 		// rescued as real clip brushes near corners.
 		if (vert_near_wall(nodes, leafs, planes, hull0_root, rcpt, he)) {
-			bool any_h0s = false, all_h1s = true;
+			bool any_h0s = false;
+			int h1e_cnt_2b = 0;
 			for (const auto &v : verts) {
 				int vh0 = classify_hull0_tree(nodes, leafs, planes, hull0_root, v.gs);
 				if (vh0 == goldsrc::CONTENTS_SOLID) any_h0s = true;
-				if (classify_clip_hull(clipnodes, planes, hull1_root, v.gs) != goldsrc::CONTENTS_SOLID) { all_h1s = false; break; }
+				if (classify_clip_hull(clipnodes, planes, hull1_root, v.gs) != goldsrc::CONTENTS_SOLID) h1e_cnt_2b++;
 			}
-			if (!all_h1s) continue;
+			bool all_h1s = (h1e_cnt_2b == 0);
+			if (!all_h1s) {
+				// Rescue: allow at most 1 h1 EMPTY vert if the cell is big
+				// on 2+ axes, centroid solidly inside h1, and no h0 SOLID
+				// verts. Large real clip brushes near walls can have a single
+				// vertex land just outside the h1 boundary due to clipping.
+				if (h1e_cnt_2b > 1 || any_h0s) continue;
+				int rh1_rescue = classify_clip_hull(clipnodes, planes, hull1_root, rcpt, 4.0f);
+				if (rh1_rescue != goldsrc::CONTENTS_SOLID) continue;
+				int ba_2b = 0;
+				for (int a = 0; a < 3; a++) { if (rdim[a] >= 2.0f * he[a]) ba_2b++; }
+				if (ba_2b < 2) continue;
+			}
 			// Centroid near wall + all h1 SOLID: could be expansion ring or
 			// real clip brush flush with wall. Require centroid solidly inside
 			// h1 (4-unit tolerance) to survive — expansion ring centroids are

@@ -100,6 +100,12 @@ static const TestPoint ww_golem_points[] = {
 	{{-1400.0f, -1928.0f, 216.0f}, "teamspawn_28", false},
 	{{949.9f, -16.1f, 845.0f}, "missing_12", true},
 	{{-1670.6f, -2381.4f, 248.8f}, "missing_13", true},
+	// New missing points (batch 7)
+	{{1201.8f, -2401.6f, 63.2f}, "missing_19", true},
+	{{1558.3f, -1835.4f, 55.6f}, "missing_20", true},
+	{{1904.3f, -1291.5f, 61.4f}, "missing_21", true},
+	{{-1564.9f, -2446.2f, 45.4f}, "missing_22", true},
+	{{-1985.1f, -2190.5f, 56.1f}, "missing_23", true},
 };
 
 // ww_hunt test points
@@ -467,7 +473,9 @@ static void run_tests(const PipelineResult &pipeline, const goldsrc::BSPData &bs
 		int h1_exp = classify_h1(tp.gs);
 		int h0 = goldsrc_hull::classify_hull0_tree(
 			bsp.nodes, bsp.leafs, bsp.planes, hull0_root, tp.gs);
-		printf("  hull1_expanded=%d  hull0=%d\n", h1_exp, h0);
+		int h1_unexp = goldsrc_hull::classify_clip_tree_unexpanded(
+			bsp.clipnodes, bsp.planes, root, he, tp.gs);
+		printf("  hull1_expanded=%d  hull0=%d  hull1_unexpanded=%d\n", h1_exp, h0, h1_unexp);
 
 		int s1_count = 0, s2_count = 0;
 		for (size_t ci = 0; ci < pipeline.solid_cells.size(); ci++)
@@ -476,7 +484,7 @@ static void run_tests(const PipelineResult &pipeline, const goldsrc::BSPData &bs
 			if (aabb_overlaps_cell(tp.gs, he, pipeline.unexpanded_cells[ci], EPSILON)) s2_count++;
 		printf("  step1 (expanded): %d  step2 (unexpanded): %d\n", s1_count, s2_count);
 
-		if (s1_count > 0 && s2_count == 0) {
+		if (s1_count > 0) {
 			for (size_t ci = 0; ci < pipeline.solid_cells.size(); ci++) {
 				if (!aabb_overlaps_cell(tp.gs, he, pipeline.solid_cells[ci], EPSILON)) continue;
 				auto ev = compute_cell_vertices(pipeline.solid_cells[ci].planes, EPSILON);
@@ -503,8 +511,57 @@ static void run_tests(const PipelineResult &pipeline, const goldsrc::BSPData &bs
 					for (const auto &v : uv) {
 						for (int a=0;a<3;a++) { if(v.gs[a]<umn[a])umn[a]=v.gs[a]; if(v.gs[a]>umx[a])umx[a]=v.gs[a]; }
 					}
-					printf("    -> un-expanded: %zu verts, AABB=(%.0f,%.0f,%.0f)-(%.0f,%.0f,%.0f)\n",
-						uv.size(), umn[0],umn[1],umn[2], umx[0],umx[1],umx[2]);
+					bool ue_overlaps = aabb_overlaps_cell(tp.gs, he, ue, EPSILON);
+					printf("    -> un-expanded: %zu verts, AABB=(%.0f,%.0f,%.0f)-(%.0f,%.0f,%.0f) overlaps=%d\n",
+						uv.size(), umn[0],umn[1],umn[2], umx[0],umx[1],umx[2], ue_overlaps);
+					if (!ue_overlaps) {
+						// Show which plane excludes the AABB
+						for (size_t pi = 0; pi < ue.planes.size(); pi++) {
+							const auto &hp = ue.planes[pi];
+							float support = fabsf(hp.normal[0])*he[0]+fabsf(hp.normal[1])*he[1]+fabsf(hp.normal[2])*he[2];
+							float dot = hp.normal[0]*tp.gs[0]+hp.normal[1]*tp.gs[1]+hp.normal[2]*tp.gs[2];
+							float margin = dot - hp.dist - support;
+							if (margin > EPSILON)
+								printf("      plane%zu n=(%.4f,%.4f,%.4f) d=%.2f excludes by %.2f (h1=%d usign=%d)\n",
+									pi, hp.normal[0],hp.normal[1],hp.normal[2], hp.dist, margin, hp.from_hull1, hp.unexpand_sign);
+						}
+						// Try pre-clip-then-unexpand approach
+						vector<ConvexCell> preclip_frags;
+						goldsrc_hull::clip_cell_by_hull0(pipeline.solid_cells[ci],
+							bsp.nodes, bsp.leafs, bsp.planes, hull0_root, EPSILON, preclip_frags);
+						printf("      pre-clip: %zu h0 fragments\n", preclip_frags.size());
+						for (size_t fi = 0; fi < preclip_frags.size(); fi++) {
+							ConvexCell ue_frag;
+							for (const auto &hp : preclip_frags[fi].planes) {
+								HullPlane p = hp;
+								if (p.from_hull1) {
+									float support = fabsf(p.normal[0])*he[0]+fabsf(p.normal[1])*he[1]+fabsf(p.normal[2])*he[2];
+									p.dist -= support * hp.unexpand_sign;
+								}
+								ue_frag.planes.push_back(p);
+							}
+							auto fv = compute_cell_vertices(ue_frag.planes, EPSILON);
+							if (fv.size() < 4) continue;
+							bool frag_overlaps = aabb_overlaps_cell(tp.gs, he, ue_frag, EPSILON);
+							if (frag_overlaps) {
+								float fn[3]={1e9f,1e9f,1e9f},fx[3]={-1e9f,-1e9f,-1e9f};
+								for(const auto&v:fv){for(int a=0;a<3;a++){if(v.gs[a]<fn[a])fn[a]=v.gs[a];if(v.gs[a]>fx[a])fx[a]=v.gs[a];}}
+								printf("      pre-clip frag%zu: %zu verts, AABB=(%.0f,%.0f,%.0f)-(%.0f,%.0f,%.0f) OVERLAPS!\n",
+									fi, fv.size(), fn[0],fn[1],fn[2], fx[0],fx[1],fx[2]);
+							}
+						}
+					}
+					// Also show hull0 clip results for the un-expanded cell
+					if (ue_overlaps) {
+						vector<ConvexCell> ue_frags;
+						goldsrc_hull::clip_cell_by_hull0(ue, bsp.nodes, bsp.leafs, bsp.planes,
+							hull0_root, EPSILON, ue_frags);
+						int ue_frag_overlap = 0;
+						for (size_t fi = 0; fi < ue_frags.size(); fi++) {
+							if (aabb_overlaps_cell(tp.gs, he, ue_frags[fi], EPSILON)) ue_frag_overlap++;
+						}
+						printf("    -> hull0 clip: %zu frags, %d overlap test point\n", ue_frags.size(), ue_frag_overlap);
+					}
 				}
 			}
 		}
