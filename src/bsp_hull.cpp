@@ -1010,6 +1010,45 @@ vector<ConvexCell> filter_clip_brush_cells(
 			}
 		}
 
+		// --- 2aa. Free h1-EMPTY vertex check ---
+		// A cell with h1-EMPTY vertices that are NOT near any wall has grown
+		// beyond the clip brush boundary into open space. This is a growth
+		// artifact from Minkowski un-expansion pushing planes outward. Real
+		// clip brush boundary vertices that land in h1-EMPTY space are at
+		// wall-junction BSP cuts and would be near-wall. Rescue only if the
+		// cell is large enough (max_dim >= 256) to plausibly be a real brush
+		// whose far vertex was clipped to a free position.
+		{
+			int free_h1e = 0;
+			for (const auto &v : verts) {
+				if (classify_clip_hull(clipnodes, planes, hull1_root, v.gs) != goldsrc::CONTENTS_SOLID &&
+					!vert_near_wall(nodes, leafs, planes, hull0_root, v.gs, he)) {
+					free_h1e++;
+				}
+			}
+			if (free_h1e > 0) {
+				int ba_aa = 0;
+				for (int a = 0; a < 3; a++) { if (rdim[a] >= 2.0f * he[a]) ba_aa++; }
+				bool rescued = has_large_clip_rescue(verts, rdim, ba_aa);
+				// Additional rescue for horizontal clip brush slabs (floor/ceiling
+				// clip brushes): thin in Z (≤ 2*he[2]) and no non-near-wall
+				// h1-SOLID vertex (all SOLID verts flush with world geometry).
+				// These have free h1-EMPTY vertices at their open bottom/top face,
+				// which is valid — the face opens toward the room.
+				if (!rescued && rdim[2] <= 2.0f * he[2] + 1.0f) {
+					bool has_nnw_solid = false;
+					for (const auto &v : verts) {
+						if (!vert_near_wall(nodes, leafs, planes, hull0_root, v.gs, he) &&
+							classify_clip_hull(clipnodes, planes, hull1_root, v.gs) == goldsrc::CONTENTS_SOLID) {
+							has_nnw_solid = true; break;
+						}
+					}
+					if (!has_nnw_solid) rescued = true;
+				}
+				if (!rescued) continue;
+			}
+		}
+
 		// --- 2a. All-near-wall check ---
 		// Every vertex has an AABB corner in world geometry. Almost certainly
 		// an expansion ring artifact. Rescue if centroid is h1 SOLID and not

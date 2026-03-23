@@ -200,6 +200,15 @@ static const TestPoint ww_chasm_points[] = {
 	{{-1598.2f, 37.0f, 1044.3f}, "missing_3", true},
 };
 
+// ww_storm test points
+static const TestPoint ww_storm_points[] = {
+	{{771.9f, 310.2f, -56.0f}, "artifact_1", false},
+	{{633.0f, 178.4f, -56.0f}, "artifact_2", false},
+	{{607.5f, -96.1f, -56.0f}, "artifact_3", false},
+	{{794.2f, -240.3f, -56.0f}, "artifact_4", false},
+	{{864.0f, -660.9f, -63.3f}, "artifact_5", false},
+};
+
 static const MapTestData all_maps[] = {
 	{"../../../res/maps/ww_golem.bsp", "ww_golem", ww_golem_points,
 		sizeof(ww_golem_points)/sizeof(ww_golem_points[0])},
@@ -215,6 +224,8 @@ static const MapTestData all_maps[] = {
 		sizeof(castle_rush_points)/sizeof(castle_rush_points[0])},
 	{"../../../res/maps/ww_chasm.bsp", "ww_chasm", ww_chasm_points,
 		sizeof(ww_chasm_points)/sizeof(ww_chasm_points[0])},
+	{"../../../res/maps/ww_storm.bsp", "ww_storm", ww_storm_points,
+		sizeof(ww_storm_points)/sizeof(ww_storm_points[0])},
 };
 
 // --- Pipeline: run full clip brush extraction on a BSP ---
@@ -434,20 +445,23 @@ static void run_tests(const PipelineResult &pipeline, const goldsrc::BSPData &bs
 					ccx/=cverts.size(); ccy/=cverts.size(); ccz/=cverts.size();
 					float ccp[3]={ccx,ccy,ccz};
 					int dch1_0 = classify_h1(ccp, 0);
+					int dch1u = goldsrc_hull::classify_clip_tree_unexpanded(
+						bsp.clipnodes, bsp.planes, root, he, ccp);
 					bool dany_h1e=false, dhas_clip=false;
-					int dh1e_cnt=0;
+					int dh1e_cnt=0, dfree_h1e=0;
 					int dnw_cnt=0;
 					for (const auto &v : cverts) {
 						int h1c = classify_h1(v.gs);
-						if (h1c != goldsrc::CONTENTS_SOLID) { dany_h1e=true; dh1e_cnt++; }
-						if (h1c == goldsrc::CONTENTS_SOLID && !vert_near_wall(v.gs)) dhas_clip=true;
-						if (vert_near_wall(v.gs)) dnw_cnt++;
+						bool nw = vert_near_wall(v.gs);
+						if (h1c != goldsrc::CONTENTS_SOLID) { dany_h1e=true; dh1e_cnt++; if (!nw) dfree_h1e++; }
+						if (h1c == goldsrc::CONTENTS_SOLID && !nw) dhas_clip=true;
+						if (nw) dnw_cnt++;
 					}
 					bool cent_nw = vert_near_wall(ccp);
 					int dch0 = goldsrc_hull::classify_hull0_tree(
 						bsp.nodes, bsp.leafs, bsp.planes, hull0_root, ccp);
-					printf("       centroid=(%.1f,%.1f,%.1f) h1=%d h0=%d h1e=%d/%zu clip=%d near=%d/%zu cnw=%d\n",
-						ccx,ccy,ccz, dch1_0, dch0, dh1e_cnt, cverts.size(), dhas_clip, dnw_cnt, cverts.size(), cent_nw);
+					printf("       centroid=(%.1f,%.1f,%.1f) h1=%d h0=%d h1u=%d h1e=%d/%zu free_h1e=%d clip=%d near=%d/%zu cnw=%d\n",
+						ccx,ccy,ccz, dch1_0, dch0, dch1u, dh1e_cnt, cverts.size(), dfree_h1e, dhas_clip, dnw_cnt, cverts.size(), cent_nw);
 				}
 			}
 			bool ok = overlaps == 0;
