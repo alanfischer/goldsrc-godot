@@ -207,6 +207,10 @@ static const TestPoint ww_storm_points[] = {
 	{{607.5f, -96.1f, -56.0f}, "artifact_3", false},
 	{{794.2f, -240.3f, -56.0f}, "artifact_4", false},
 	{{864.0f, -660.9f, -63.3f}, "artifact_5", false},
+	{{-176.0f, -1351.7f, -110.0f}, "artifact_6", false},
+	{{-176.0f, -1250.5f, -109.7f}, "artifact_7", false},
+	{{-865.2f, -1424.2f, -224.0f}, "artifact_8", false},
+	{{240.5f, 2383.4f, -48.0f}, "artifact_9", false},
 };
 
 static const MapTestData all_maps[] = {
@@ -462,6 +466,12 @@ static void run_tests(const PipelineResult &pipeline, const goldsrc::BSPData &bs
 						bsp.nodes, bsp.leafs, bsp.planes, hull0_root, ccp);
 					printf("       centroid=(%.1f,%.1f,%.1f) h1=%d h0=%d h1u=%d h1e=%d/%zu free_h1e=%d clip=%d near=%d/%zu cnw=%d\n",
 						ccx,ccy,ccz, dch1_0, dch0, dch1u, dh1e_cnt, cverts.size(), dfree_h1e, dhas_clip, dnw_cnt, cverts.size(), cent_nw);
+					for (const auto &v : cverts) {
+						int vh1 = classify_h1(v.gs);
+						int vh1u = goldsrc_hull::classify_clip_tree_unexpanded(bsp.clipnodes, bsp.planes, root, he, v.gs);
+						bool vnw = vert_near_wall(v.gs);
+						printf("         vert(%.1f,%.1f,%.1f) h1=%d h1u=%d nw=%d\n", v.gs[0],v.gs[1],v.gs[2], vh1, vh1u, (int)vnw);
+					}
 				}
 			}
 			bool ok = overlaps == 0;

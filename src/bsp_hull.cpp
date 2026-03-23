@@ -1132,6 +1132,27 @@ vector<ConvexCell> filter_clip_brush_cells(
 		int big_axes = 0;
 		for (int a = 0; a < 3; a++) { if (rdim[a] >= 2.0f * he[a]) big_axes++; }
 		if (!r_big && nw_count > (int)verts.size()/2) {
+			// Kill thin-slab artifacts: any dim < he means the brush is thinner
+			// than the hull half-extent. Exception: cells with h0 SOLID vertices
+			// are real clip brushes embedded in world geometry.
+			bool any_sub_he_2c = false;
+			for (int a = 0; a < 3; a++) { if (rdim[a] < he[a]) { any_sub_he_2c = true; break; } }
+			if (any_sub_he_2c) {
+				bool any_h0s_2c = false;
+				for (const auto &v : verts) {
+					if (classify_hull0_tree(nodes, leafs, planes, hull0_root, v.gs) == goldsrc::CONTENTS_SOLID) {
+						any_h0s_2c = true; break;
+					}
+				}
+				if (!any_h0s_2c) continue;
+				// h0-SOLID verts present but centroid in open air (EMPTY):
+				// expansion ring artifact floating just above floor/wall geometry.
+				// Real thin clip brushes embedded in world have non-EMPTY centroid
+				// content (e.g. CONTENTS_SKY=-6 for floor-embedded clips).
+				int ch0_sub_cpt = classify_hull0_tree(nodes, leafs, planes, hull0_root, rcpt);
+				if (ch0_sub_cpt == goldsrc::CONTENTS_EMPTY) continue;
+			}
+			int ch0_2c = classify_hull0_tree(nodes, leafs, planes, hull0_root, rcpt);
 			if (!has_large_clip_rescue(verts, rdim, big_axes)) {
 				// Secondary rescue for all-near-wall cells: all h1 SOLID,
 				// centroid h0 non-solid, big on 2+ axes, max dim >= 256.
@@ -1139,7 +1160,6 @@ vector<ConvexCell> filter_clip_brush_cells(
 				for (const auto &v : verts) {
 					if (classify_clip_hull(clipnodes, planes, hull1_root, v.gs) != goldsrc::CONTENTS_SOLID) { all_h1s_2c = false; break; }
 				}
-				int ch0_2c = classify_hull0_tree(nodes, leafs, planes, hull0_root, rcpt);
 				float md_2c = fmaxf(rdim[0], fmaxf(rdim[1], rdim[2]));
 				if (!(all_h1s_2c && ch0_2c != goldsrc::CONTENTS_SOLID && big_axes >= 2 && md_2c >= 256.0f)) continue;
 			}
@@ -1220,6 +1240,43 @@ vector<ConvexCell> filter_clip_brush_cells(
 				int ch0_2e = classify_hull0_tree(nodes, leafs, planes, hull0_root, rcpt);
 				float md_2e = fmaxf(rdim[0], fmaxf(rdim[1], rdim[2]));
 				if (!(all_h1s_2e && ch0_2e != goldsrc::CONTENTS_SOLID && big_axes >= 2 && md_2e >= 256.0f)) continue;
+			}
+		}
+		// --- 2f. r_big with near-wall half or majority ---
+		// r_big cells where half or more vertices are near walls but the cell
+		// is not large enough (max dim < 256) to be a real clip brush. These
+		// are expansion ring artifacts from large world brushes.
+		// --- 2f. r_big with near-wall half or majority, all h1 SOLID ---
+		// r_big cells where half or more vertices are near walls and all
+		// vertices are h1 SOLID but the cell is not large enough (max dim
+		// < 256) to be a real clip brush. Cells with h1-EMPTY verts are
+		// already handled by stage 2aa. Cells with h0 SOLID verts are
+		// real clip brushes embedded in world geometry.
+		{
+			int h1e_2f = 0;
+			for (const auto &v : verts) {
+				if (classify_clip_hull(clipnodes, planes, hull1_root, v.gs) != goldsrc::CONTENTS_SOLID)
+					h1e_2f++;
+			}
+			if (r_big && nw_count >= (int)verts.size()/2 && h1e_2f == 0) {
+				bool any_h0s_2f = false;
+				for (const auto &v : verts) {
+					if (classify_hull0_tree(nodes, leafs, planes, hull0_root, v.gs) == goldsrc::CONTENTS_SOLID) {
+						any_h0s_2f = true; break;
+					}
+				}
+				bool hlcr2f = has_large_clip_rescue(verts, rdim, big_axes);
+				if (hlcr2f) goto keep_2f;
+				{
+					// Kill if max dim < 256 (too small to be a real clip brush)
+					// even if h0-SOLID verts present. Real clip brushes with h0
+					// SOLID verts and max dim < 256 can't be distinguished from
+					// expansion ring artifacts near wall corners.
+					float md_2f = fmaxf(rdim[0], fmaxf(rdim[1], rdim[2]));
+					if (md_2f < 256.0f) continue;
+					if (!any_h0s_2f) continue;
+				}
+				keep_2f:;
 			}
 		}
 		final_cells.push_back(std::move(cell));
