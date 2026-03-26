@@ -185,6 +185,7 @@ static const TestPoint ravine_points[] = {
 	{{1281.4f, 1696.0f, 1612.7f}, "artifact_17", false},
 	{{88.0f, 1185.6f, 1648.1f}, "artifact_18", false},
 	{{1368.0f, 1701.5f, 1812.6f}, "artifact_19", false},
+	{{88.0f, -1617.8f, 1729.1f}, "artifact_20", false},
 };
 
 // castle_rush test points
@@ -211,6 +212,10 @@ static const TestPoint ww_storm_points[] = {
 	{{-176.0f, -1250.5f, -109.7f}, "artifact_7", false},
 	{{-865.2f, -1424.2f, -224.0f}, "artifact_8", false},
 	{{240.5f, 2383.4f, -48.0f}, "artifact_9", false},
+	// Expansion ring artifacts at Z=184 floor area
+	{{183.8f, -1256.6f, 184.0f}, "artifact_10", false},
+	{{233.1f, -1101.3f, 184.0f}, "artifact_11", false},
+	{{16.2f, -1007.0f, 184.0f}, "artifact_12", false},
 };
 
 static const MapTestData all_maps[] = {

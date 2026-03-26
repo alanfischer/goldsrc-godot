@@ -1030,6 +1030,41 @@ vector<ConvexCell> filter_clip_brush_cells(
 				int ba_aa = 0;
 				for (int a = 0; a < 3; a++) { if (rdim[a] >= 2.0f * he[a]) ba_aa++; }
 				bool rescued = has_large_clip_rescue(verts, rdim, ba_aa);
+				// Post-rescue check for floor-to-ceiling expansion ring slabs:
+				// a cell exactly player-height tall (Z == 2*he[2]) sandwiched
+				// between a floor and a ceiling is rescued by has_large_clip_rescue
+				// because top-face verts are h1-SOLID from the ceiling's expansion
+				// ring, not from a real clip brush. The signature: ALL non-near-wall
+				// h1-SOLID (rescuing) verts are on the top face (Z_max) AND at
+				// least one near-wall bottom vert has solid ceiling above it at
+				// Z_max + he[2] + 1 (one unit past the expansion boundary).
+				// Use the near-wall vert XY to probe the ceiling, since the centroid
+				// may be over open space (floor only exists near the walls).
+				if (rescued && rdim[2] <= 2.0f * he[2] + 1.0f) {
+					// Require all rescuing verts to be on the top face.
+					bool all_nnw_solid_at_zmax = true;
+
+					for (const auto &v : verts) {
+						if (!vert_near_wall(nodes, leafs, planes, hull0_root, v.gs, he) &&
+							classify_clip_hull(clipnodes, planes, hull1_root, v.gs) == goldsrc::CONTENTS_SOLID &&
+							v.gs[2] < rx[2] - 1.0f) {
+							all_nnw_solid_at_zmax = false; break;
+						}
+					}
+					if (all_nnw_solid_at_zmax) {
+						// Check for ceiling at Z_max + he[2] + 1 above each near-wall
+						// bottom vert (XY from the near-wall vert, Z probes past ceiling).
+						for (const auto &v : verts) {
+							if (!vert_near_wall(nodes, leafs, planes, hull0_root, v.gs, he)) continue;
+							if (v.gs[2] > rn[2] + 1.0f) continue;
+							float test_above[3] = {v.gs[0], v.gs[1], rx[2] + he[2] + 1.0f};
+							int h0_above = classify_hull0_tree(
+								nodes, leafs, planes, hull0_root, test_above);
+							// Accept any non-empty world content (SOLID, SKY, WATER, etc.)
+							if (h0_above != goldsrc::CONTENTS_EMPTY && h0_above != 0) { rescued = false; break; }
+						}
+					}
+				}
 				// Additional rescue for horizontal clip brush slabs (floor/ceiling
 				// clip brushes): thin in Z (≤ 2*he[2]) and no non-near-wall
 				// h1-SOLID vertex (all SOLID verts flush with world geometry).
@@ -1043,7 +1078,16 @@ vector<ConvexCell> filter_clip_brush_cells(
 							has_nnw_solid = true; break;
 						}
 					}
-					if (!has_nnw_solid) rescued = true;
+					if (!has_nnw_solid) {
+						// Could be a real floor/ceiling clip brush or a pure expansion
+						// ring artifact — both have h1-SOLID verts flush with the world
+						// surface. Distinguish via the unexpanded clip hull: expansion
+						// ring artifacts un-expand to the world surface (centroid EMPTY),
+						// while real clip brushes remain SOLID at their centroid.
+						int uh1 = classify_clip_tree_unexpanded(
+							clipnodes, planes, hull1_root, he, rcpt);
+						if (uh1 == goldsrc::CONTENTS_SOLID) rescued = true;
+					}
 				}
 				if (!rescued) continue;
 			}
@@ -1122,6 +1166,18 @@ vector<ConvexCell> filter_clip_brush_cells(
 			} else {
 				// No h0 SOLID verts: still require centroid solidly inside h1.
 				if (rh1_cnw != goldsrc::CONTENTS_SOLID) continue;
+				// Expansion ring slab: one dimension is exactly the expansion width
+				// (2*he ±1) and the centroid is near wall. With no h0-SOLID verts
+				// this cell sits flush in the Minkowski ring of a wall. Real clip
+				// brushes at exact expansion width with centroid near wall are
+				// indistinguishable from artifacts and do not appear in practice.
+				for (int a = 0; a < 3; a++) {
+					if (rdim[a] <= 2.0f * he[a] + 0.5f && fabsf(rdim[a] - 2.0f * he[a]) <= 1.0f)
+						goto kill_2b_exp_ring;
+				}
+				goto skip_2b_exp_ring;
+				kill_2b_exp_ring: continue;
+				skip_2b_exp_ring:;
 			}
 		}
 
