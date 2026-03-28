@@ -165,9 +165,6 @@ void BSPParser::parse_faces(const uint8_t *data, size_t size) {
 
 		const BSPTextureData &tex = bsp_data.textures[tex_idx];
 
-		// Skip sky textures (rendered separately)
-		if (tex.name.compare(0, 3, "sky") == 0) continue;
-
 		// Skip tool textures on worldspawn (they have no visible geometry or
 		// face-based collision). Keep them on brush entities (e.g. func_ladder).
 		if (is_tool_texture(tex.name) && face_to_model[f] == 0) continue;

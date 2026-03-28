@@ -120,6 +120,23 @@ void fragment() {
 }
 )";
 
+// Sky surface shader: samples sky cubemap by view direction to match the
+// WorldEnvironment sky background, while writing to depth so geometry behind
+// sky brushes is occluded. sky_cubemap is set at runtime by GDScript.
+static const char *SKY_SURFACE_SHADER_CODE = R"(
+shader_type spatial;
+render_mode unshaded, shadows_disabled, ambient_light_disabled, depth_draw_opaque;
+
+uniform samplerCube sky_cubemap : source_color, hint_default_black;
+
+void fragment() {
+	// Reconstruct world-space eye direction matching sky_cubemap.gdshader EYEDIR.
+	// VIEW points from fragment toward camera (view space); negate and rotate to world.
+	vec3 eye_dir = normalize((INV_VIEW_MATRIX * vec4(-VIEW, 0.0)).xyz);
+	ALBEDO = texture(sky_cubemap, vec3(-eye_dir.x, eye_dir.y, eye_dir.z)).rgb;
+}
+)";
+
 // Write raw (unweighted) lightmap data for a single layer into an atlas
 static void write_layer_pixels(
 	int layer_index, const uint8_t styles[4],
@@ -588,6 +605,11 @@ void GoldSrcBSP::build_mesh() {
 		face_lm_info.resize(bsp_data.faces.size());
 	}
 
+	// Sky surface shader: always created, used for all 'sky*' texture faces
+	Ref<Shader> sky_shader;
+	sky_shader.instantiate();
+	sky_shader->set_code(SKY_SURFACE_SHADER_CODE);
+
 	// Create shared lightstyle brightness texture for shader path
 	Ref<Shader> opaque_shader;
 	Ref<Shader> alpha_shader;
@@ -743,6 +765,26 @@ void GoldSrcBSP::build_mesh() {
 					}
 				}
 				if (!sg.face_refs.empty()) {
+					spatial_groups.push_back(std::move(sg));
+				}
+			}
+
+			// Sky faces are not referenced by BSP node face lists (the BSP
+			// compiler assigns them differently), so they're absent from all
+			// spatial groups above. Add them in a dedicated group here so they
+			// get meshes and write depth to occlude geometry behind sky holes.
+			{
+				SpatialGroup sg;
+				sg.label = "sky_surfaces";
+				for (const auto &fr : faces_for_model) {
+					const string &tn = fr.face->texture_name;
+					if (tn.size() >= 3 && tn.compare(0, 3, "sky") == 0) {
+						sg.face_refs.push_back(fr);
+					}
+				}
+				if (!sg.face_refs.empty()) {
+					UtilityFunctions::print("[GoldSrc] Sky surfaces group: ",
+						(int64_t)sg.face_refs.size(), " faces");
 					spatial_groups.push_back(std::move(sg));
 				}
 			}
@@ -1031,9 +1073,17 @@ void GoldSrcBSP::build_mesh() {
 			arr_mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
 
 			Ref<ImageTexture> texture = find_texture(tex_name);
-			bool is_alpha_scissor = tex_name.size() > 0 && tex_name[0] == '{';
+			bool is_sky_surface = tex_name.size() >= 3 && tex_name.compare(0, 3, "sky") == 0;
+			bool is_alpha_scissor = !is_sky_surface && tex_name.size() > 0 && tex_name[0] == '{';
 
-			if (shader_lightstyles) {
+			if (is_sky_surface) {
+				// Sky surface: samples sky cubemap by view direction; sky_cubemap
+				// uniform is set at runtime by GDScript (systems/skybox.gd).
+				Ref<ShaderMaterial> material;
+				material.instantiate();
+				material->set_shader(sky_shader);
+				arr_mesh->surface_set_material(0, material);
+			} else if (shader_lightstyles) {
 				// Shader path: ShaderMaterial with 4-layer lightmap blending
 				Ref<ShaderMaterial> material;
 				material.instantiate();
@@ -1088,6 +1138,9 @@ void GoldSrcBSP::build_mesh() {
 			mesh_instance->set_name(String(tex_name.c_str()));
 			mesh_instance->set_mesh(arr_mesh);
 			mesh_instance->set_layer_mask(2); // Layer 2 only — map lights (layer 1) skip BSP, weapon lights (layers 1+2) hit it
+			if (is_sky_surface) {
+				mesh_instance->set_meta("is_sky_surface", true);
+			}
 			group_parent->add_child(mesh_instance);
 			total_mesh_instances++;
 		}
@@ -1217,6 +1270,8 @@ void GoldSrcBSP::build_hull_collision(Node3D *parent, int model_index,
 		if (face.model_index != model_index) continue;
 		// Skip water/slime/lava faces (textures starting with '!')
 		if (!face.texture_name.empty() && face.texture_name[0] == '!') continue;
+		// Skip sky faces — not solid, projectiles pass through
+		if (face.texture_name.size() >= 3 && face.texture_name.compare(0, 3, "sky") == 0) continue;
 		int nv = (int)face.vertices.size();
 		if (nv < 3) continue;
 		for (int i = 2; i < nv; i++) {
