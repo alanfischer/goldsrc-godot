@@ -1329,7 +1329,18 @@ vector<ConvexCell> filter_clip_brush_cells(
 					// SOLID verts and max dim < 256 can't be distinguished from
 					// expansion ring artifacts near wall corners.
 					float md_2f = fmaxf(rdim[0], fmaxf(rdim[1], rdim[2]));
-					if (md_2f < 256.0f) continue;
+					if (md_2f < 256.0f) {
+						// Rescue: centroid in non-EMPTY, non-SOLID content (e.g.
+						// CONTENTS_SKY=-6, WATER=-3) strongly indicates a real
+						// clip brush adjacent to special world geometry. Expansion
+						// ring artifacts in this scenario would have centroid in
+						// EMPTY space, not in special map content.
+						int ch0_2f_val = classify_hull0_tree(
+							nodes, leafs, planes, hull0_root, rcpt);
+						if (ch0_2f_val == goldsrc::CONTENTS_EMPTY ||
+							ch0_2f_val == goldsrc::CONTENTS_SOLID) continue;
+						goto keep_2f;
+					}
 					if (!any_h0s_2f) continue;
 				}
 				keep_2f:;

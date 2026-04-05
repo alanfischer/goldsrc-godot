@@ -199,6 +199,9 @@ static const TestPoint ww_chasm_points[] = {
 	{{1440.1f, -3478.9f, -575.9f}, "missing_1", true},
 	{{-2521.5f, -1040.3f, 1045.3f}, "missing_2", true},
 	{{-1598.2f, 37.0f, 1044.3f}, "missing_3", true},
+	// New missing points (batch 2)
+	{{2017.4f, -2625.1f, -70.7f}, "missing_4", true},
+	{{1503.9f, -2566.2f, 376.1f}, "missing_5", true},
 };
 
 // ww_storm test points
