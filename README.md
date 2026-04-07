@@ -13,7 +13,8 @@ A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
 - Hull 0 collision (StaticBody3D for worldspawn, AnimatableBody3D for brush entities)
 - Clip brush reconstruction from hull 1 clipping data — un-expands Minkowski-expanded hull planes back to original brush geometry, then clips against hull 0 to recover invisible collision brushes that have no render faces
 - Water volume extraction as Area3D with ConvexPolygonShape3D
-- Automatic occluder generation (OccluderInstance3D + PolygonOccluder3D) — identifies large opaque faces, merges coplanar groups into combined occluders, with fallback to individual face occluders
+- Automatic occluder generation (OccluderInstance3D + PolygonOccluder3D) — groups coplanar wall faces, cancels shared edges to find the true wall outline, and creates merged occluder polygons. Walls with openings (doorways/windows) are detected via boundary loop analysis and handled with per-face fallback. Polygons are cleaned (duplicate/collinear vertex removal) and pre-validated against Godot's triangulator
+- PVS (Potentially Visible Set) data parsing with RLE decompression — used by `debug_occluders` mode to validate occluder effectiveness against the BSP's precomputed visibility data
 - Worldspawn spatial splitting — walks the BSP tree to group faces into spatial clusters, producing separate MeshInstance3D nodes per group for better frustum culling
 - Brush entity geometry wrapped in AnimatableBody3D ("Body") with meshes and collision inside, ready for GDScript movement without body conversion
 - Point entity nodes (Node3D) with entity properties stored as metadata — classname, targetname, origin, angles, and all other key-value pairs are accessible from GDScript via `node.get_meta("entity")`
@@ -93,6 +94,8 @@ make -j8
 
 The compiled library goes to `addons/goldsrc/bin/`. Open the project in Godot and enable the GoldSrc plugin under Project Settings > Plugins.
 
+To use the generated occluders at runtime, enable **Project Settings > Rendering > Occlusion Culling > Use Occlusion Culling**.
+
 ## GDScript API
 
 ### GoldSrcBSP
@@ -120,6 +123,9 @@ var entities = bsp.get_entities()  # Array of Dictionaries
 
 # Optional: debug visualization of clip hull collision cells
 bsp.build_debug_hull_meshes(1)  # hull index 1-3
+
+# Optional: enable occluder debug diagnostics (before build_mesh)
+bsp.debug_occluders = true  # prints PVS validation, overfill checks, pipeline stats
 
 # Bake ambient cube light grid (call after build_mesh)
 var grid = bsp.bake_light_grid(32.0)  # cell size in GoldSrc units

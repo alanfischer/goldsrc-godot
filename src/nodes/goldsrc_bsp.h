@@ -77,6 +77,9 @@ private:
 	void build_occluders(godot::Node3D *parent);
 	void rebake_lightstyle(int style_index);
 
+	void set_debug_occluders(bool enabled);
+	bool get_debug_occluders() const;
+
 	// Per-face lightmap placement info (for rebaking)
 	struct FaceLightmapInfo {
 		int atlas_index = -1;  // which atlas this face is in (-1 = none)
@@ -99,6 +102,7 @@ private:
 
 	// Shader-based lightstyle members
 	bool shader_lightstyles = true;
+	bool debug_occluders = false;
 	godot::Ref<godot::Image> lightstyle_image;         // 64×1 FORMAT_RF
 	godot::Ref<godot::ImageTexture> lightstyle_texture; // shared across all materials
 
