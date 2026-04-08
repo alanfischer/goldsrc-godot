@@ -80,6 +80,11 @@ private:
 	void set_debug_occluders(bool enabled);
 	bool get_debug_occluders() const;
 
+	void set_occluder_min_area(float area);
+	float get_occluder_min_area() const;
+	void set_occluder_boundary_margin(float margin);
+	float get_occluder_boundary_margin() const;
+
 	// Per-face lightmap placement info (for rebaking)
 	struct FaceLightmapInfo {
 		int atlas_index = -1;  // which atlas this face is in (-1 = none)
@@ -110,5 +115,7 @@ private:
 	std::vector<godot::Ref<GoldSrcWAD>> wads;
 	mutable std::map<std::string, godot::Ref<godot::ImageTexture>> texture_cache;
 	float scale_factor = 0.025f; // GoldSrc units to Godot units
+	float occluder_min_area = 65535.0f; // minimum face area (GS units²) to qualify as occluder (~256×256)
+	float occluder_boundary_margin = 512.0f; // skip faces within this many GS units of the map bbox boundary
 	bool mesh_built = false;
 };
