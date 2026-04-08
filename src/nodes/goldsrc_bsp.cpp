@@ -22,7 +22,9 @@
 
 #include <algorithm>
 #include <cstring>
+#include <godot_cpp/classes/geometry2d.hpp>
 #include <map>
+#include <set>
 #include <tuple>
 #include <numeric>
 
@@ -259,8 +261,19 @@ void GoldSrcBSP::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_shader_lightstyles", "enabled"), &GoldSrcBSP::set_shader_lightstyles);
 	ClassDB::bind_method(D_METHOD("get_shader_lightstyles"), &GoldSrcBSP::get_shader_lightstyles);
 	ClassDB::bind_method(D_METHOD("bake_light_grid", "cell_size"), &GoldSrcBSP::bake_light_grid);
+	ClassDB::bind_method(D_METHOD("set_debug_occluders", "enabled"), &GoldSrcBSP::set_debug_occluders);
+	ClassDB::bind_method(D_METHOD("get_debug_occluders"), &GoldSrcBSP::get_debug_occluders);
+	ClassDB::bind_method(D_METHOD("set_occluder_min_area", "area"), &GoldSrcBSP::set_occluder_min_area);
+	ClassDB::bind_method(D_METHOD("get_occluder_min_area"), &GoldSrcBSP::get_occluder_min_area);
+	ClassDB::bind_method(D_METHOD("set_occluder_boundary_margin", "margin"), &GoldSrcBSP::set_occluder_boundary_margin);
+	ClassDB::bind_method(D_METHOD("get_occluder_boundary_margin"), &GoldSrcBSP::get_occluder_boundary_margin);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "scale_factor"), "set_scale_factor", "get_scale_factor");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "shader_lightstyles"), "set_shader_lightstyles", "get_shader_lightstyles");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "debug_occluders"), "set_debug_occluders", "get_debug_occluders");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "occluder_min_area", PROPERTY_HINT_RANGE, "0,262144,1"),
+		"set_occluder_min_area", "get_occluder_min_area");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "occluder_boundary_margin", PROPERTY_HINT_RANGE, "0,512,1"),
+		"set_occluder_boundary_margin", "get_occluder_boundary_margin");
 }
 
 Error GoldSrcBSP::load_bsp(const String &path) {
@@ -314,6 +327,30 @@ void GoldSrcBSP::set_shader_lightstyles(bool enabled) {
 
 bool GoldSrcBSP::get_shader_lightstyles() const {
 	return shader_lightstyles;
+}
+
+void GoldSrcBSP::set_debug_occluders(bool enabled) {
+	debug_occluders = enabled;
+}
+
+bool GoldSrcBSP::get_debug_occluders() const {
+	return debug_occluders;
+}
+
+void GoldSrcBSP::set_occluder_min_area(float area) {
+	occluder_min_area = area;
+}
+
+float GoldSrcBSP::get_occluder_min_area() const {
+	return occluder_min_area;
+}
+
+void GoldSrcBSP::set_occluder_boundary_margin(float margin) {
+	occluder_boundary_margin = margin;
+}
+
+float GoldSrcBSP::get_occluder_boundary_margin() const {
+	return occluder_boundary_margin;
 }
 
 int GoldSrcBSP::point_contents(Vector3 godot_pos) const {
@@ -990,7 +1027,6 @@ void GoldSrcBSP::build_mesh() {
 			// --- Build mesh arrays with UV2 (and COLOR for shader path) ---
 			PackedVector3Array vertices;
 			PackedVector3Array normals;
-			PackedFloat32Array tangents;
 			PackedVector2Array uvs;
 			PackedVector2Array uv2s;
 			PackedColorArray colors; // shader path: style indices
@@ -1045,11 +1081,6 @@ void GoldSrcBSP::build_mesh() {
 							colors.push_back(style_color);
 						}
 
-						tangents.push_back(1.0f);
-						tangents.push_back(0.0f);
-						tangents.push_back(0.0f);
-						tangents.push_back(1.0f);
-
 						indices.push_back(vert_offset++);
 					}
 				}
@@ -1062,7 +1093,6 @@ void GoldSrcBSP::build_mesh() {
 			arrays.resize(ArrayMesh::ARRAY_MAX);
 			arrays[ArrayMesh::ARRAY_VERTEX] = vertices;
 			arrays[ArrayMesh::ARRAY_NORMAL] = normals;
-			arrays[ArrayMesh::ARRAY_TANGENT] = tangents;
 			arrays[ArrayMesh::ARRAY_TEX_UV] = uvs;
 			arrays[ArrayMesh::ARRAY_TEX_UV2] = uv2s;
 			arrays[ArrayMesh::ARRAY_INDEX] = indices;
@@ -1412,54 +1442,6 @@ void GoldSrcBSP::build_brush_convex(Node3D *parent, int model_index,
 // --- Occluder helpers ---
 namespace {
 
-// 2D cross product (z-component of 3D cross)
-float cross2d(const Vector2 &O, const Vector2 &A, const Vector2 &B) {
-	return (A.x - O.x) * (B.y - O.y) - (A.y - O.y) * (B.x - O.x);
-}
-
-// Andrew's monotone chain convex hull. Returns CCW polygon.
-vector<Vector2> convex_hull_2d(vector<Vector2> pts) {
-	int n = (int)pts.size();
-	if (n < 3) return pts;
-
-	sort(pts.begin(), pts.end(), [](const Vector2 &a, const Vector2 &b) {
-		return a.x < b.x || (a.x == b.x && a.y < b.y);
-	});
-	// Remove near-duplicates
-	pts.erase(unique(pts.begin(), pts.end(), [](const Vector2 &a, const Vector2 &b) {
-		return (a - b).length() < 1e-4f;
-	}), pts.end());
-	n = (int)pts.size();
-	if (n < 3) return pts;
-
-	vector<Vector2> hull(2 * n);
-	int k = 0;
-	// Lower hull
-	for (int i = 0; i < n; i++) {
-		while (k >= 2 && cross2d(hull[k-2], hull[k-1], pts[i]) <= 0) k--;
-		hull[k++] = pts[i];
-	}
-	// Upper hull
-	int lower_size = k + 1;
-	for (int i = n - 2; i >= 0; i--) {
-		while (k >= lower_size && cross2d(hull[k-2], hull[k-1], pts[i]) <= 0) k--;
-		hull[k++] = pts[i];
-	}
-	hull.resize(k - 1); // last point == first point
-	return hull;
-}
-
-// Shoelace formula for polygon area
-float polygon_area_2d(const vector<Vector2> &pts) {
-	float area = 0;
-	int n = (int)pts.size();
-	for (int i = 0; i < n; i++) {
-		int j = (i + 1) % n;
-		area += pts[i].x * pts[j].y - pts[j].x * pts[i].y;
-	}
-	return fabsf(area) * 0.5f;
-}
-
 // Union-find with path compression and union by rank
 struct UnionFind {
 	vector<int> parent, rank_;
@@ -1479,12 +1461,172 @@ struct UnionFind {
 	}
 };
 
+// Create an OccluderInstance3D from ordered coplanar vertices
+void create_polygon_occluder(
+	const vector<Vector3> &gd_verts,
+	const Vector3 &gd_normal,
+	Node3D *parent)
+{
+	if ((int)gd_verts.size() < 3) return;
+
+	Vector3 ref_axis = (fabsf(gd_normal.y) < 0.9f)
+		? Vector3(0, 1, 0) : Vector3(1, 0, 0);
+	Vector3 local_x = ref_axis.cross(gd_normal).normalized();
+	Vector3 local_y = gd_normal.cross(local_x).normalized();
+
+	Vector3 centroid(0, 0, 0);
+	for (auto &v : gd_verts) centroid += v;
+	centroid /= (float)gd_verts.size();
+
+	// Project to 2D
+	vector<Vector2> pts;
+	pts.reserve(gd_verts.size());
+	for (auto &v : gd_verts) {
+		Vector3 rel = v - centroid;
+		pts.push_back(Vector2(rel.dot(local_x), rel.dot(local_y)));
+	}
+
+	// Remove near-duplicate consecutive vertices
+	const float dup_eps = 1e-4f;
+	vector<Vector2> clean;
+	clean.reserve(pts.size());
+	for (int i = 0; i < (int)pts.size(); i++) {
+		int j = (i + 1) % (int)pts.size();
+		if ((pts[i] - pts[j]).length() > dup_eps) {
+			clean.push_back(pts[i]);
+		}
+	}
+
+	// Remove collinear vertices (cross product near zero)
+	const float col_eps = 1e-4f;
+	vector<Vector2> final_pts;
+	final_pts.reserve(clean.size());
+	for (int i = 0; i < (int)clean.size(); i++) {
+		int prev = (i + (int)clean.size() - 1) % (int)clean.size();
+		int next = (i + 1) % (int)clean.size();
+		Vector2 d1 = clean[i] - clean[prev];
+		Vector2 d2 = clean[next] - clean[i];
+		float cross = d1.x * d2.y - d1.y * d2.x;
+		if (fabsf(cross) > col_eps) {
+			final_pts.push_back(clean[i]);
+		}
+	}
+
+	if ((int)final_pts.size() < 3) return;
+
+	int n = (int)final_pts.size();
+	PackedVector2Array polygon;
+	polygon.resize(n);
+	for (int i = 0; i < n; i++) polygon[i] = final_pts[i];
+
+	// Validate: try triangulating before creating the node.
+	// Geometry2D::triangulate_polygon returns empty on failure.
+	PackedInt32Array tris = Geometry2D::get_singleton()->triangulate_polygon(polygon);
+	if (tris.is_empty()) return; // skip self-intersecting or degenerate polygons
+
+	Transform3D xform;
+	xform.basis.set_column(0, local_x);
+	xform.basis.set_column(1, local_y);
+	xform.basis.set_column(2, gd_normal);
+	xform.origin = centroid;
+
+	Ref<PolygonOccluder3D> occluder;
+	occluder.instantiate();
+	occluder->set_polygon(polygon);
+
+	OccluderInstance3D *inst = memnew(OccluderInstance3D);
+	inst->set_occluder(occluder);
+	inst->set_transform(xform);
+	parent->add_child(inst);
+}
+
+// Shared polygon-splitting step used by both hull-0 and clipnode traversals.
+static void split_poly_by_plane(
+	const vector<array<float, 3>> &poly,
+	const vector<float> &dists,
+	vector<array<float, 3>> &front_poly,
+	vector<array<float, 3>> &back_poly)
+{
+	const float EPS = 0.01f;
+	int nv = (int)poly.size();
+	front_poly.reserve(nv + 1);
+	back_poly.reserve(nv + 1);
+	for (int i = 0; i < nv; i++) {
+		int j = (i + 1) % nv;
+		float di = dists[i], dj = dists[j];
+		if (di >= -EPS) front_poly.push_back(poly[i]);
+		if (di <=  EPS) back_poly.push_back(poly[i]);
+		if ((di > EPS && dj < -EPS) || (di < -EPS && dj > EPS)) {
+			float t = di / (di - dj);
+			array<float, 3> mid = {
+				poly[i][0] + t * (poly[j][0] - poly[i][0]),
+				poly[i][1] + t * (poly[j][1] - poly[i][1]),
+				poly[i][2] + t * (poly[j][2] - poly[i][2])
+			};
+			front_poly.push_back(mid);
+			back_poly.push_back(mid);
+		}
+	}
+}
+
+// Hull 0 version: clips against BSP nodes/leaves (worldspawn solid only).
+static bool hole_polygon_all_solid(
+	const vector<array<float, 3>> &poly,
+	int node_index,
+	const goldsrc::BSPData &bsp_data)
+{
+	if ((int)poly.size() < 3) return true; // degenerate fragment — skip
+
+	if (node_index < 0) {
+		int leaf_index = -(node_index + 1);
+		if ((size_t)leaf_index >= bsp_data.leafs.size()) return false;
+		return bsp_data.leafs[leaf_index].contents == goldsrc::CONTENTS_SOLID;
+	}
+	if ((size_t)node_index >= bsp_data.nodes.size()) return false;
+
+	const auto &node  = bsp_data.nodes[node_index];
+	const auto &plane = bsp_data.planes[node.planenum];
+
+	const float EPS = 0.01f;
+	int nv = (int)poly.size();
+	vector<float> dists(nv);
+	int nfront = 0, nback = 0;
+	for (int i = 0; i < nv; i++) {
+		dists[i] = plane.normal[0]*poly[i][0] + plane.normal[1]*poly[i][1]
+		         + plane.normal[2]*poly[i][2] - plane.dist;
+		if      (dists[i] >  EPS) nfront++;
+		else if (dists[i] < -EPS) nback++;
+	}
+
+	if (nfront == 0) return hole_polygon_all_solid(poly, node.children[1], bsp_data);
+	if (nback  == 0) return hole_polygon_all_solid(poly, node.children[0], bsp_data);
+
+	// Polygon straddles the plane — split and recurse both sides
+	vector<array<float, 3>> front_poly, back_poly;
+	split_poly_by_plane(poly, dists, front_poly, back_poly);
+
+	return hole_polygon_all_solid(front_poly, node.children[0], bsp_data)
+	    && hole_polygon_all_solid(back_poly,  node.children[1], bsp_data);
+}
+
 } // namespace
 
 void GoldSrcBSP::build_occluders(Node3D *parent) {
 	const auto &bsp_data = parser->get_data();
 
-	const float MIN_AREA_GS = 65536.0f;  // ~256x256 GoldSrc units
+	const float MIN_AREA_GS = occluder_min_area;
+	const float BOUNDARY_MARGIN = occluder_boundary_margin;
+	const auto &bmodel = bsp_data.models[0];
+	// Returns true when the plane (n, d) sits on the outer surface of the map bbox.
+	// d = n·p for any point p on the plane (GoldSrc coords).
+	// The minimum possible d for any point inside the bbox is the support of (-n),
+	// i.e. min over axis i of (n_i * mins[i], n_i * maxs[i]).
+	auto is_boundary_face = [&](float nx, float ny, float nz, float d) -> bool {
+		float min_d = std::min(nx * bmodel.mins[0], nx * bmodel.maxs[0])
+		            + std::min(ny * bmodel.mins[1], ny * bmodel.maxs[1])
+		            + std::min(nz * bmodel.mins[2], nz * bmodel.maxs[2]);
+		return d <= min_d + BOUNDARY_MARGIN;
+	};
 
 	// --- Step 1: Collect qualifying faces ---
 	struct FaceInfo {
@@ -1495,6 +1637,7 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 
 	for (int fi = 0; fi < (int)bsp_data.faces.size(); fi++) {
 		const auto &face = bsp_data.faces[fi];
+
 		if (face.model_index != 0) continue;
 
 		const auto &tn = face.texture_name;
@@ -1543,6 +1686,25 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 
 	// --- Steps 3-5: Merge coplanar groups & build occluders ---
 	int count_merged = 0, count_individual = 0, count_groups = 0;
+	// Debug stats
+	int dbg_components_too_small = 0;
+	int dbg_components_boundary = 0;  // on outer map bbox — no occlusion value
+	int dbg_standalone_boundary = 0;
+	int dbg_components_solid = 0;     // single loop → merged occluder
+	int dbg_components_solid_holes = 0; // multiple loops, all holes solid-backed → merged occluder
+	int dbg_components_holes = 0;     // multiple loops with real openings → per-face fallback
+	int dbg_components_walk_fail = 0; // edge walk produced no valid loops
+	int dbg_faces_from_holes = 0;     // per-face occluders from hole fallback
+	int dbg_standalone = 0;           // Step 5 lone faces
+	int dbg_standalone_too_small = 0;
+	int dbg_perface_too_small = 0;    // per-face from holes filtered by MIN_AREA_GS
+	float dbg_merged_area = 0, dbg_individual_area = 0;
+
+	// Debug-only: occluder planes for PVS validation, overfill tracking
+	struct OccPlane { float n[3], d; };
+	struct OccOverfill { float pct; Vector3 centroid; };
+	vector<OccPlane> occ_planes;
+	vector<OccOverfill> occ_overfills;
 
 	// Track which qualifying faces got handled by a merged group
 	vector<bool> handled(qualifying.size(), false);
@@ -1576,143 +1738,598 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 			components[uf.find(gi)].push_back(gi);
 		}
 
-		// --- Step 4: For each component, build merged occluder ---
+		// --- Step 4: For each component, build occluder via boundary edges ---
+		// Shared edges between coplanar faces cancel out, leaving only the
+		// true outline of the wall (with doorways/windows as holes).
+		using QVert = tuple<int,int,int>;
+		using DEdge = pair<QVert, QVert>;
+
 		for (auto &[root, comp] : components) {
 			float total_area = 0;
 			for (int gi : comp) total_area += qualifying[group[gi]].area;
 
-			if (total_area < MIN_AREA_GS) continue; // too small even merged
-
-			// Get shared normal from first face (all coplanar, same normal)
-			const auto &ref_face = bsp_data.faces[qualifying[group[comp[0]]].face_index];
-			Vector3 gd_normal(-ref_face.normal[0], ref_face.normal[2], ref_face.normal[1]);
-			gd_normal.normalize();
-
-			// Build orthonormal basis on the face plane
-			Vector3 ref_axis = (gd_normal.y > -0.9f && gd_normal.y < 0.9f)
-				? Vector3(0, 1, 0) : Vector3(1, 0, 0);
-			Vector3 local_x = ref_axis.cross(gd_normal).normalized();
-			Vector3 local_y = gd_normal.cross(local_x).normalized();
-
-			// Collect all vertices from all faces in this component
-			vector<Vector3> all_gd_verts;
-			for (int gi : comp) {
-				const auto &face = bsp_data.faces[qualifying[group[gi]].face_index];
-				for (const auto &v : face.vertices) {
-					all_gd_verts.push_back(goldsrc_to_godot(v.pos[0], v.pos[1], v.pos[2]));
+			// Debug: log components near investigation point even if filtered
+			{
+				const float INV_X = 21.0f, INV_Y = 1012.0f, INV_Z = 75.0f;
+				float dcx = 0, dcy = 0, dcz = 0; int dcv = 0;
+				for (int gi : comp) {
+					const auto &face = bsp_data.faces[qualifying[group[gi]].face_index];
+					for (auto &v : face.vertices) { dcx += v.pos[0]; dcy += v.pos[1]; dcz += v.pos[2]; dcv++; }
+				}
+				if (dcv > 0) { dcx /= dcv; dcy /= dcv; dcz /= dcv; }
+				if (fabsf(dcx - INV_X) < 256 && fabsf(dcy - INV_Y) < 256 && fabsf(dcz - INV_Z) < 256) {
+					const auto &rf = bsp_data.faces[qualifying[group[comp[0]]].face_index];
+					UtilityFunctions::print("[OccluderDebug] component @ (", dcx, ",", dcy, ",", dcz,
+						") normal=(", rf.normal[0], ",", rf.normal[1], ",", rf.normal[2],
+						") area=", total_area, " faces=", (int64_t)comp.size(),
+						total_area < MIN_AREA_GS ? " [FILTERED: too small]" : "");
 				}
 			}
 
-			// Compute centroid
-			Vector3 centroid(0, 0, 0);
-			for (auto &v : all_gd_verts) centroid += v;
-			centroid /= (float)all_gd_verts.size();
+			if (total_area < MIN_AREA_GS) { dbg_components_too_small++; continue; }
 
-			// Project to 2D
-			vector<Vector2> pts_2d;
-			pts_2d.reserve(all_gd_verts.size());
-			for (auto &v : all_gd_verts) {
-				Vector3 rel = v - centroid;
-				pts_2d.push_back(Vector2(rel.dot(local_x), rel.dot(local_y)));
+			const auto &ref_face = bsp_data.faces[qualifying[group[comp[0]]].face_index];
+
+			// Skip faces on the outer map boundary — players are never on both sides
+			{
+				float fnx = ref_face.normal[0], fny = ref_face.normal[1], fnz = ref_face.normal[2];
+				float fd = fnx * ref_face.vertices[0].pos[0]
+				         + fny * ref_face.vertices[0].pos[1]
+				         + fnz * ref_face.vertices[0].pos[2];
+				if (is_boundary_face(fnx, fny, fnz, fd)) { dbg_components_boundary++; continue; }
+			}
+			Vector3 gd_normal(-ref_face.normal[0], ref_face.normal[2], ref_face.normal[1]);
+			gd_normal.normalize();
+
+			// Collect directed edges from all faces, cancel shared edges
+			map<QVert, Vector3> qvert_to_pos;
+			map<DEdge, int> edge_count;
+
+			for (int gi : comp) {
+				const auto &face = bsp_data.faces[qualifying[group[gi]].face_index];
+				int nv = (int)face.vertices.size();
+				for (int i = 0; i < nv; i++) {
+					int j = (i + 1) % nv;
+					const auto &va = face.vertices[i];
+					const auto &vb = face.vertices[j];
+
+					QVert qa{(int)roundf(va.pos[0] * 2.0f),
+					         (int)roundf(va.pos[1] * 2.0f),
+					         (int)roundf(va.pos[2] * 2.0f)};
+					QVert qb{(int)roundf(vb.pos[0] * 2.0f),
+					         (int)roundf(vb.pos[1] * 2.0f),
+					         (int)roundf(vb.pos[2] * 2.0f)};
+
+					qvert_to_pos[qa] = goldsrc_to_godot(va.pos[0], va.pos[1], va.pos[2]);
+					qvert_to_pos[qb] = goldsrc_to_godot(vb.pos[0], vb.pos[1], vb.pos[2]);
+
+					DEdge rev{qb, qa};
+					auto it = edge_count.find(rev);
+					if (it != edge_count.end() && it->second > 0) {
+						it->second--;
+						if (it->second == 0) edge_count.erase(it);
+					} else {
+						edge_count[{qa, qb}]++;
+					}
+				}
 			}
 
-			vector<Vector2> hull = convex_hull_2d(pts_2d);
-			if (hull.size() < 3) continue;
-
-			float hull_area = polygon_area_2d(hull);
-
-			// Overfill check: if convex hull is larger than face area sum,
-			// the shape is concave (e.g., wall around doorway) and the hull
-			// would cover openings, incorrectly occluding things behind them.
-			// BSP-split straight walls have hull ≈ face sum (ratio ~1.0).
-			float total_area_godot = total_area * scale_factor * scale_factor;
-			if (hull_area > 1.001f * total_area_godot) {
-				// Reject merged — leave faces for individual fallback
-				continue;
+			// Build adjacency from remaining boundary edges
+			map<QVert, vector<QVert>> adj;
+			for (auto &[edge, cnt] : edge_count) {
+				for (int c = 0; c < cnt; c++) {
+					adj[edge.first].push_back(edge.second);
+				}
 			}
 
-			// Mark all faces in this component as handled
+			// Walk boundary edges to form closed loops
+			std::set<DEdge> used;
+			vector<vector<QVert>> loops;
+
+			for (auto &[start_v, nexts] : adj) {
+				for (auto &next_v : nexts) {
+					if (used.count({start_v, next_v})) continue;
+
+					vector<QVert> loop;
+					QVert cur = start_v;
+					QVert nxt = next_v;
+					bool valid = true;
+
+					while (true) {
+						if (used.count({cur, nxt})) { valid = false; break; }
+						used.insert({cur, nxt});
+						loop.push_back(cur);
+
+						cur = nxt;
+						if (cur == start_v) break;
+
+						bool found = false;
+						auto ait = adj.find(cur);
+						if (ait != adj.end()) {
+							for (auto &cand : ait->second) {
+								if (!used.count({cur, cand})) {
+									nxt = cand;
+									found = true;
+									break;
+								}
+							}
+						}
+						if (!found) { valid = false; break; }
+					}
+
+					if (valid && loop.size() >= 3) {
+						loops.push_back(std::move(loop));
+					}
+				}
+			}
+
 			for (int gi : comp) handled[group[gi]] = true;
 
-			// Build the occluder
-			PackedVector2Array polygon;
-			polygon.resize((int)hull.size());
-			for (int i = 0; i < (int)hull.size(); i++) polygon[i] = hull[i];
+			// Debug: log all components near the investigation point
+			{
+				const float INV_X = 21.0f, INV_Y = 1012.0f, INV_Z = 75.0f;
+				// Compute component centroid from face vertices (GoldSrc space)
+				float dcx = 0, dcy = 0, dcz = 0; int dcv = 0;
+				for (int gi : comp) {
+					const auto &face = bsp_data.faces[qualifying[group[gi]].face_index];
+					for (auto &v : face.vertices) {
+						dcx += v.pos[0]; dcy += v.pos[1]; dcz += v.pos[2]; dcv++;
+					}
+				}
+				if (dcv > 0) { dcx /= dcv; dcy /= dcv; dcz /= dcv; }
+				if (fabsf(dcx - INV_X) < 256 && fabsf(dcy - INV_Y) < 256 && fabsf(dcz - INV_Z) < 256) {
+					UtilityFunctions::print("[OccluderDebug] component near (", dcx, ",", dcy, ",", dcz,
+						") normal=(", ref_face.normal[0], ",", ref_face.normal[1], ",", ref_face.normal[2],
+						") area=", total_area, " faces=", (int64_t)comp.size(),
+						" loops=", (int64_t)loops.size());
+				}
+			}
 
-			Transform3D xform;
-			xform.basis.set_column(0, local_x);
-			xform.basis.set_column(1, local_y);
-			xform.basis.set_column(2, gd_normal);
-			xform.origin = centroid;
+			if (loops.size() == 1) {
+				// Solid wall — single boundary loop becomes one large occluder
+				dbg_components_solid++;
+				vector<Vector3> gd_verts;
+				gd_verts.reserve(loops[0].size());
+				for (auto &qv : loops[0]) gd_verts.push_back(qvert_to_pos[qv]);
 
-			Ref<PolygonOccluder3D> occluder;
-			occluder.instantiate();
-			occluder->set_polygon(polygon);
+				create_polygon_occluder(gd_verts, gd_normal, parent);
+				if (debug_occluders) {
+					const auto &v0 = ref_face.vertices[0].pos;
+					float d = ref_face.normal[0]*v0[0] + ref_face.normal[1]*v0[1] + ref_face.normal[2]*v0[2];
+					occ_planes.push_back({{ref_face.normal[0], ref_face.normal[1], ref_face.normal[2]}, d});
 
-			OccluderInstance3D *inst = memnew(OccluderInstance3D);
-			inst->set_occluder(occluder);
-			inst->set_transform(xform);
-			parent->add_child(inst);
-			count_merged++;
-			count_groups++;
+					// Compute boundary loop area via 3D cross product against face normal
+					// QVert values are GoldSrc coords * 2 (quantized to 0.5 units)
+					float nx = ref_face.normal[0], ny = ref_face.normal[1], nz = ref_face.normal[2];
+					float cx = 0, cy = 0, cz = 0;
+					int nl = (int)loops[0].size();
+					for (int li = 0; li < nl; li++) {
+						int lj = (li + 1) % nl;
+						auto [ax, ay, az] = loops[0][li];
+						auto [bx, by, bz] = loops[0][lj];
+						cx += (float)ay * bz - (float)az * by;
+						cy += (float)az * bx - (float)ax * bz;
+						cz += (float)ax * by - (float)ay * bx;
+					}
+					// 0.5 for shoelace, /4 for quantization² = 0.125
+					float loop_area = fabsf(nx * cx + ny * cy + nz * cz) * 0.125f;
+					if (total_area > 0) {
+						float overfill = (loop_area - total_area) / total_area * 100.0f;
+						Vector3 centroid(0, 0, 0);
+						for (auto &gv : gd_verts) centroid += gv;
+						centroid /= (float)gd_verts.size();
+						occ_overfills.push_back({overfill, centroid});
+					}
+				}
+				dbg_merged_area += total_area;
+				count_merged++;
+				count_groups++;
+			} else if (loops.empty()) {
+				// Edge walk failed — fall back to per-face
+				dbg_components_walk_fail++;
+				if (debug_occluders) {
+					const auto &v0 = ref_face.vertices[0].pos;
+					float d = ref_face.normal[0]*v0[0] + ref_face.normal[1]*v0[1] + ref_face.normal[2]*v0[2];
+					occ_planes.push_back({{ref_face.normal[0], ref_face.normal[1], ref_face.normal[2]}, d});
+				}
+				for (int gi : comp) {
+					if (qualifying[group[gi]].area < MIN_AREA_GS) continue;
+					const auto &face = bsp_data.faces[qualifying[group[gi]].face_index];
+					int nv = (int)face.vertices.size();
+
+					vector<Vector3> gd_verts(nv);
+					for (int i = 0; i < nv; i++) {
+						gd_verts[i] = goldsrc_to_godot(
+							face.vertices[i].pos[0],
+							face.vertices[i].pos[1],
+							face.vertices[i].pos[2]);
+					}
+
+					create_polygon_occluder(gd_verts, gd_normal, parent);
+					dbg_individual_area += qualifying[group[gi]].area;
+					count_individual++;
+				}
+			} else {
+				// Wall has multiple boundary loops (holes).
+				// For each inner loop, clip its polygon against the BSP tree and verify
+				// that every resulting leaf fragment is solid. This is exact — every
+				// point in the hole area is accounted for, with no sampling gaps.
+				// If all holes are solid-backed, generate a merged occluder from the
+				// outer loop; otherwise fall back to per-face.
+				const float SOLID_OFFSET = 4.0f; // GoldSrc units — push behind face plane
+				float fnx = ref_face.normal[0], fny = ref_face.normal[1], fnz = ref_face.normal[2];
+				int bsp_root = bsp_data.models[0].headnode[0];
+
+				// Debug: is this a multi-loop component near the investigation point?
+				bool dbg_this_comp = (loops.size() > 1);
+
+				bool all_holes_solid = true;
+				for (int li = 1; li < (int)loops.size() && all_holes_solid; li++) {
+					// Convert hole vertices from Godot space to GoldSrc space and
+					// offset behind the face plane into the expected solid region.
+					vector<array<float, 3>> gs_poly;
+					gs_poly.reserve(loops[li].size());
+					for (auto &qv : loops[li]) {
+						const Vector3 &gd = qvert_to_pos[qv];
+						gs_poly.push_back({
+							-gd.x / scale_factor - fnx * SOLID_OFFSET,
+							 gd.z / scale_factor - fny * SOLID_OFFSET,
+							 gd.y / scale_factor - fnz * SOLID_OFFSET
+						});
+					}
+					bool solid = hole_polygon_all_solid(gs_poly, bsp_root, bsp_data);
+					if (dbg_this_comp) {
+						float hcx = 0, hcy = 0, hcz = 0;
+						for (auto &v : gs_poly) { hcx += v[0]; hcy += v[1]; hcz += v[2]; }
+						hcx /= gs_poly.size(); hcy /= gs_poly.size(); hcz /= gs_poly.size();
+						// Remove offset to show on-plane position
+						hcx += fnx*SOLID_OFFSET; hcy += fny*SOLID_OFFSET; hcz += fnz*SOLID_OFFSET;
+						// Sample centroid to get a representative contents value
+						int ct = point_contents(goldsrc_to_godot(
+							hcx - fnx*SOLID_OFFSET, hcy - fny*SOLID_OFFSET, hcz - fnz*SOLID_OFFSET));
+						UtilityFunctions::print("[OccluderDebug] hole ", li,
+							" centroid GS=(", hcx, ",", hcy, ",", hcz,
+							") verts=", (int64_t)gs_poly.size(),
+							" solid=", solid, " centroid_contents=", ct);
+					}
+					if (!solid) all_holes_solid = false;
+				}
+				if (dbg_this_comp) {
+					UtilityFunctions::print("[OccluderDebug] wall y=-1802 result: all_holes_solid=", all_holes_solid);
+				}
+
+				if (all_holes_solid) {
+					// All holes are solid-backed — merge outer loop as a single occluder
+					dbg_components_solid_holes++;
+					vector<Vector3> gd_verts;
+					gd_verts.reserve(loops[0].size());
+					for (auto &qv : loops[0]) gd_verts.push_back(qvert_to_pos[qv]);
+					create_polygon_occluder(gd_verts, gd_normal, parent);
+					if (debug_occluders) {
+						const auto &v0 = ref_face.vertices[0].pos;
+						float d = ref_face.normal[0]*v0[0] + ref_face.normal[1]*v0[1] + ref_face.normal[2]*v0[2];
+						occ_planes.push_back({{ref_face.normal[0], ref_face.normal[1], ref_face.normal[2]}, d});
+					}
+					dbg_merged_area += total_area;
+					count_merged++;
+					count_groups++;
+				} else {
+					// Genuine openings present.  Re-run edge cancellation on ONLY the
+					// qualifying faces (area >= MIN_AREA_GS).  Small non-qualifying faces
+					// (arch fragments, doorframe strips) are excluded, so the doorway
+					// spaces become the exterior boundary of the qualifying patch rather
+					// than interior holes.  Adjacent qualifying faces share edges that
+					// cancel, merging them into one or more larger occluders.
+					dbg_components_holes++;
+					dbg_faces_from_holes += (int)comp.size();
+					if (debug_occluders) {
+						const auto &v0 = ref_face.vertices[0].pos;
+						float d = ref_face.normal[0]*v0[0] + ref_face.normal[1]*v0[1] + ref_face.normal[2]*v0[2];
+						occ_planes.push_back({{ref_face.normal[0], ref_face.normal[1], ref_face.normal[2]}, d});
+					}
+
+					// --- Subset: collect qualifying faces ---
+					vector<int> sq_comp; // group-local indices of qualifying faces
+					for (int gi : comp) {
+						if (qualifying[group[gi]].area >= MIN_AREA_GS)
+							sq_comp.push_back(gi);
+						else
+							dbg_perface_too_small++;
+					}
+
+					// --- Sub-merge: edge cancellation on qualifying subset ---
+					map<QVert, Vector3> sq_pos;
+					map<DEdge, int>     sq_edges;
+					for (int gi : sq_comp) {
+						const auto &sface = bsp_data.faces[qualifying[group[gi]].face_index];
+						int snv = (int)sface.vertices.size();
+						for (int i = 0; i < snv; i++) {
+							int j = (i + 1) % snv;
+							const auto &va = sface.vertices[i];
+							const auto &vb = sface.vertices[j];
+							QVert qa{(int)roundf(va.pos[0]*2),(int)roundf(va.pos[1]*2),(int)roundf(va.pos[2]*2)};
+							QVert qb{(int)roundf(vb.pos[0]*2),(int)roundf(vb.pos[1]*2),(int)roundf(vb.pos[2]*2)};
+							sq_pos[qa] = goldsrc_to_godot(va.pos[0], va.pos[1], va.pos[2]);
+							sq_pos[qb] = goldsrc_to_godot(vb.pos[0], vb.pos[1], vb.pos[2]);
+							DEdge rev{qb, qa};
+							auto it = sq_edges.find(rev);
+							if (it != sq_edges.end() && it->second > 0) {
+								if (--it->second == 0) sq_edges.erase(it);
+							} else {
+								sq_edges[{qa, qb}]++;
+							}
+						}
+					}
+
+					// --- Sub-merge: walk boundary loops ---
+					map<QVert, vector<QVert>> sq_adj;
+					for (auto &[edge, cnt] : sq_edges)
+						for (int c = 0; c < cnt; c++)
+							sq_adj[edge.first].push_back(edge.second);
+
+					std::set<DEdge> sq_used;
+					vector<vector<QVert>> sq_loops;
+					for (auto &[sv, snexts] : sq_adj) {
+						for (auto &snv_ : snexts) {
+							if (sq_used.count({sv, snv_})) continue;
+							vector<QVert> loop;
+							QVert cur = sv, nxt = snv_;
+							bool valid = true;
+							while (true) {
+								if (sq_used.count({cur, nxt})) { valid = false; break; }
+								sq_used.insert({cur, nxt});
+								loop.push_back(cur);
+								cur = nxt;
+								if (cur == sv) break;
+								bool found = false;
+								auto ait = sq_adj.find(cur);
+								if (ait != sq_adj.end()) {
+									for (auto &cand : ait->second) {
+										if (!sq_used.count({cur, cand})) { nxt = cand; found = true; break; }
+									}
+								}
+								if (!found) { valid = false; break; }
+							}
+							if (valid && loop.size() >= 3) sq_loops.push_back(std::move(loop));
+						}
+					}
+
+					// --- Sub-merge: create occluder(s) from loops ---
+					// (fnx/fny/fnz, bsp_root, SOLID_OFFSET already in scope from above)
+					if (sq_loops.size() == 1) {
+						// All qualifying faces merged into one solid patch
+						vector<Vector3> gd_verts;
+						gd_verts.reserve(sq_loops[0].size());
+						for (auto &qv : sq_loops[0]) gd_verts.push_back(sq_pos[qv]);
+						create_polygon_occluder(gd_verts, gd_normal, parent);
+						dbg_merged_area += total_area;
+						count_merged++;
+					} else if (!sq_loops.empty()) {
+						// Multiple patches or sub-holes — BSP-check any inner loops
+						bool sq_all_solid = true;
+						for (int li = 1; li < (int)sq_loops.size() && sq_all_solid; li++) {
+							vector<array<float,3>> gs_poly;
+							gs_poly.reserve(sq_loops[li].size());
+							for (auto &qv : sq_loops[li]) {
+								const Vector3 &gd = sq_pos[qv];
+								gs_poly.push_back({
+									-gd.x / scale_factor - fnx * SOLID_OFFSET,
+									 gd.z / scale_factor - fny * SOLID_OFFSET,
+									 gd.y / scale_factor - fnz * SOLID_OFFSET
+								});
+							}
+							if (!hole_polygon_all_solid(gs_poly, bsp_root, bsp_data))
+								sq_all_solid = false;
+						}
+						if (sq_all_solid) {
+							vector<Vector3> gd_verts;
+							gd_verts.reserve(sq_loops[0].size());
+							for (auto &qv : sq_loops[0]) gd_verts.push_back(sq_pos[qv]);
+							create_polygon_occluder(gd_verts, gd_normal, parent);
+							dbg_merged_area += total_area;
+							count_merged++;
+						} else {
+							// Inner gaps are real openings — fall back to per-face
+							for (int gi : sq_comp) {
+								const auto &sface = bsp_data.faces[qualifying[group[gi]].face_index];
+								int snv = (int)sface.vertices.size();
+								vector<Vector3> gd_verts(snv);
+								for (int i = 0; i < snv; i++)
+									gd_verts[i] = goldsrc_to_godot(sface.vertices[i].pos[0],
+									                               sface.vertices[i].pos[1],
+									                               sface.vertices[i].pos[2]);
+								create_polygon_occluder(gd_verts, gd_normal, parent);
+								dbg_individual_area += qualifying[group[gi]].area;
+								count_individual++;
+							}
+						}
+					} else {
+						// Sub-merge edge walk failed — per-face on qualifying subset
+						for (int gi : sq_comp) {
+							const auto &sface = bsp_data.faces[qualifying[group[gi]].face_index];
+							int snv = (int)sface.vertices.size();
+							vector<Vector3> gd_verts(snv);
+							for (int i = 0; i < snv; i++)
+								gd_verts[i] = goldsrc_to_godot(sface.vertices[i].pos[0],
+								                               sface.vertices[i].pos[1],
+								                               sface.vertices[i].pos[2]);
+							create_polygon_occluder(gd_verts, gd_normal, parent);
+							dbg_individual_area += qualifying[group[gi]].area;
+							count_individual++;
+						}
+					}
+				}
+			}
 		}
 	}
 
-	// --- Step 5: Fallback for un-merged faces ---
+	// --- Step 5: Fallback for lone faces not in any component ---
 	for (int qi = 0; qi < (int)qualifying.size(); qi++) {
 		if (handled[qi]) continue;
-		if (qualifying[qi].area < MIN_AREA_GS) continue;
+		if (qualifying[qi].area < MIN_AREA_GS) { dbg_standalone_too_small++; continue; }
 
 		const auto &face = bsp_data.faces[qualifying[qi].face_index];
+		{
+			float nx = face.normal[0], ny = face.normal[1], nz = face.normal[2];
+			float d = nx * face.vertices[0].pos[0]
+			        + ny * face.vertices[0].pos[1]
+			        + nz * face.vertices[0].pos[2];
+			if (is_boundary_face(nx, ny, nz, d)) { dbg_standalone_boundary++; continue; }
+		}
 		int nv = (int)face.vertices.size();
 
-		Vector3 centroid(0, 0, 0);
 		vector<Vector3> gd_verts(nv);
 		for (int i = 0; i < nv; i++) {
 			gd_verts[i] = goldsrc_to_godot(
 				face.vertices[i].pos[0],
 				face.vertices[i].pos[1],
 				face.vertices[i].pos[2]);
-			centroid += gd_verts[i];
 		}
-		centroid /= (float)nv;
 
 		Vector3 gd_normal(-face.normal[0], face.normal[2], face.normal[1]);
 		gd_normal.normalize();
 
-		Vector3 ref_axis = (gd_normal.y > -0.9f && gd_normal.y < 0.9f)
-			? Vector3(0, 1, 0) : Vector3(1, 0, 0);
-		Vector3 local_x = ref_axis.cross(gd_normal).normalized();
-		Vector3 local_y = gd_normal.cross(local_x).normalized();
-
-		PackedVector2Array polygon;
-		polygon.resize(nv);
-		for (int i = 0; i < nv; i++) {
-			Vector3 rel = gd_verts[i] - centroid;
-			polygon[i] = Vector2(rel.dot(local_x), rel.dot(local_y));
+		create_polygon_occluder(gd_verts, gd_normal, parent);
+		if (debug_occluders) {
+			const auto &v0 = face.vertices[0].pos;
+			float d = face.normal[0]*v0[0] + face.normal[1]*v0[1] + face.normal[2]*v0[2];
+			occ_planes.push_back({{face.normal[0], face.normal[1], face.normal[2]}, d});
 		}
-
-		Transform3D xform;
-		xform.basis.set_column(0, local_x);
-		xform.basis.set_column(1, local_y);
-		xform.basis.set_column(2, gd_normal);
-		xform.origin = centroid;
-
-		Ref<PolygonOccluder3D> occluder;
-		occluder.instantiate();
-		occluder->set_polygon(polygon);
-
-		OccluderInstance3D *inst = memnew(OccluderInstance3D);
-		inst->set_occluder(occluder);
-		inst->set_transform(xform);
-		parent->add_child(inst);
+		dbg_individual_area += qualifying[qi].area;
+		dbg_standalone++;
 		count_individual++;
 	}
 
 	int total = count_merged + count_individual;
 	UtilityFunctions::print("[GoldSrc] Built ", (int64_t)total, " occluders (",
-		(int64_t)count_merged, " merged from ", (int64_t)count_groups,
-		" coplanar groups, ", (int64_t)count_individual, " individual)");
+		(int64_t)count_merged, " merged, ", (int64_t)count_individual, " individual)");
+
+	if (debug_occluders) {
+		float total_wall_area = 0;
+		for (auto &q : qualifying) total_wall_area += q.area;
+
+		UtilityFunctions::print("[GoldSrc] Occluder debug:");
+		UtilityFunctions::print("  Total worldspawn faces: ", (int64_t)bsp_data.faces.size());
+		UtilityFunctions::print("  Qualifying wall faces: ", (int64_t)qualifying.size(),
+			" (area >= ", (int64_t)MIN_AREA_GS, " excl. floors/ceilings/sky/water/tool/alpha)");
+		UtilityFunctions::print("  Total qualifying wall area: ", (int64_t)total_wall_area, " GS units^2");
+		UtilityFunctions::print("  Coplanar groups: ", (int64_t)plane_groups.size());
+		UtilityFunctions::print("  Connected components:");
+		UtilityFunctions::print("    Solid walls (merged): ", (int64_t)dbg_components_solid,
+			" -> ", (int64_t)count_merged, " occluders, ",
+			(int64_t)dbg_merged_area, " GS^2");
+		UtilityFunctions::print("    Solid-hole walls (merged via BSP check): ", (int64_t)dbg_components_solid_holes);
+		UtilityFunctions::print("    Walls with real openings (per-face): ", (int64_t)dbg_components_holes,
+			" -> ", (int64_t)(dbg_faces_from_holes - dbg_perface_too_small), " occluders",
+			dbg_perface_too_small > 0
+				? String(" (") + String::num_int64(dbg_perface_too_small) + " faces too small)"
+				: String(""));
+		if (dbg_components_walk_fail > 0) {
+			UtilityFunctions::print("    Edge walk failures (per-face): ", (int64_t)dbg_components_walk_fail);
+		}
+		UtilityFunctions::print("    Too small (skipped): ", (int64_t)dbg_components_too_small);
+		UtilityFunctions::print("    On map boundary (skipped): ", (int64_t)dbg_components_boundary);
+		UtilityFunctions::print("  Standalone faces: ", (int64_t)dbg_standalone,
+			" (", (int64_t)dbg_standalone_too_small, " too small, ",
+			(int64_t)dbg_standalone_boundary, " on boundary)");
+		float occluder_area = dbg_merged_area + dbg_individual_area;
+		float coverage = total_wall_area > 0 ? (occluder_area / total_wall_area * 100.0f) : 0;
+		UtilityFunctions::print("  Occluder coverage: ", (int64_t)occluder_area,
+			"/", (int64_t)total_wall_area, " GS^2 (",
+			String::num(coverage, 1), "% of qualifying wall area)");
+
+		// --- Degenerate occluder check ---
+		if (!occ_overfills.empty()) {
+			int degen_count = 0;
+			float max_overfill = 0;
+			for (auto &o : occ_overfills) {
+				if (o.pct > 5.0f) degen_count++;
+				if (o.pct > max_overfill) max_overfill = o.pct;
+			}
+			UtilityFunctions::print("  Overfill check (merged occluders):");
+			UtilityFunctions::print("    Max overfill: ", String::num(max_overfill, 1), "%");
+			if (degen_count > 0) {
+				UtilityFunctions::print("    Occluders with >5% overfill: ",
+					(int64_t)degen_count, "/", (int64_t)occ_overfills.size(),
+					" (may extend beyond wall into openings)");
+				// Sort descending by overfill, print top 5 offenders
+				sort(occ_overfills.begin(), occ_overfills.end(),
+					[](const OccOverfill &a, const OccOverfill &b) { return a.pct > b.pct; });
+				int show = degen_count < 5 ? degen_count : 5;
+				for (int di = 0; di < show; di++) {
+					auto &o = occ_overfills[di];
+					UtilityFunctions::print("      ", String::num(o.pct, 1),
+						"% overfill at Godot (",
+						String::num(o.centroid.x, 1), ", ",
+						String::num(o.centroid.y, 1), ", ",
+						String::num(o.centroid.z, 1), ")");
+				}
+			} else {
+				UtilityFunctions::print("    No degenerate occluders (all within 5% tolerance)");
+			}
+		}
+
+		// --- PVS validation: check if occluder planes separate invisible leaf pairs ---
+		if (bsp_data.visibility.empty()) {
+			UtilityFunctions::print("  PVS validation: no visibility data in BSP");
+		} else {
+			int num_leafs = (int)bsp_data.leafs.size();
+			int pvs_invisible_pairs = 0;
+			int pvs_covered_pairs = 0;
+			int pvs_empty_leafs = 0;
+
+			for (int la = 1; la < num_leafs; la++) {
+				if (bsp_data.leafs[la].contents != goldsrc::CONTENTS_EMPTY) continue;
+				pvs_empty_leafs++;
+			}
+
+			// Test each invisible leaf pair
+			for (int la = 1; la < num_leafs; la++) {
+				if (bsp_data.leafs[la].contents != goldsrc::CONTENTS_EMPTY) continue;
+
+				auto pvs = bsp_data.decompress_pvs(la);
+
+				float ca[3] = {
+					(bsp_data.leafs[la].mins[0] + bsp_data.leafs[la].maxs[0]) * 0.5f,
+					(bsp_data.leafs[la].mins[1] + bsp_data.leafs[la].maxs[1]) * 0.5f,
+					(bsp_data.leafs[la].mins[2] + bsp_data.leafs[la].maxs[2]) * 0.5f
+				};
+
+				for (int lb = la + 1; lb < num_leafs; lb++) {
+					if (bsp_data.leafs[lb].contents != goldsrc::CONTENTS_EMPTY) continue;
+					if (pvs[lb]) continue;
+
+					pvs_invisible_pairs++;
+
+					float cb[3] = {
+						(bsp_data.leafs[lb].mins[0] + bsp_data.leafs[lb].maxs[0]) * 0.5f,
+						(bsp_data.leafs[lb].mins[1] + bsp_data.leafs[lb].maxs[1]) * 0.5f,
+						(bsp_data.leafs[lb].mins[2] + bsp_data.leafs[lb].maxs[2]) * 0.5f
+					};
+
+					for (auto &op : occ_planes) {
+						float da = op.n[0]*ca[0] + op.n[1]*ca[1] + op.n[2]*ca[2] - op.d;
+						float db = op.n[0]*cb[0] + op.n[1]*cb[1] + op.n[2]*cb[2] - op.d;
+						if ((da > 0 && db < 0) || (da < 0 && db > 0)) {
+							pvs_covered_pairs++;
+							break;
+						}
+					}
+				}
+			}
+
+			float pvs_pct = pvs_invisible_pairs > 0
+				? (pvs_covered_pairs * 100.0f / pvs_invisible_pairs) : 0;
+			UtilityFunctions::print("  PVS validation:");
+			UtilityFunctions::print("    Empty leaves: ", (int64_t)pvs_empty_leafs,
+				"/", (int64_t)num_leafs);
+			UtilityFunctions::print("    Invisible leaf pairs: ", (int64_t)pvs_invisible_pairs);
+			UtilityFunctions::print("    Pairs with occluder plane between them: ",
+				(int64_t)pvs_covered_pairs, "/", (int64_t)pvs_invisible_pairs,
+				" (", String::num(pvs_pct, 1), "%)");
+			UtilityFunctions::print("    Occluder planes tested: ", (int64_t)occ_planes.size());
+		}
+	}
 }
 
 void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {

@@ -58,6 +58,18 @@ func _get_import_options(_path: String, _preset_index: int) -> Array[Dictionary]
 			"property_hint": PROPERTY_HINT_RANGE,
 			"hint_string": "0.001,1.0,0.001",
 		},
+		{
+			"name": "occluder_min_area",
+			"default_value": 65535.0,
+			"property_hint": PROPERTY_HINT_RANGE,
+			"hint_string": "0,262144,1",
+		},
+		{
+			"name": "occluder_boundary_margin",
+			"default_value": 512.0,
+			"property_hint": PROPERTY_HINT_RANGE,
+			"hint_string": "0,1024,1",
+		},
 	]
 
 
@@ -69,10 +81,14 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 		_platform_variants: Array[String], _gen_files: Array[String]) -> Error:
 	var wad_directory: String = options.get("wad_directory", "")
 	var scale_factor: float = options.get("scale_factor", 0.025)
+	var occluder_min_area: float = options.get("occluder_min_area", 16384.0)
+	var occluder_boundary_margin: float = options.get("occluder_boundary_margin", 64.0)
 
 	# Create the BSP node and configure it
 	var bsp := GoldSrcBSP.new()
 	bsp.set_scale_factor(scale_factor)
+	bsp.set_occluder_min_area(occluder_min_area)
+	bsp.set_occluder_boundary_margin(occluder_boundary_margin)
 
 	# Load WAD files if a directory is specified
 	if wad_directory != "":

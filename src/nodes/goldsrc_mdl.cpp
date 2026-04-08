@@ -117,7 +117,7 @@ void GoldSrcMDL::set_skin(int family) {
 	if (family < 0 || family >= mdl.num_skin_families) return;
 
 	for (auto &[mesh_inst, skin_ref] : mesh_skin_refs) {
-		if (!mesh_inst || !UtilityFunctions::is_instance_valid(mesh_inst)) continue;
+		if (!mesh_inst) continue;
 		int tex_idx = skin_ref;
 		int table_idx = family * mdl.num_skin_ref + skin_ref;
 		if (table_idx >= 0 && table_idx < (int)mdl.skin_table.size()) {

@@ -176,6 +176,12 @@ struct BSPData {
 	std::vector<BSPNode> nodes;
 	std::vector<BSPLeaf> leafs;
 	std::vector<int> raw_to_parsed; // raw_to_parsed[raw_index] = parsed_index, or -1 if filtered
+	std::vector<uint8_t> visibility; // raw RLE-compressed PVS data
+	std::vector<uint16_t> marksurfaces; // leaf -> face index mapping
+
+	// Decompress PVS bitfield for a leaf. Returns a vector of bools, one per leaf.
+	// pvs[i] == true means leaf i is potentially visible from the given leaf.
+	std::vector<bool> decompress_pvs(int leaf_index) const;
 };
 
 class BSPParser {

@@ -54,6 +54,18 @@ bool BSPParser::parse(const uint8_t *data, size_t size) {
 	bsp_data.nodes = nodes;
 	bsp_data.leafs = leafs;
 
+	// Visibility data (raw RLE bytes)
+	{
+		const BSPLump &lump = header.lumps[LUMP_VISIBILITY];
+		if (lump.filelen > 0 && (size_t)lump.fileofs + lump.filelen <= size) {
+			bsp_data.visibility.resize(lump.filelen);
+			memcpy(bsp_data.visibility.data(), data + lump.fileofs, lump.filelen);
+		}
+	}
+
+	// Marksurfaces (leaf -> face index mapping)
+	bsp_data.marksurfaces = read_lump<uint16_t>(data, size, header.lumps[LUMP_MARKSURFACES]);
+
 	parse_textures(data, size);
 	parse_faces(data, size);
 	parse_entities(data, size);
@@ -458,6 +470,62 @@ void BSPParser::parse_entities(const uint8_t *data, size_t size) {
 			pos++;
 		}
 	}
+}
+
+vector<bool> BSPData::decompress_pvs(int leaf_index) const {
+	int num_leafs = (int)leafs.size();
+	vector<bool> pvs(num_leafs, false);
+
+	if (leaf_index < 0 || leaf_index >= num_leafs) return pvs;
+
+	const auto &leaf = leafs[leaf_index];
+
+	// Leaf 0 is the solid "outside" leaf — has no PVS
+	if (leaf_index == 0) return pvs;
+
+	// visofs == -1 means all leaves are visible from this leaf
+	if (leaf.visofs < 0) {
+		pvs.assign(num_leafs, true);
+		return pvs;
+	}
+
+	if (visibility.empty() || (size_t)leaf.visofs >= visibility.size()) return pvs;
+
+	// RLE decompression: each byte is either a literal (bits = visible leaves)
+	// or 0x00 followed by a count of zero-bytes to skip.
+	// The bitfield covers leafs 1..num_leafs-1 (leaf 0 is the void leaf).
+	int num_vis_leafs = num_leafs - 1; // exclude leaf 0
+	int num_bytes = (num_vis_leafs + 7) / 8;
+
+	const uint8_t *src = visibility.data() + leaf.visofs;
+	const uint8_t *src_end = visibility.data() + visibility.size();
+	int byte_idx = 0;
+
+	while (byte_idx < num_bytes && src < src_end) {
+		if (*src == 0) {
+			// Zero byte: next byte is count of zero-bytes to skip
+			src++;
+			if (src >= src_end) break;
+			byte_idx += *src;
+			src++;
+		} else {
+			// Literal byte: each bit is one leaf (bit 0 = lowest leaf index)
+			uint8_t bits = *src;
+			for (int bit = 0; bit < 8 && (byte_idx * 8 + bit) < num_vis_leafs; bit++) {
+				if (bits & (1 << bit)) {
+					// +1 because PVS bits start at leaf 1
+					pvs[byte_idx * 8 + bit + 1] = true;
+				}
+			}
+			byte_idx++;
+			src++;
+		}
+	}
+
+	// A leaf can always see itself
+	pvs[leaf_index] = true;
+
+	return pvs;
 }
 
 } // namespace goldsrc

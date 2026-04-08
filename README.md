@@ -13,7 +13,8 @@ A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
 - Hull 0 collision (StaticBody3D for worldspawn, AnimatableBody3D for brush entities)
 - Clip brush reconstruction from hull 1 clipping data — un-expands Minkowski-expanded hull planes back to original brush geometry, then clips against hull 0 to recover invisible collision brushes that have no render faces
 - Water volume extraction as Area3D with ConvexPolygonShape3D
-- Automatic occluder generation (OccluderInstance3D + PolygonOccluder3D) — identifies large opaque faces, merges coplanar groups into combined occluders, with fallback to individual face occluders
+- Automatic occluder generation (OccluderInstance3D + PolygonOccluder3D) — see [Occluder Generation](#occluder-generation) below
+- PVS (Potentially Visible Set) data parsing with RLE decompression — used by `debug_occluders` mode to validate occluder effectiveness against the BSP's precomputed visibility data
 - Worldspawn spatial splitting — walks the BSP tree to group faces into spatial clusters, producing separate MeshInstance3D nodes per group for better frustum culling
 - Brush entity geometry wrapped in AnimatableBody3D ("Body") with meshes and collision inside, ready for GDScript movement without body conversion
 - Point entity nodes (Node3D) with entity properties stored as metadata — classname, targetname, origin, angles, and all other key-value pairs are accessible from GDScript via `node.get_meta("entity")`
@@ -79,6 +80,42 @@ Options:
 
 Outputs a `.scn` PackedScene file per map with all geometry, collision, occluders, and entity nodes baked in.
 
+## Occluder Generation
+
+The importer automatically generates `OccluderInstance3D` + `PolygonOccluder3D` nodes for worldspawn wall geometry. To use them at runtime, enable **Project Settings > Rendering > Occlusion Culling > Use Occlusion Culling**.
+
+### Algorithm
+
+1. **Face collection** — worldspawn wall faces are gathered (floors/ceilings, sky, water, transparent, and tool textures excluded).
+2. **Coplanar grouping** — faces are grouped by quantized plane key (normal + distance) to find walls that share a plane.
+3. **Connected components** — within each plane group, union-find on shared vertices identifies contiguous face patches.
+4. **Boundary edge merging** — shared interior edges cancel out, leaving only the true outer boundary of each patch (plus any interior holes from doorways/windows).
+5. **Loop classification**:
+   - **Single loop** → solid wall, one merged occluder.
+   - **Multiple loops, holes BSP-solid** → the "holes" are backed by solid geometry (e.g. recessed detail), so one merged occluder from the outer loop is safe.
+   - **Multiple loops, real openings** → doorways/windows detected via BSP tree traversal. The algorithm re-runs edge cancellation on only the qualifying faces (area ≥ `occluder_min_area`). Adjacent solid panels merge into one occluder; the doorway spaces become the natural exterior boundary rather than interior holes.
+6. **Boundary filtering** — faces whose plane sits within `occluder_boundary_margin` GoldSrc units of the worldspawn bbox are skipped. Players can never be on both sides of an outer-hull face, so it provides no occlusion value.
+7. **Polygon cleanup** — duplicate and collinear vertices are removed, and each polygon is pre-validated against Godot's triangulator before being committed as an occluder.
+
+### Import Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `occluder_min_area` | 65535 | Minimum face area in GoldSrc units² for a face to qualify as an occluder. ~256×256 at default. Raise to get fewer, larger occluders; lower to include smaller walls. |
+| `occluder_boundary_margin` | 512 | Faces within this many GoldSrc units of the map's bounding box boundary are skipped. |
+
+These can be set per-map in the Godot Import tab or directly in the `.bsp.import` file:
+
+```ini
+[params]
+occluder_min_area=65535.0
+occluder_boundary_margin=512.0
+```
+
+### Debug Mode
+
+Set `debug_occluders = true` on the `GoldSrcBSP` node before calling `build_mesh()` to print a full pipeline report including: face counts, component breakdown by type (solid/solid-holes/real-openings/walk-failures), occluder coverage percentage, overfill checks on merged polygons, and PVS validation (what fraction of BSP-invisible leaf pairs have an occluder plane between them).
+
 ## Building
 
 Requires CMake 3.22+ and a C++17 compiler.
@@ -120,6 +157,11 @@ var entities = bsp.get_entities()  # Array of Dictionaries
 
 # Optional: debug visualization of clip hull collision cells
 bsp.build_debug_hull_meshes(1)  # hull index 1-3
+
+# Optional: tune occluder generation (before build_mesh)
+bsp.occluder_min_area = 65535.0       # min face area in GoldSrc units²
+bsp.occluder_boundary_margin = 512.0  # skip faces near outer map hull
+bsp.debug_occluders = true            # prints PVS validation, overfill checks, pipeline stats
 
 # Bake ambient cube light grid (call after build_mesh)
 var grid = bsp.bake_light_grid(32.0)  # cell size in GoldSrc units
