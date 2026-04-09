@@ -2,6 +2,7 @@
 
 #include <godot_cpp/classes/resource.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
+#include <godot_cpp/classes/sprite3d.hpp>
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/vector2i.hpp>
 
@@ -24,6 +25,10 @@ public:
 	godot::Vector2i get_frame_origin(int index) const;
 	int get_type() const;
 	int get_texture_format() const;
+
+	/// Build a Sprite3D scene node with tex_anim_frames metadata and an inline
+	/// GDScript animator (if multi-frame). Caller takes ownership and must free().
+	godot::Sprite3D *build_scene() const;
 
 private:
 	std::unique_ptr<goldsrc::SPRParser> parser;

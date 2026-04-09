@@ -1,6 +1,7 @@
 #include "goldsrc_bsp.h"
 
 #include <godot_cpp/classes/file_access.hpp>
+#include <godot_cpp/classes/gd_script.hpp>
 #include <godot_cpp/classes/mesh_instance3d.hpp>
 #include <godot_cpp/classes/array_mesh.hpp>
 #include <godot_cpp/classes/standard_material3d.hpp>
@@ -138,6 +139,65 @@ void fragment() {
 	ALBEDO = texture(sky_cubemap, vec3(-eye_dir.x, eye_dir.y, eye_dir.z)).rgb;
 }
 )";
+
+// Water surface shader: turbulent UV warp to simulate GoldSrc liquid surfaces.
+// Applied to faces whose texture name starts with '!' or '*'.
+static const char *WATER_SHADER_CODE = R"(
+shader_type spatial;
+render_mode unshaded, shadows_disabled, ambient_light_disabled, depth_draw_opaque, cull_back;
+
+uniform sampler2D albedo_texture : source_color;
+uniform float wave_amplitude : hint_range(0.0, 0.1) = 0.025;
+uniform float wave_frequency : hint_range(1.0, 20.0) = 8.0;
+uniform float wave_speed : hint_range(0.1, 5.0) = 1.6;
+
+void fragment() {
+	vec2 uv = UV;
+	uv.x += sin(uv.y * wave_frequency + TIME * wave_speed) * wave_amplitude;
+	uv.y += sin(uv.x * wave_frequency + TIME * wave_speed) * wave_amplitude;
+	ALBEDO = texture(albedo_texture, uv).rgb;
+	ROUGHNESS = 1.0;
+}
+)";
+
+// Inline GDScript for animated texture cycling. Embedded into the scene by
+// build_mesh() so it self-starts on load with no external file dependency.
+static const char *TEXTURE_ANIMATOR_SCRIPT =
+	"extends Node\n"
+	"const FPS := 10.0\n"
+	"var _animated := []\n"
+	"var _tick := 0.0\n"
+	"var _last_frame_idx := -1\n"
+	"\n"
+	"func _ready() -> void:\n"
+	"\t_find_animated(get_parent())\n"
+	"\tif _animated.is_empty():\n"
+	"\t\tset_process(false)\n"
+	"\n"
+	"func _find_animated(node: Node) -> void:\n"
+	"\tfor child in node.get_children():\n"
+	"\t\tif child == self:\n"
+	"\t\t\tcontinue\n"
+	"\t\tif child is MeshInstance3D and child.has_meta(\"tex_anim_frames\"):\n"
+	"\t\t\t_animated.append({mi = child, frames = child.get_meta(\"tex_anim_frames\")})\n"
+	"\t\t_find_animated(child)\n"
+	"\n"
+	"func _process(delta: float) -> void:\n"
+	"\t_tick += delta\n"
+	"\tvar frame_idx := int(_tick * FPS)\n"
+	"\tif frame_idx == _last_frame_idx:\n"
+	"\t\treturn\n"
+	"\t_last_frame_idx = frame_idx\n"
+	"\tfor entry in _animated:\n"
+	"\t\t_apply_frame(entry.mi, entry.frames[frame_idx % entry.frames.size()])\n"
+	"\n"
+	"func _apply_frame(mi: MeshInstance3D, tex: ImageTexture) -> void:\n"
+	"\tfor s in mi.mesh.get_surface_count():\n"
+	"\t\tvar mat := mi.get_active_material(s)\n"
+	"\t\tif mat is ShaderMaterial:\n"
+	"\t\t\tmat.set_shader_parameter(\"albedo_texture\", tex)\n"
+	"\t\telif mat is StandardMaterial3D:\n"
+	"\t\t\tmat.set_texture(BaseMaterial3D.TEXTURE_ALBEDO, tex)\n";
 
 // Write raw (unweighted) lightmap data for a single layer into an atlas
 static void write_layer_pixels(
@@ -683,6 +743,11 @@ void GoldSrcBSP::build_mesh() {
 	sky_shader.instantiate();
 	sky_shader->set_code(SKY_SURFACE_SHADER_CODE);
 
+	// Water surface shader: turbulent warp for '!' and '*' texture faces
+	Ref<Shader> water_shader;
+	water_shader.instantiate();
+	water_shader->set_code(WATER_SHADER_CODE);
+
 	// Create shared lightstyle brightness texture for shader path
 	Ref<Shader> opaque_shader;
 	Ref<Shader> alpha_shader;
@@ -725,6 +790,7 @@ void GoldSrcBSP::build_mesh() {
 	}
 
 	int num_models = (int)bsp_data.models.size();
+	bool has_anim = false;
 
 	for (int m = 0; m < num_models; m++) {
 		auto mf_it = model_faces.find(m);
@@ -1140,7 +1206,8 @@ void GoldSrcBSP::build_mesh() {
 
 			Ref<ImageTexture> texture = find_texture(tex_name);
 			bool is_sky_surface = tex_name.size() >= 3 && tex_name.compare(0, 3, "sky") == 0;
-			bool is_alpha_scissor = !is_sky_surface && tex_name.size() > 0 && tex_name[0] == '{';
+			bool is_water = !is_sky_surface && !tex_name.empty() && (tex_name[0] == '!' || tex_name[0] == '*');
+			bool is_alpha_scissor = !is_sky_surface && !is_water && !tex_name.empty() && tex_name[0] == '{';
 
 			if (is_sky_surface) {
 				// Sky surface: samples sky cubemap by view direction; sky_cubemap
@@ -1148,6 +1215,15 @@ void GoldSrcBSP::build_mesh() {
 				Ref<ShaderMaterial> material;
 				material.instantiate();
 				material->set_shader(sky_shader);
+				arr_mesh->surface_set_material(0, material);
+			} else if (is_water) {
+				// Water/liquid surface: turbulent UV warp, no lightmap.
+				Ref<ShaderMaterial> material;
+				material.instantiate();
+				material->set_shader(water_shader);
+				if (texture.is_valid()) {
+					material->set_shader_parameter("albedo_texture", texture);
+				}
 				arr_mesh->surface_set_material(0, material);
 			} else if (shader_lightstyles) {
 				// Shader path: ShaderMaterial with 4-layer lightmap blending
@@ -1207,6 +1283,49 @@ void GoldSrcBSP::build_mesh() {
 			if (is_sky_surface) {
 				mesh_instance->set_meta("is_sky_surface", true);
 			}
+
+			// Animated texture: +0name–+9name (primary) or +aname–+jname (alternate).
+			// Collect all frame textures and store as metadata so the runtime
+			// TextureAnimator can cycle them without the WAD being loaded.
+			if (tex_name.size() >= 2 && tex_name[0] == '+') {
+				unsigned char c1 = (unsigned char)tex_name[1];
+				bool is_primary = isdigit(c1) != 0;
+				bool is_alt = (toupper(c1) >= 'A' && toupper(c1) <= 'J');
+				if (is_primary || is_alt) {
+					std::string base = tex_name.substr(2);
+					if (!base.empty()) {
+						Array frames;
+						if (is_primary) {
+							// Primary sequence: +0 through +9
+							for (int n = 0; n < 10; n++) {
+								std::string frame_name = "+" + std::to_string(n) + base;
+								Ref<ImageTexture> frame_tex = find_texture(frame_name);
+								if (frame_tex.is_valid()) {
+									frames.push_back(frame_tex);
+								} else {
+									break;
+								}
+							}
+						} else {
+							// Alternate sequence: +a through +j (A=0, B=1, ..., J=9)
+							for (int n = 0; n < 10; n++) {
+								std::string frame_name = "+" + std::string(1, (char)('a' + n)) + base;
+								Ref<ImageTexture> frame_tex = find_texture(frame_name);
+								if (frame_tex.is_valid()) {
+									frames.push_back(frame_tex);
+								} else {
+									break;
+								}
+							}
+						}
+						if (frames.size() >= 2) {
+							mesh_instance->set_meta("tex_anim_frames", frames);
+							has_anim = true;
+						}
+					}
+				}
+			}
+
 			group_parent->add_child(mesh_instance);
 			total_mesh_instances++;
 		}
@@ -1317,6 +1436,22 @@ void GoldSrcBSP::build_mesh() {
 		(int64_t)point_entity_count, " point entities, ",
 		(int64_t)bsp_data.faces.size(), " faces, ",
 		(int64_t)lm_atlases.size(), " lightmap atlases");
+
+	// Add a self-contained texture animator node so the saved .scn animates
+	// automatically on load with no external file or manual wiring required.
+	if (has_anim) {
+		Ref<GDScript> script;
+		script.instantiate();
+		script->set_source_code(String(TEXTURE_ANIMATOR_SCRIPT));
+		if (script->reload() == OK) {
+			Node *animator = memnew(Node);
+			animator->set_name("TextureAnimator");
+			animator->set_script(script);
+			add_child(animator);
+		} else {
+			UtilityFunctions::printerr("[GoldSrc] Failed to compile texture animator script");
+		}
+	}
 }
 
 void GoldSrcBSP::build_hull_collision(Node3D *parent, int model_index,
@@ -1334,8 +1469,8 @@ void GoldSrcBSP::build_hull_collision(Node3D *parent, int model_index,
 
 	for (const auto &face : bsp_data.faces) {
 		if (face.model_index != model_index) continue;
-		// Skip water/slime/lava faces (textures starting with '!')
-		if (!face.texture_name.empty() && face.texture_name[0] == '!') continue;
+		// Skip water/slime/lava faces ('!' or old-format '*' prefix)
+		if (!face.texture_name.empty() && (face.texture_name[0] == '!' || face.texture_name[0] == '*')) continue;
 		// Skip sky faces — not solid, projectiles pass through
 		if (face.texture_name.size() >= 3 && face.texture_name.compare(0, 3, "sky") == 0) continue;
 		int nv = (int)face.vertices.size();
@@ -1383,7 +1518,7 @@ void GoldSrcBSP::build_brush_concave(Node3D *parent, int model_index) {
 
 	for (const auto &face : bsp_data.faces) {
 		if (face.model_index != model_index) continue;
-		if (!face.texture_name.empty() && face.texture_name[0] == '!') continue;
+		if (!face.texture_name.empty() && (face.texture_name[0] == '!' || face.texture_name[0] == '*')) continue;
 		int nv = (int)face.vertices.size();
 		if (nv < 3) continue;
 		for (int i = 2; i < nv; i++) {

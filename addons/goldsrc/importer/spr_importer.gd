@@ -15,11 +15,11 @@ func _get_recognized_extensions() -> PackedStringArray:
 
 
 func _get_save_extension() -> String:
-	return "tres"
+	return "scn"
 
 
 func _get_resource_type() -> String:
-	return "SpriteFrames"
+	return "PackedScene"
 
 
 func _get_preset_count() -> int:
@@ -50,6 +50,10 @@ func _get_import_options(_path: String, _preset_index: int) -> Array[Dictionary]
 			"property_hint": PROPERTY_HINT_RANGE,
 			"hint_string": "1.0,60.0,0.5",
 		},
+		{
+			"name": "loop",
+			"default_value": true,
+		},
 	]
 
 
@@ -60,6 +64,7 @@ func _get_option_visibility(_path: String, _option_name: StringName, _options: D
 func _import(source_file: String, save_path: String, options: Dictionary,
 		_platform_variants: Array[String], _gen_files: Array[String]) -> Error:
 	var fps: float = options.get("animation_fps", 10.0)
+	var loop: bool = options.get("loop", true)
 
 	var spr := GoldSrcSPR.new()
 	var err := spr.load_spr(source_file)
@@ -72,20 +77,22 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 		push_error("SPR Importer: No frames in '%s'" % source_file)
 		return ERR_INVALID_DATA
 
-	# Build SpriteFrames resource with a "default" animation
-	var sprite_frames := SpriteFrames.new()
+	var sprite := spr.build_scene()
+	if not sprite:
+		push_error("SPR Importer: build_scene() failed for '%s'" % source_file)
+		return ERR_CANT_CREATE
 
-	# SpriteFrames starts with a "default" animation — configure it
-	sprite_frames.set_animation_speed("default", fps)
-	sprite_frames.set_animation_loop("default", true)
+	# Bake import options into the SpriteAnimationPlayer child
+	var sap = sprite.get_node_or_null(^"SpriteAnimationPlayer")
+	if sap:
+		sap.fps = fps
+		sap.loop_animation = loop
 
-	# Remove the empty default frame, then add our frames
-	while sprite_frames.get_frame_count("default") > 0:
-		sprite_frames.remove_frame("default", 0)
+	var scene := PackedScene.new()
+	var pack_err := scene.pack(sprite)
+	sprite.free()
+	if pack_err != OK:
+		push_error("SPR Importer: Failed to pack scene for '%s': %s" % [source_file, error_string(pack_err)])
+		return pack_err
 
-	for i in range(frame_count):
-		var tex := spr.get_frame_texture(i)
-		if tex:
-			sprite_frames.add_frame("default", tex)
-
-	return ResourceSaver.save(sprite_frames, save_path + "." + _get_save_extension())
+	return ResourceSaver.save(scene, save_path + "." + _get_save_extension())

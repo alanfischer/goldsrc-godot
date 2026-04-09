@@ -10,6 +10,8 @@ A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
 - Full BSP30 format with face-based mesh generation
 - Atlas-packed lightmaps with 64 lightstyle channels and runtime rebaking
 - Embedded and WAD-referenced textures with transparency (`{` prefix alpha-scissor)
+- Animated textures (`+0name` … `+9name` / `+aname` … `+jname` alternates) — frames collected at import and stored as `tex_anim_frames` metadata on each `MeshInstance3D`; driven at 10 FPS by `TextureAnimator` at runtime with no C++ dependency
+- Water/liquid textures (`!` and `*` prefix) rendered with a turbulent UV-warp shader (sine-wave distortion animated via `TIME`)
 - Hull 0 collision (StaticBody3D for worldspawn, AnimatableBody3D for brush entities)
 - Clip brush reconstruction from hull 1 clipping data — un-expands Minkowski-expanded hull planes back to original brush geometry, then clips against hull 0 to recover invisible collision brushes that have no render faces
 - Water volume extraction as Area3D with ConvexPolygonShape3D
@@ -33,7 +35,8 @@ A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
 - All frame types (single and grouped)
 - Texture formats: normal, additive, index-alpha, alpha-test
 - Sprite types: parallel, facing-upright, oriented, etc.
-- Frame textures accessible individually from GDScript
+- Frame textures and origins accessible individually from GDScript
+- `build_scene()` produces a self-animating Sprite3D with a `SpriteAnimationPlayer` child (GDScript node, no C++ dependency at runtime) — exported properties: `fps` (default 10.0), `loop_animation` (default true), `autoplay` (default "default"); non-looping animations auto-hide the sprite on completion
 
 ### WAD Textures
 - WAD2/WAD3 format support
@@ -49,7 +52,7 @@ Drop files into a project and they auto-import:
 |--------|-----------|--------|-------------|
 | BSP | `.bsp` | `.scn` | PackedScene with meshes, lightmaps, collision |
 | MDL | `.mdl` | `.scn` | PackedScene with Skeleton3D, meshes, animations |
-| SPR | `.spr` | `.tres` | SpriteFrames resource with all frames |
+| SPR | `.spr` | `.scn` | PackedScene with self-animating Sprite3D and SpriteAnimationPlayer child |
 | WAD | `.wad` | `.png` files | Extracts individual textures as PNGs |
 
 All imported scenes contain only standard Godot types (Node3D, MeshInstance3D, ArrayMesh, Skeleton3D, AnimationPlayer, StaticBody3D, AnimatableBody3D, OccluderInstance3D, etc.) and do **not** require the GDExtension at runtime.
@@ -205,7 +208,18 @@ spr.load_spr("sprite.spr")
 
 var frame_count = spr.get_frame_count()
 var texture = spr.get_frame_texture(0)  # ImageTexture
+var origin = spr.get_frame_origin(0)    # Vector2i — up/left extent from entity position
 var spr_type = spr.get_type()           # SPR_VP_PARALLEL, etc.
+
+# Build a self-animating Sprite3D scene (no C++ dependency at runtime):
+var sprite = spr.build_scene()          # Sprite3D with SpriteAnimationPlayer child
+# Override animation properties before adding to tree:
+var sap = sprite.get_node("SpriteAnimationPlayer")
+sap.fps = 20.0
+sap.loop_animation = false
+# Frames and origins are stored as metadata on the Sprite3D:
+#   sprite.get_meta("tex_anim_frames")   # Array[ImageTexture]
+#   sprite.get_meta("tex_anim_origins")  # Array of [ox, oy] pairs
 ```
 
 ### GoldSrcWAD
