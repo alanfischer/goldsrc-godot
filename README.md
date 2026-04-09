@@ -86,7 +86,7 @@ The importer automatically generates `OccluderInstance3D` + `PolygonOccluder3D` 
 
 ### Algorithm
 
-1. **Face collection** — worldspawn wall faces are gathered (floors/ceilings, sky, water, transparent, and tool textures excluded).
+1. **Face collection** — worldspawn wall faces are gathered. Sky, water, transparent, and tool textures are excluded. Faces whose normal aligns with `occluder_exclude_normal` beyond `occluder_exclude_threshold` are excluded (default: horizontal faces such as floors and ceilings; set threshold to `0` to disable).
 2. **Coplanar grouping** — faces are grouped by quantized plane key (normal + distance) to find walls that share a plane.
 3. **Connected components** — within each plane group, union-find on shared vertices identifies contiguous face patches.
 4. **Boundary edge merging** — shared interior edges cancel out, leaving only the true outer boundary of each patch (plus any interior holes from doorways/windows).
@@ -95,14 +95,18 @@ The importer automatically generates `OccluderInstance3D` + `PolygonOccluder3D` 
    - **Multiple loops, holes BSP-solid** → the "holes" are backed by solid geometry (e.g. recessed detail), so one merged occluder from the outer loop is safe.
    - **Multiple loops, real openings** → doorways/windows detected via BSP tree traversal. The algorithm re-runs edge cancellation on only the qualifying faces (area ≥ `occluder_min_area`). Adjacent solid panels merge into one occluder; the doorway spaces become the natural exterior boundary rather than interior holes.
 6. **Boundary filtering** — faces whose plane sits within `occluder_boundary_margin` GoldSrc units of the worldspawn bbox are skipped. Players can never be on both sides of an outer-hull face, so it provides no occlusion value.
-7. **Polygon cleanup** — duplicate and collinear vertices are removed, and each polygon is pre-validated against Godot's triangulator before being committed as an occluder.
+7. **Importance sorting and capping** — all candidate occluders are sorted by polygon area (largest first). If `occluder_max_count` is non-zero, only the top N are kept. This provides a performance budget while ensuring the most impactful occluders are always retained.
+8. **Polygon cleanup** — duplicate and collinear vertices are removed, and each polygon is pre-validated against Godot's triangulator before being committed as an occluder.
 
 ### Import Parameters
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `occluder_min_area` | 65535 | Minimum face area in GoldSrc units² for a face to qualify as an occluder. ~256×256 at default. Raise to get fewer, larger occluders; lower to include smaller walls. |
-| `occluder_boundary_margin` | 512 | Faces within this many GoldSrc units of the map's bounding box boundary are skipped. |
+| `occluder_boundary_margin` | 512 | Faces within this many GoldSrc units of the map's bounding box boundary are skipped. Outer-hull faces provide no occlusion value since the player is never on both sides of them. |
+| `occluder_exclude_normal` | `Vector3(0, 1, 0)` | Faces whose normal aligns with this axis (in Godot space) beyond `occluder_exclude_threshold` are excluded. Default excludes horizontal faces (floors/ceilings). For vertical levels, set this to the axis that is "horizontal" in that level. |
+| `occluder_exclude_threshold` | 0.7 | Alignment threshold for `occluder_exclude_normal`: faces where `abs(dot(face_normal, exclude_normal)) > threshold` are excluded. Set to `0` to disable normal-based exclusion entirely. |
+| `occluder_max_count` | 0 | Maximum number of occluders to generate. Candidates are sorted by area (largest first) and the top N are kept. `0` = unlimited. Useful for bounding culling overhead on complex maps. |
 
 These can be set per-map in the Godot Import tab or directly in the `.bsp.import` file:
 
@@ -110,6 +114,9 @@ These can be set per-map in the Godot Import tab or directly in the `.bsp.import
 [params]
 occluder_min_area=65535.0
 occluder_boundary_margin=512.0
+occluder_exclude_normal=Vector3(0, 1, 0)
+occluder_exclude_threshold=0.7
+occluder_max_count=0
 ```
 
 ### Debug Mode
@@ -159,9 +166,12 @@ var entities = bsp.get_entities()  # Array of Dictionaries
 bsp.build_debug_hull_meshes(1)  # hull index 1-3
 
 # Optional: tune occluder generation (before build_mesh)
-bsp.occluder_min_area = 65535.0       # min face area in GoldSrc units²
-bsp.occluder_boundary_margin = 512.0  # skip faces near outer map hull
-bsp.debug_occluders = true            # prints PVS validation, overfill checks, pipeline stats
+bsp.occluder_min_area = 65535.0              # min face area in GoldSrc units²
+bsp.occluder_boundary_margin = 512.0         # skip faces near outer map hull
+bsp.occluder_exclude_normal = Vector3(0,1,0) # Godot-space axis to exclude (default: Y-up = horizontal)
+bsp.occluder_exclude_threshold = 0.7         # exclusion strength; 0 = disabled
+bsp.occluder_max_count = 0                   # cap on occluder count (0 = unlimited); sorted by area
+bsp.debug_occluders = true                   # prints PVS validation, overfill checks, pipeline stats
 
 # Bake ambient cube light grid (call after build_mesh)
 var grid = bsp.bake_light_grid(32.0)  # cell size in GoldSrc units

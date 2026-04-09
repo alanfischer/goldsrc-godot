@@ -267,6 +267,12 @@ void GoldSrcBSP::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_occluder_min_area"), &GoldSrcBSP::get_occluder_min_area);
 	ClassDB::bind_method(D_METHOD("set_occluder_boundary_margin", "margin"), &GoldSrcBSP::set_occluder_boundary_margin);
 	ClassDB::bind_method(D_METHOD("get_occluder_boundary_margin"), &GoldSrcBSP::get_occluder_boundary_margin);
+	ClassDB::bind_method(D_METHOD("set_occluder_exclude_normal", "normal"), &GoldSrcBSP::set_occluder_exclude_normal);
+	ClassDB::bind_method(D_METHOD("get_occluder_exclude_normal"), &GoldSrcBSP::get_occluder_exclude_normal);
+	ClassDB::bind_method(D_METHOD("set_occluder_exclude_threshold", "threshold"), &GoldSrcBSP::set_occluder_exclude_threshold);
+	ClassDB::bind_method(D_METHOD("get_occluder_exclude_threshold"), &GoldSrcBSP::get_occluder_exclude_threshold);
+	ClassDB::bind_method(D_METHOD("set_occluder_max_count", "count"), &GoldSrcBSP::set_occluder_max_count);
+	ClassDB::bind_method(D_METHOD("get_occluder_max_count"), &GoldSrcBSP::get_occluder_max_count);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "scale_factor"), "set_scale_factor", "get_scale_factor");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "shader_lightstyles"), "set_shader_lightstyles", "get_shader_lightstyles");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "debug_occluders"), "set_debug_occluders", "get_debug_occluders");
@@ -274,6 +280,12 @@ void GoldSrcBSP::_bind_methods() {
 		"set_occluder_min_area", "get_occluder_min_area");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "occluder_boundary_margin", PROPERTY_HINT_RANGE, "0,512,1"),
 		"set_occluder_boundary_margin", "get_occluder_boundary_margin");
+	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "occluder_exclude_normal"),
+		"set_occluder_exclude_normal", "get_occluder_exclude_normal");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "occluder_exclude_threshold", PROPERTY_HINT_RANGE, "0.0,1.0,0.01"),
+		"set_occluder_exclude_threshold", "get_occluder_exclude_threshold");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "occluder_max_count", PROPERTY_HINT_RANGE, "0,1024,1"),
+		"set_occluder_max_count", "get_occluder_max_count");
 }
 
 Error GoldSrcBSP::load_bsp(const String &path) {
@@ -351,6 +363,30 @@ void GoldSrcBSP::set_occluder_boundary_margin(float margin) {
 
 float GoldSrcBSP::get_occluder_boundary_margin() const {
 	return occluder_boundary_margin;
+}
+
+void GoldSrcBSP::set_occluder_exclude_normal(Vector3 normal) {
+	occluder_exclude_normal = normal;
+}
+
+Vector3 GoldSrcBSP::get_occluder_exclude_normal() const {
+	return occluder_exclude_normal;
+}
+
+void GoldSrcBSP::set_occluder_exclude_threshold(float threshold) {
+	occluder_exclude_threshold = threshold;
+}
+
+float GoldSrcBSP::get_occluder_exclude_threshold() const {
+	return occluder_exclude_threshold;
+}
+
+void GoldSrcBSP::set_occluder_max_count(int count) {
+	occluder_max_count = count;
+}
+
+int GoldSrcBSP::get_occluder_max_count() const {
+	return occluder_max_count;
 }
 
 int GoldSrcBSP::point_contents(Vector3 godot_pos) const {
@@ -1461,11 +1497,14 @@ struct UnionFind {
 	}
 };
 
-// Create an OccluderInstance3D from ordered coplanar vertices
-void create_polygon_occluder(
+using OccluderCandidate = pair<float, OccluderInstance3D*>; // area, instance
+
+// Create an OccluderInstance3D from ordered coplanar vertices and push it
+// into candidates. Does nothing (returns false) if the polygon is degenerate.
+bool create_polygon_occluder(
 	const vector<Vector3> &gd_verts,
 	const Vector3 &gd_normal,
-	Node3D *parent)
+	vector<OccluderCandidate> &candidates)
 {
 	if ((int)gd_verts.size() < 3) return;
 
@@ -1512,7 +1551,7 @@ void create_polygon_occluder(
 		}
 	}
 
-	if ((int)final_pts.size() < 3) return;
+	if ((int)final_pts.size() < 3) return false;
 
 	int n = (int)final_pts.size();
 	PackedVector2Array polygon;
@@ -1522,7 +1561,15 @@ void create_polygon_occluder(
 	// Validate: try triangulating before creating the node.
 	// Geometry2D::triangulate_polygon returns empty on failure.
 	PackedInt32Array tris = Geometry2D::get_singleton()->triangulate_polygon(polygon);
-	if (tris.is_empty()) return; // skip self-intersecting or degenerate polygons
+	if (tris.is_empty()) return false; // skip self-intersecting or degenerate polygons
+
+	// Polygon area via shoelace (used for importance sorting)
+	float area = 0.0f;
+	for (int i = 0; i < n; i++) {
+		int j = (i + 1) % n;
+		area += final_pts[i].x * final_pts[j].y - final_pts[j].x * final_pts[i].y;
+	}
+	area = fabsf(area) * 0.5f;
 
 	Transform3D xform;
 	xform.basis.set_column(0, local_x);
@@ -1537,7 +1584,8 @@ void create_polygon_occluder(
 	OccluderInstance3D *inst = memnew(OccluderInstance3D);
 	inst->set_occluder(occluder);
 	inst->set_transform(xform);
-	parent->add_child(inst);
+	candidates.push_back({area, inst});
+	return true;
 }
 
 // Shared polygon-splitting step used by both hull-0 and clipnode traversals.
@@ -1616,6 +1664,19 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 
 	const float MIN_AREA_GS = occluder_min_area;
 	const float BOUNDARY_MARGIN = occluder_boundary_margin;
+
+	// Convert exclude_normal from Godot coords (Y-up) to GoldSrc coords (Z-up).
+	// Godot(x,y,z) → GS(-x, z, y). Normalize to handle non-unit input.
+	float ex = 0.0f, ey = 0.0f, ez = 0.0f;
+	const bool use_exclude_normal = occluder_exclude_threshold > 0.0f;
+	if (use_exclude_normal) {
+		ex = -occluder_exclude_normal.x;
+		ey =  occluder_exclude_normal.z;
+		ez =  occluder_exclude_normal.y;
+		float elen = sqrtf(ex*ex + ey*ey + ez*ez);
+		if (elen > 1e-6f) { ex /= elen; ey /= elen; ez /= elen; }
+		else { ex = 0.0f; ey = 0.0f; ez = 1.0f; } // fallback: GS Z-up
+	}
 	const auto &bmodel = bsp_data.models[0];
 	// Returns true when the plane (n, d) sits on the outer surface of the map bbox.
 	// d = n·p for any point p on the plane (GoldSrc coords).
@@ -1647,8 +1708,10 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 		if (tn.compare(0, 3, "sky") == 0) continue;
 		if (goldsrc::is_tool_texture(tn)) continue;
 
-		float nz = face.normal[2];
-		if (nz > 0.7f || nz < -0.7f) continue;
+		if (use_exclude_normal) {
+			float dot = fabsf(face.normal[0]*ex + face.normal[1]*ey + face.normal[2]*ez);
+			if (dot > occluder_exclude_threshold) continue;
+		}
 
 		int nv = (int)face.vertices.size();
 		if (nv < 3) continue;
@@ -1705,6 +1768,9 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 	struct OccOverfill { float pct; Vector3 centroid; };
 	vector<OccPlane> occ_planes;
 	vector<OccOverfill> occ_overfills;
+
+	// All occluder instances, collected before sorting/capping
+	vector<OccluderCandidate> candidates;
 
 	// Track which qualifying faces got handled by a merged group
 	vector<bool> handled(qualifying.size(), false);
@@ -1892,7 +1958,7 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 				gd_verts.reserve(loops[0].size());
 				for (auto &qv : loops[0]) gd_verts.push_back(qvert_to_pos[qv]);
 
-				create_polygon_occluder(gd_verts, gd_normal, parent);
+				create_polygon_occluder(gd_verts, gd_normal, candidates);
 				if (debug_occluders) {
 					const auto &v0 = ref_face.vertices[0].pos;
 					float d = ref_face.normal[0]*v0[0] + ref_face.normal[1]*v0[1] + ref_face.normal[2]*v0[2];
@@ -1945,7 +2011,7 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 							face.vertices[i].pos[2]);
 					}
 
-					create_polygon_occluder(gd_verts, gd_normal, parent);
+					create_polygon_occluder(gd_verts, gd_normal, candidates);
 					dbg_individual_area += qualifying[group[gi]].area;
 					count_individual++;
 				}
@@ -2004,7 +2070,7 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 					vector<Vector3> gd_verts;
 					gd_verts.reserve(loops[0].size());
 					for (auto &qv : loops[0]) gd_verts.push_back(qvert_to_pos[qv]);
-					create_polygon_occluder(gd_verts, gd_normal, parent);
+					create_polygon_occluder(gd_verts, gd_normal, candidates);
 					if (debug_occluders) {
 						const auto &v0 = ref_face.vertices[0].pos;
 						float d = ref_face.normal[0]*v0[0] + ref_face.normal[1]*v0[1] + ref_face.normal[2]*v0[2];
@@ -2101,7 +2167,7 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 						vector<Vector3> gd_verts;
 						gd_verts.reserve(sq_loops[0].size());
 						for (auto &qv : sq_loops[0]) gd_verts.push_back(sq_pos[qv]);
-						create_polygon_occluder(gd_verts, gd_normal, parent);
+						create_polygon_occluder(gd_verts, gd_normal, candidates);
 						dbg_merged_area += total_area;
 						count_merged++;
 					} else if (!sq_loops.empty()) {
@@ -2125,7 +2191,7 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 							vector<Vector3> gd_verts;
 							gd_verts.reserve(sq_loops[0].size());
 							for (auto &qv : sq_loops[0]) gd_verts.push_back(sq_pos[qv]);
-							create_polygon_occluder(gd_verts, gd_normal, parent);
+							create_polygon_occluder(gd_verts, gd_normal, candidates);
 							dbg_merged_area += total_area;
 							count_merged++;
 						} else {
@@ -2138,7 +2204,7 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 									gd_verts[i] = goldsrc_to_godot(sface.vertices[i].pos[0],
 									                               sface.vertices[i].pos[1],
 									                               sface.vertices[i].pos[2]);
-								create_polygon_occluder(gd_verts, gd_normal, parent);
+								create_polygon_occluder(gd_verts, gd_normal, candidates);
 								dbg_individual_area += qualifying[group[gi]].area;
 								count_individual++;
 							}
@@ -2153,7 +2219,7 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 								gd_verts[i] = goldsrc_to_godot(sface.vertices[i].pos[0],
 								                               sface.vertices[i].pos[1],
 								                               sface.vertices[i].pos[2]);
-							create_polygon_occluder(gd_verts, gd_normal, parent);
+							create_polygon_occluder(gd_verts, gd_normal, candidates);
 							dbg_individual_area += qualifying[group[gi]].area;
 							count_individual++;
 						}
@@ -2189,7 +2255,7 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 		Vector3 gd_normal(-face.normal[0], face.normal[2], face.normal[1]);
 		gd_normal.normalize();
 
-		create_polygon_occluder(gd_verts, gd_normal, parent);
+		create_polygon_occluder(gd_verts, gd_normal, candidates);
 		if (debug_occluders) {
 			const auto &v0 = face.vertices[0].pos;
 			float d = face.normal[0]*v0[0] + face.normal[1]*v0[1] + face.normal[2]*v0[2];
@@ -2200,9 +2266,26 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 		count_individual++;
 	}
 
+	// Sort candidates by area descending (largest = most important)
+	sort(candidates.begin(), candidates.end(),
+		[](const OccluderCandidate &a, const OccluderCandidate &b) { return a.first > b.first; });
+
 	int total = count_merged + count_individual;
-	UtilityFunctions::print("[GoldSrc] Built ", (int64_t)total, " occluders (",
-		(int64_t)count_merged, " merged, ", (int64_t)count_individual, " individual)");
+	int n_add = (occluder_max_count > 0 && total > occluder_max_count)
+		? occluder_max_count : total;
+
+	for (int i = 0; i < n_add; i++) {
+		parent->add_child(candidates[i].second);
+	}
+	for (int i = n_add; i < total; i++) {
+		memdelete(candidates[i].second);
+	}
+
+	UtilityFunctions::print("[GoldSrc] Built ", (int64_t)n_add, " occluders (",
+		(int64_t)count_merged, " merged, ", (int64_t)count_individual, " individual",
+		n_add < total
+			? String(", capped from ") + String::num_int64(total) + " by occluder_max_count"
+			: String(""), ")");
 
 	if (debug_occluders) {
 		float total_wall_area = 0;

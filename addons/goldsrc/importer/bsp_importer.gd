@@ -70,6 +70,22 @@ func _get_import_options(_path: String, _preset_index: int) -> Array[Dictionary]
 			"property_hint": PROPERTY_HINT_RANGE,
 			"hint_string": "0,1024,1",
 		},
+		{
+			"name": "occluder_exclude_normal",
+			"default_value": Vector3(0, 1, 0),
+		},
+		{
+			"name": "occluder_exclude_threshold",
+			"default_value": 0.7,
+			"property_hint": PROPERTY_HINT_RANGE,
+			"hint_string": "0.0,1.0,0.01",
+		},
+		{
+			"name": "occluder_max_count",
+			"default_value": 0,
+			"property_hint": PROPERTY_HINT_RANGE,
+			"hint_string": "0,1024,1",
+		},
 	]
 
 
@@ -83,12 +99,18 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 	var scale_factor: float = options.get("scale_factor", 0.025)
 	var occluder_min_area: float = options.get("occluder_min_area", 16384.0)
 	var occluder_boundary_margin: float = options.get("occluder_boundary_margin", 64.0)
+	var occluder_exclude_normal: Vector3 = options.get("occluder_exclude_normal", Vector3(0, 1, 0))
+	var occluder_exclude_threshold: float = options.get("occluder_exclude_threshold", 0.7)
+	var occluder_max_count: int = options.get("occluder_max_count", 0)
 
 	# Create the BSP node and configure it
 	var bsp := GoldSrcBSP.new()
 	bsp.set_scale_factor(scale_factor)
 	bsp.set_occluder_min_area(occluder_min_area)
 	bsp.set_occluder_boundary_margin(occluder_boundary_margin)
+	bsp.set_occluder_exclude_normal(occluder_exclude_normal)
+	bsp.set_occluder_exclude_threshold(occluder_exclude_threshold)
+	bsp.set_occluder_max_count(occluder_max_count)
 
 	# Load WAD files if a directory is specified
 	if wad_directory != "":
