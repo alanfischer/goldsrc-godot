@@ -1506,7 +1506,7 @@ bool create_polygon_occluder(
 	const Vector3 &gd_normal,
 	vector<OccluderCandidate> &candidates)
 {
-	if ((int)gd_verts.size() < 3) return;
+	if ((int)gd_verts.size() < 3) return false;
 
 	Vector3 ref_axis = (fabsf(gd_normal.y) < 0.9f)
 		? Vector3(0, 1, 0) : Vector3(1, 0, 0);
