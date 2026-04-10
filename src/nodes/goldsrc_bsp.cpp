@@ -2405,7 +2405,9 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 	sort(candidates.begin(), candidates.end(),
 		[](const OccluderCandidate &a, const OccluderCandidate &b) { return a.first > b.first; });
 
-	int total = count_merged + count_individual;
+	// Use candidates.size() — count_merged/count_individual include polygons that
+	// create_polygon_occluder() rejected as degenerate (returns false, no push_back).
+	int total = (int)candidates.size();
 	int n_add = (occluder_max_count > 0 && total > occluder_max_count)
 		? occluder_max_count : total;
 

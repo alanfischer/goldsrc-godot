@@ -17,10 +17,10 @@ compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 config/name="GoldSrc GDExtension Demo"
 config/features=PackedStringArray("4.6")
 
-[rendering]
-
-occlusion_culling/use_occlusion_culling=true
-
 [editor_plugins]
 
 enabled=PackedStringArray("res://addons/goldsrc/plugin.cfg")
+
+[rendering]
+
+occlusion_culling/use_occlusion_culling=true

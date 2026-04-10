@@ -57,6 +57,17 @@ Drop files into a project and they auto-import:
 
 All imported scenes contain only standard Godot types (Node3D, MeshInstance3D, ArrayMesh, Skeleton3D, AnimationPlayer, StaticBody3D, AnimatableBody3D, OccluderInstance3D, etc.) and do **not** require the GDExtension at runtime.
 
+### BSP Entity Model Instantiation
+
+The BSP importer automatically instantiates MDL/SPR scenes for point entities (monsters, props, sprites, etc.). Entity `model` keys are resolved as `res://` + the entity path, mirroring the GoldSrc layout at the project root — so `models/headcrab.mdl` maps to `res://models/headcrab.mdl`.
+
+If the asset is not found, a small placeholder `BoxMesh` (0.3 m³) is placed at the entity position so it remains visible in the editor.
+
+**Typical workflow:**
+1. Drop your game's `models/` and `sprites/` folders into the project root (`res://`).
+2. Godot auto-imports all `.mdl` and `.spr` files.
+3. Import your `.bsp` — entities with models/sprites appear in the scene automatically.
+
 ### Headless Batch Conversion
 
 Convert BSP maps from the command line without opening the editor:

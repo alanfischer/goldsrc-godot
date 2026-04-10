@@ -35,7 +35,7 @@ func _get_priority() -> float:
 
 
 func _get_import_order() -> int:
-	return 0
+	return 1 # Must run after MDL/SPR importers (order 0) so their scenes are available.
 
 
 # Must run on main thread — ArrayMesh/ImageTexture serialization deadlocks
@@ -57,6 +57,16 @@ func _get_import_options(_path: String, _preset_index: int) -> Array[Dictionary]
 			"default_value": 0.025,
 			"property_hint": PROPERTY_HINT_RANGE,
 			"hint_string": "0.001,1.0,0.001",
+		},
+		# Base res:// path for resolving entity model/sprite references.
+		# Set this to the folder that mirrors your GoldSrc game root inside the
+		# project (e.g. res://res), so "models/headcrab.mdl" resolves correctly.
+		# Leave empty when your project root already mirrors the game root.
+		{
+			"name": "model_directory",
+			"default_value": "",
+			"property_hint": PROPERTY_HINT_DIR,
+			"hint_string": "",
 		},
 		{
 			"name": "occluder_min_area",
@@ -97,6 +107,7 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 		_platform_variants: Array[String], _gen_files: Array[String]) -> Error:
 	var wad_directory: String = options.get("wad_directory", "")
 	var scale_factor: float = options.get("scale_factor", 0.025)
+	var model_directory: String = options.get("model_directory", "")
 	var occluder_min_area: float = options.get("occluder_min_area", 16384.0)
 	var occluder_boundary_margin: float = options.get("occluder_boundary_margin", 64.0)
 	var occluder_exclude_normal: Vector3 = options.get("occluder_exclude_normal", Vector3(0, 1, 0))
@@ -141,6 +152,9 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 	for child in children:
 		bsp.remove_child(child)
 		root.add_child(child)
+
+	_instantiate_entity_models(root, model_directory)
+
 	_set_owner_recursive(root, root)
 
 	# Pack and save
@@ -157,4 +171,43 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 func _set_owner_recursive(node: Node, owner: Node) -> void:
 	for child in node.get_children():
 		child.owner = owner
-		_set_owner_recursive(child, owner)
+		# Don't recurse into instanced sub-scenes — their internal nodes belong
+		# to that scene, not to this one. Setting owner on the root is enough.
+		if child.scene_file_path == "":
+			_set_owner_recursive(child, owner)
+
+
+# Instantiate MDL/SPR scenes for each point entity that has a "model" key.
+# Resolves entity paths relative to model_dir (if set) or res:// (if empty),
+# mirroring the GoldSrc layout at that root.
+# Falls back to a placeholder box if the asset is not found.
+func _instantiate_entity_models(root: Node3D, model_dir: String) -> void:
+	var base := model_dir if model_dir != "" else "res://"
+	for child in root.get_children():
+		if not child.has_meta("entity"):
+			continue
+		var ent: Dictionary = child.get_meta("entity")
+		var model_path: String = ent.get("model", "")
+
+		# Brush entities reference internal BSP sub-models ("*N") — skip them.
+		if model_path.is_empty() or model_path.begins_with("*"):
+			continue
+
+		var res_path := base.path_join(model_path)
+		var instance: Node3D = null
+
+		if ResourceLoader.exists(res_path):
+			var scene := load(res_path) as PackedScene
+			if scene:
+				instance = scene.instantiate() as Node3D
+
+		if instance == null:
+			var mi := MeshInstance3D.new()
+			var box := BoxMesh.new()
+			box.size = Vector3(0.3, 0.3, 0.3)
+			mi.mesh = box
+			instance = mi
+			push_warning("BSP Importer: model not found, using placeholder for '%s'" % res_path)
+
+		instance.name = model_path.get_file().get_basename()
+		child.add_child(instance)
