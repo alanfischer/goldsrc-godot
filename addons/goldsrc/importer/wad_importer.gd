@@ -1,9 +1,13 @@
 @tool
 extends EditorImportPlugin
-## Imports a GoldSrc WAD file as a directory of PNG textures.
+## Imports a GoldSrc WAD file.
 ##
-## The WAD itself is saved as a minimal .tres marker. The real output is the
-## generated PNG files written next to the source WAD, one per texture.
+## The WAD is saved as a minimal .tres marker so Godot tracks it as a known
+## asset. The BSP importer loads WAD files directly via the C++ GoldSrcWAD
+## class — it does not use extracted PNGs.
+##
+## PNG extraction is opt-in (extract_textures = false by default) for cases
+## where individual textures are needed outside of BSP rendering.
 
 
 func _get_importer_name() -> String:
@@ -50,7 +54,7 @@ func _get_import_options(_path: String, _preset_index: int) -> Array[Dictionary]
 	return [
 		{
 			"name": "extract_textures",
-			"default_value": true,
+			"default_value": false,
 		},
 		{
 			"name": "output_directory",
