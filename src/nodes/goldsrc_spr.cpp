@@ -218,7 +218,8 @@ Sprite3D *GoldSrcSPR::build_scene() const {
 			bm = BaseMaterial3D::BILLBOARD_ENABLED;
 			break;
 	}
-	sprite->set_billboard_mode(bm);
+	// billboard_mode is set on the material below — set_billboard_mode() on Sprite3D
+	// only affects the internal material, which is ignored when material_override is set.
 
 	int count = get_frame_count();
 	Array frames;
@@ -235,11 +236,14 @@ Sprite3D *GoldSrcSPR::build_scene() const {
 		origins.push_back(pair);
 	}
 
-	// Build material from SPR texture format. The SpriteAnimationPlayer script
-	// keeps material_override.albedo_texture in sync as frames advance.
+	// Build material from SPR texture format. Billboard mode goes here too —
+	// material_override takes precedence over Sprite3D's internal material,
+	// so billboard must be on the override or it is silently ignored.
+	// The SpriteAnimationPlayer script keeps albedo_texture in sync as frames advance.
 	Ref<StandardMaterial3D> mat;
 	mat.instantiate();
 	mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+	mat->set_billboard_mode(bm);
 	switch (parser->get_data().texture_format) {
 		case goldsrc::SPR_ADDITIVE:
 			mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
