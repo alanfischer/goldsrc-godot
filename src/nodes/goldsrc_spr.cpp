@@ -1,9 +1,11 @@
 #include "goldsrc_spr.h"
 
+#include <godot_cpp/classes/base_material3d.hpp>
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/gd_script.hpp>
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/node.hpp>
+#include <godot_cpp/classes/standard_material3d.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #include <cstring>
@@ -202,6 +204,22 @@ Sprite3D *GoldSrcSPR::build_scene() const {
 
 	Sprite3D *sprite = memnew(Sprite3D);
 
+	// Set billboard mode from SPR orientation type.
+	BaseMaterial3D::BillboardMode bm;
+	switch (parser->get_data().type) {
+		case goldsrc::SPR_VP_PARALLEL_UPRIGHT:
+		case goldsrc::SPR_FACING_UPRIGHT:
+			bm = BaseMaterial3D::BILLBOARD_FIXED_Y;
+			break;
+		case goldsrc::SPR_ORIENTED:
+			bm = BaseMaterial3D::BILLBOARD_DISABLED;
+			break;
+		default: // VP_PARALLEL, VP_PARALLEL_ORIENTED
+			bm = BaseMaterial3D::BILLBOARD_ENABLED;
+			break;
+	}
+	sprite->set_billboard_mode(bm);
+
 	int count = get_frame_count();
 	Array frames;
 	Array origins;
@@ -217,12 +235,32 @@ Sprite3D *GoldSrcSPR::build_scene() const {
 		origins.push_back(pair);
 	}
 
+	// Build material from SPR texture format. The SpriteAnimationPlayer script
+	// keeps material_override.albedo_texture in sync as frames advance.
+	Ref<StandardMaterial3D> mat;
+	mat.instantiate();
+	mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+	switch (parser->get_data().texture_format) {
+		case goldsrc::SPR_ADDITIVE:
+			mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+			mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_ADD);
+			break;
+		case goldsrc::SPR_ALPHATEST:
+			mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA_SCISSOR);
+			break;
+		default: // NORMAL, INDEXALPHA
+			mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+			break;
+	}
 	if (frames.size() > 0) {
 		Ref<ImageTexture> first = frames[0];
 		if (first.is_valid()) {
+			mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, first);
 			sprite->set_texture(first);
 		}
 	}
+	sprite->set_material_override(mat);
+
 	sprite->set_meta("tex_anim_frames", frames);
 	sprite->set_meta("tex_anim_origins", origins);
 
