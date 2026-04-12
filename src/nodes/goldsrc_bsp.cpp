@@ -162,17 +162,46 @@ void fragment() {
 
 // Inline GDScript for animated texture cycling. Embedded into the scene by
 // build_mesh() so it self-starts on load with no external file dependency.
-static const char *TEXTURE_ANIMATOR_SCRIPT =
+// Named TextureAnimationPlayer to mirror the SPR SpriteAnimationPlayer convention.
+// Exposes a subset of the AnimationPlayer API (play/pause/stop/seek/speed_scale)
+// so BSP and SPR animations can be driven identically from game code.
+static const char *TEXTURE_ANIMATION_PLAYER_SCRIPT =
 	"extends Node\n"
-	"const FPS := 10.0\n"
+	"@export var fps: float = 10.0\n"
+	"var speed_scale: float = 1.0\n"
+	"var _playing: bool = false\n"
 	"var _animated := []\n"
 	"var _tick := 0.0\n"
 	"var _last_frame_idx := -1\n"
 	"\n"
 	"func _ready() -> void:\n"
 	"\t_find_animated(get_parent())\n"
-	"\tif _animated.is_empty():\n"
-	"\t\tset_process(false)\n"
+	"\tif not _animated.is_empty():\n"
+	"\t\tplay()\n"
+	"\n"
+	"func play(_anim_name: String = \"\", _blend: float = -1.0, _speed: float = 1.0, _from_end: bool = false) -> void:\n"
+	"\t_playing = true\n"
+	"\tset_process(true)\n"
+	"\n"
+	"func pause() -> void:\n"
+	"\t_playing = false\n"
+	"\tset_process(false)\n"
+	"\n"
+	"func stop(keep_state: bool = true) -> void:\n"
+	"\t_playing = false\n"
+	"\tset_process(false)\n"
+	"\tif not keep_state:\n"
+	"\t\t_tick = 0.0\n"
+	"\t\t_last_frame_idx = -1\n"
+	"\n"
+	"func is_playing() -> bool:\n"
+	"\treturn _playing\n"
+	"\n"
+	"func seek(seconds: float, update: bool = false) -> void:\n"
+	"\t_tick = seconds\n"
+	"\t_last_frame_idx = -1\n"
+	"\tif update:\n"
+	"\t\t_tick_frame()\n"
 	"\n"
 	"func _find_animated(node: Node) -> void:\n"
 	"\tfor child in node.get_children():\n"
@@ -183,8 +212,11 @@ static const char *TEXTURE_ANIMATOR_SCRIPT =
 	"\t\t_find_animated(child)\n"
 	"\n"
 	"func _process(delta: float) -> void:\n"
-	"\t_tick += delta\n"
-	"\tvar frame_idx := int(_tick * FPS)\n"
+	"\t_tick += delta * speed_scale\n"
+	"\t_tick_frame()\n"
+	"\n"
+	"func _tick_frame() -> void:\n"
+	"\tvar frame_idx := int(_tick * fps)\n"
 	"\tif frame_idx == _last_frame_idx:\n"
 	"\t\treturn\n"
 	"\t_last_frame_idx = frame_idx\n"
@@ -1442,10 +1474,10 @@ void GoldSrcBSP::build_mesh() {
 	if (has_anim) {
 		Ref<GDScript> script;
 		script.instantiate();
-		script->set_source_code(String(TEXTURE_ANIMATOR_SCRIPT));
+		script->set_source_code(String(TEXTURE_ANIMATION_PLAYER_SCRIPT));
 		if (script->reload() == OK) {
 			Node *animator = memnew(Node);
-			animator->set_name("TextureAnimator");
+			animator->set_name("TextureAnimationPlayer");
 			animator->set_script(script);
 			add_child(animator);
 		} else {
