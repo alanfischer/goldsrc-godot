@@ -347,63 +347,6 @@ void clip_cell_by_hull0(
 	clip_cell_by_hull0(back_cell, nodes, leafs, planes, node.children[1], epsilon, out_cells);
 }
 
-bool cell_touches_playable(
-	const ConvexCell &cell,
-	const vector<goldsrc::BSPNode> &nodes,
-	const vector<goldsrc::BSPLeaf> &leafs,
-	const vector<goldsrc::BSPPlane> &planes,
-	int node_index,
-	float epsilon) {
-
-	if (node_index < 0) {
-		int leaf_index = -(node_index + 1);
-		if (leaf_index < 0 || (size_t)leaf_index >= leafs.size()) return false;
-		int c = leafs[leaf_index].contents;
-		// Playable: any content the player can physically occupy.
-		// Excludes SOLID (already clipped away upstream) and SKY (unreachable).
-		// Includes EMPTY, WATER, SLIME, LAVA — preserving clip brushes in liquid volumes.
-		return c != goldsrc::CONTENTS_SOLID && c != goldsrc::CONTENTS_SKY;
-	}
-
-	if ((size_t)node_index >= nodes.size()) return false;
-	const auto &node = nodes[node_index];
-	if (node.planenum < 0 || (size_t)node.planenum >= planes.size()) return false;
-	const auto &plane = planes[node.planenum];
-
-	auto verts = compute_cell_vertices(cell.planes, epsilon);
-	if (verts.empty()) return false;
-
-	float min_dot = 1e30f, max_dot = -1e30f;
-	for (const auto &v : verts) {
-		float dot = plane.normal[0] * v.gs[0]
-		          + plane.normal[1] * v.gs[1]
-		          + plane.normal[2] * v.gs[2];
-		if (dot < min_dot) min_dot = dot;
-		if (dot > max_dot) max_dot = dot;
-	}
-
-	if (min_dot >= plane.dist - epsilon)
-		return cell_touches_playable(cell, nodes, leafs, planes, node.children[0], epsilon);
-	if (max_dot <= plane.dist + epsilon)
-		return cell_touches_playable(cell, nodes, leafs, planes, node.children[1], epsilon);
-
-	// Straddling — recurse both halves; short-circuit on first EMPTY hit.
-	ConvexCell front_cell = cell;
-	HullPlane fc;
-	fc.normal[0] = -plane.normal[0]; fc.normal[1] = -plane.normal[1]; fc.normal[2] = -plane.normal[2];
-	fc.dist = -plane.dist; fc.from_hull1 = false;
-	front_cell.planes.push_back(fc);
-	if (cell_touches_playable(front_cell, nodes, leafs, planes, node.children[0], epsilon))
-		return true;
-
-	ConvexCell back_cell = cell;
-	HullPlane bc;
-	bc.normal[0] = plane.normal[0]; bc.normal[1] = plane.normal[1]; bc.normal[2] = plane.normal[2];
-	bc.dist = plane.dist; bc.from_hull1 = false;
-	back_cell.planes.push_back(bc);
-	return cell_touches_playable(back_cell, nodes, leafs, planes, node.children[1], epsilon);
-}
-
 void clip_cell_by_clip_tree(
 	const ConvexCell &cell,
 	const vector<goldsrc::BSPClipNode> &clipnodes,
@@ -764,6 +707,65 @@ bool vert_near_wall(
 	return false;
 }
 
+// Returns true if any part of the cell overlaps a hull 0 leaf the player can
+// occupy — i.e., any content except SOLID and SKY. Used to discard clip hull
+// cells that are entirely inside sky brush volumes (unreachable because the player
+// is stopped at the sky trimesh boundary). Cells that touch WATER/SLIME/LAVA are
+// kept since players can be present in those volumes.
+static bool touches_playable_leaf(
+	const ConvexCell &cell,
+	const vector<goldsrc::BSPNode> &nodes,
+	const vector<goldsrc::BSPLeaf> &leafs,
+	const vector<goldsrc::BSPPlane> &planes,
+	int node_index,
+	float epsilon) {
+
+	if (node_index < 0) {
+		int leaf_index = -(node_index + 1);
+		if (leaf_index < 0 || (size_t)leaf_index >= leafs.size()) return false;
+		int c = leafs[leaf_index].contents;
+		return c != goldsrc::CONTENTS_SOLID && c != goldsrc::CONTENTS_SKY;
+	}
+
+	if ((size_t)node_index >= nodes.size()) return false;
+	const auto &node = nodes[node_index];
+	if (node.planenum < 0 || (size_t)node.planenum >= planes.size()) return false;
+	const auto &plane = planes[node.planenum];
+
+	auto verts = compute_cell_vertices(cell.planes, epsilon);
+	if (verts.empty()) return false;
+
+	float min_dot = 1e30f, max_dot = -1e30f;
+	for (const auto &v : verts) {
+		float dot = plane.normal[0] * v.gs[0]
+		          + plane.normal[1] * v.gs[1]
+		          + plane.normal[2] * v.gs[2];
+		if (dot < min_dot) min_dot = dot;
+		if (dot > max_dot) max_dot = dot;
+	}
+
+	if (min_dot >= plane.dist - epsilon)
+		return touches_playable_leaf(cell, nodes, leafs, planes, node.children[0], epsilon);
+	if (max_dot <= plane.dist + epsilon)
+		return touches_playable_leaf(cell, nodes, leafs, planes, node.children[1], epsilon);
+
+	// Straddling — recurse both halves; short-circuit on first playable hit.
+	ConvexCell front_cell = cell;
+	HullPlane fc;
+	fc.normal[0] = -plane.normal[0]; fc.normal[1] = -plane.normal[1]; fc.normal[2] = -plane.normal[2];
+	fc.dist = -plane.dist; fc.from_hull1 = false;
+	front_cell.planes.push_back(fc);
+	if (touches_playable_leaf(front_cell, nodes, leafs, planes, node.children[0], epsilon))
+		return true;
+
+	ConvexCell back_cell = cell;
+	HullPlane bc;
+	bc.normal[0] = plane.normal[0]; bc.normal[1] = plane.normal[1]; bc.normal[2] = plane.normal[2];
+	bc.dist = plane.dist; bc.from_hull1 = false;
+	back_cell.planes.push_back(bc);
+	return touches_playable_leaf(back_cell, nodes, leafs, planes, node.children[1], epsilon);
+}
+
 vector<ConvexCell> filter_clip_brush_cells(
 	vector<ConvexCell> &&clipped_cells,
 	const vector<goldsrc::BSPNode> &nodes,
@@ -772,6 +774,25 @@ vector<ConvexCell> filter_clip_brush_cells(
 	const vector<goldsrc::BSPPlane> &planes,
 	int hull0_root, int hull1_root,
 	const float he[3], float epsilon) {
+
+	// ========================================================================
+	// PRE-FILTER: Sky filter
+	//
+	// Discard cells entirely within sky brush volumes (CONTENTS_SKY in hull 0).
+	// These are unreachable — the player is stopped at the sky trimesh boundary
+	// before reaching them. Cells that also touch EMPTY/WATER/SLIME/LAVA are
+	// kept: clip brushes can straddle the EMPTY/SKY boundary (e.g. a wall at
+	// the map edge) and must remain to stop the player.
+	// ========================================================================
+	{
+		vector<ConvexCell> sky_filtered;
+		sky_filtered.reserve(clipped_cells.size());
+		for (auto &cell : clipped_cells) {
+			if (touches_playable_leaf(cell, nodes, leafs, planes, hull0_root, epsilon))
+				sky_filtered.push_back(std::move(cell));
+		}
+		clipped_cells = std::move(sky_filtered);
+	}
 
 	float max_he = fmaxf(he[0], fmaxf(he[1], he[2]));
 
@@ -1261,7 +1282,7 @@ vector<ConvexCell> filter_clip_brush_cells(
 				// h0-SOLID verts present but centroid in open air (EMPTY):
 				// expansion ring artifact floating just above floor/wall geometry.
 				// Real thin clip brushes embedded in world have non-EMPTY centroid
-				// content (e.g. CONTENTS_SKY=-6 for floor-embedded clips).
+				// content (e.g. WATER=-3 for clips near liquid volumes).
 				int ch0_sub_cpt = classify_hull0_tree(nodes, leafs, planes, hull0_root, rcpt);
 				if (ch0_sub_cpt == goldsrc::CONTENTS_EMPTY) continue;
 			}
@@ -1388,10 +1409,9 @@ vector<ConvexCell> filter_clip_brush_cells(
 					float md_2f = fmaxf(rdim[0], fmaxf(rdim[1], rdim[2]));
 					if (md_2f < 256.0f) {
 						// Rescue: centroid in non-EMPTY, non-SOLID content (e.g.
-						// CONTENTS_SKY=-6, WATER=-3) strongly indicates a real
-						// clip brush adjacent to special world geometry. Expansion
-						// ring artifacts in this scenario would have centroid in
-						// EMPTY space, not in special map content.
+						// WATER=-3) strongly indicates a real clip brush adjacent
+						// to liquid world geometry. Expansion ring artifacts here
+						// would have centroid in EMPTY space, not liquid content.
 						int ch0_2f_val = classify_hull0_tree(
 							nodes, leafs, planes, hull0_root, rcpt);
 						if (ch0_2f_val == goldsrc::CONTENTS_EMPTY ||

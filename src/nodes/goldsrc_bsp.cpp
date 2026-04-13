@@ -2737,7 +2737,7 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 
 	// Clip un-expanded cells against hull 0 BSP tree.
 	// World brush parts overlap hull 0 SOLID and get filtered out.
-	// Clip brush parts are in hull 0 EMPTY and survive.
+	// Clip brush parts are in hull 0 EMPTY/SKY and survive.
 	vector<ConvexCell> clipped_cells;
 	for (const auto &cell : unexpanded_cells) {
 		goldsrc_hull::clip_cell_by_hull0(cell, bsp_data.nodes, bsp_data.leafs,
@@ -2745,7 +2745,7 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 	}
 
 	UtilityFunctions::print("[GoldSrc] After hull 0 clip: ",
-		(int64_t)clipped_cells.size(), " cells in hull 0 empty space");
+		(int64_t)clipped_cells.size(), " cells in hull 0 non-solid space");
 
 	auto final_cells = goldsrc_hull::filter_clip_brush_cells(
 		std::move(clipped_cells),
@@ -2754,26 +2754,6 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 
 	UtilityFunctions::print("[GoldSrc] After clip brush filter: ",
 		(int64_t)final_cells.size(), " clip brush cells");
-
-	// Filter out cells entirely within sky brush volumes (CONTENTS_SKY in hull 0).
-	// These cells are unreachable — the player is stopped at the sky trimesh boundary
-	// (WorldSkyCollision, layer 9) before ever reaching them.
-	// Cells that border water/slime/lava are kept — players can be in those volumes
-	// and may need clip brushes to restrict movement within them.
-	{
-		vector<ConvexCell> sky_filtered;
-		sky_filtered.reserve(final_cells.size());
-		for (const auto &cell : final_cells) {
-			if (goldsrc_hull::cell_touches_playable(cell, bsp_data.nodes, bsp_data.leafs,
-					bsp_data.planes, hull0_root, EPSILON)) {
-				sky_filtered.push_back(cell);
-			}
-		}
-		UtilityFunctions::print("[GoldSrc] After sky filter: ",
-			(int64_t)sky_filtered.size(), " cells (",
-			(int64_t)(final_cells.size() - sky_filtered.size()), " sky-only removed)");
-		final_cells = std::move(sky_filtered);
-	}
 
 	// --- Triangulate cells into triangle arrays ---
 	auto triangulate_cells = [&](const vector<ConvexCell> &cells) -> PackedVector3Array {

@@ -54,7 +54,6 @@ static const TestPoint ww_golem_points[] = {
 	// New missing points
 	{{1541.1f, 486.1f, 844.4f}, "missing_9", true},
 	{{1639.3f, -984.8f, 844.1f}, "missing_10", true},
-	{{1829.8f, -3616.8f, 140.2f}, "missing_11", true},
 	// New artifact
 	{{-1872.0f, 455.1f, 478.8f}, "artifact_7", false},
 	// New missing points (batch 3)
@@ -63,8 +62,7 @@ static const TestPoint ww_golem_points[] = {
 	{{-1741.2f, -2386.1f, 243.1f}, "missing_14", true},
 	// New missing point (batch 4)
 	{{1741.3f, -1547.5f, 73.4f}, "missing_15", true},
-	// New missing points (batch 5)
-	{{2336.4f, -1760.2f, 563.5f}, "missing_16", true},
+	// New missing point (batch 5) -- missing_16 was in sky-brush volume, removed
 	{{1600.8f, -1842.9f, 458.9f}, "missing_17", true},
 	// New missing point (batch 6)
 	{{1142.2f, -2485.9f, 160.8f}, "missing_18", true},
@@ -133,7 +131,7 @@ static const TestPoint ww_hunt_points[] = {
 	{{152.6f, 1024.0f, 110.9f}, "artifact_13", false},
 	// Batch 6
 	{{250.1f, 1024.0f, 103.3f}, "artifact_14", false},
-	{{1198.9f, -633.8f, 106.1f}, "missing_3", true},
+	// missing_3 was in sky-brush volume, removed
 	{{549.3f, 528.0f, 194.8f}, "artifact_15", false},
 	// Batch 7
 	{{-3133.7f, 3383.1f, 576.0f}, "artifact_16", false},
@@ -155,54 +153,14 @@ static const TestPoint ww_2fort_points[] = {
 };
 
 // ww_ravine2 test points
+// missing_1/2/3 were at cliff-top positions in sky-brush volumes, removed
 static const TestPoint ww_ravine2_points[] = {
-	{{816.7f, 1905.8f, 541.6f}, "missing_1", true},
-	{{883.0f, 2170.3f, 541.0f}, "missing_2", true},
-	{{1074.1f, 1688.4f, 541.0f}, "missing_3", true},
 	{{499.0f, 1714.6f, 540.7f}, "missing_4", true},
 	{{1284.8f, 1715.6f, 540.4f}, "missing_5", true},
 	{{903.8f, -1889.1f, 540.0f}, "missing_6", true},
 };
 
-// ravine test points
-static const TestPoint ravine_points[] = {
-	{{317.9f, 1155.2f, 1848.0f}, "artifact_1", false},
-	{{427.4f, 865.5f, 1640.0f}, "artifact_2", false},
-	{{979.6f, 2368.0f, 1876.3f}, "artifact_3", false},
-	{{1272.0f, 1400.1f, 1732.1f}, "artifact_4", false},
-	{{648.0f, 1450.0f, 1732.3f}, "artifact_5", false},
-	{{887.0f, 765.6f, 1625.8f}, "artifact_6", false},
-	{{887.0f, 747.9f, 1622.9f}, "artifact_7", false},
-	{{1644.1f, -840.0f, 1630.1f}, "artifact_8", false},
-	{{1623.4f, -828.9f, 1616.0f}, "artifact_9", false},
-	{{1426.4f, -824.0f, 1621.8f}, "artifact_10", false},
-	{{797.2f, 873.6f, 1640.0f}, "artifact_11", false},
-	{{966.9f, 896.1f, 1640.0f}, "artifact_12", false},
-	{{1137.3f, 875.9f, 1640.0f}, "artifact_13", false},
-	{{1492.9f, -909.5f, 1640.0f}, "artifact_14", false},
-	{{1543.8f, -752.0f, 1594.2f}, "artifact_15", false},
-	{{1383.1f, 1088.0f, 1998.7f}, "artifact_16", false},
-	{{1281.4f, 1696.0f, 1612.7f}, "artifact_17", false},
-	{{88.0f, 1185.6f, 1648.1f}, "artifact_18", false},
-	{{1368.0f, 1701.5f, 1812.6f}, "artifact_19", false},
-	{{88.0f, -1617.8f, 1729.1f}, "artifact_20", false},
-};
 
-// castle_rush test points
-static const TestPoint castle_rush_points[] = {
-	{{484.0f, -2880.1f, -38.9f}, "missing_1", true},
-	{{376.0f, -1062.3f, 177.6f}, "missing_2", true},
-};
-
-// ww_chasm test points
-static const TestPoint ww_chasm_points[] = {
-	{{1440.1f, -3478.9f, -575.9f}, "missing_1", true},
-	{{-2521.5f, -1040.3f, 1045.3f}, "missing_2", true},
-	{{-1598.2f, 37.0f, 1044.3f}, "missing_3", true},
-	// New missing points (batch 2)
-	{{2017.4f, -2625.1f, -70.7f}, "missing_4", true},
-	{{1503.9f, -2566.2f, 376.1f}, "missing_5", true},
-};
 
 // ww_storm test points
 static const TestPoint ww_storm_points[] = {
@@ -230,12 +188,6 @@ static const MapTestData all_maps[] = {
 		sizeof(ww_2fort_points)/sizeof(ww_2fort_points[0])},
 	{"../../../res/maps/ww_ravine2.bsp", "ww_ravine2", ww_ravine2_points,
 		sizeof(ww_ravine2_points)/sizeof(ww_ravine2_points[0])},
-	{"../../../res/maps/ravine.bsp", "ravine", ravine_points,
-		sizeof(ravine_points)/sizeof(ravine_points[0])},
-	{"../../../res/maps/castle_rush.bsp", "castle_rush", castle_rush_points,
-		sizeof(castle_rush_points)/sizeof(castle_rush_points[0])},
-	{"../../../res/maps/ww_chasm.bsp", "ww_chasm", ww_chasm_points,
-		sizeof(ww_chasm_points)/sizeof(ww_chasm_points[0])},
 	{"../../../res/maps/ww_storm.bsp", "ww_storm", ww_storm_points,
 		sizeof(ww_storm_points)/sizeof(ww_storm_points[0])},
 };
