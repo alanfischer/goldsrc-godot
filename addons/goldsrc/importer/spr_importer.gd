@@ -67,17 +67,17 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 	var loop: bool = options.get("loop", true)
 
 	var spr := GoldSrcSPR.new()
-	var err := spr.load_spr(source_file)
+	var err = spr.load_spr(source_file)
 	if err != OK:
 		push_error("SPR Importer: Failed to load '%s': %s" % [source_file, error_string(err)])
 		return err
 
-	var frame_count := spr.get_frame_count()
+	var frame_count = spr.get_frame_count()
 	if frame_count == 0:
 		push_error("SPR Importer: No frames in '%s'" % source_file)
 		return ERR_INVALID_DATA
 
-	var sprite := spr.build_scene()
+	var sprite = spr.build_scene()
 	if not sprite:
 		push_error("SPR Importer: build_scene() failed for '%s'" % source_file)
 		return ERR_CANT_CREATE
