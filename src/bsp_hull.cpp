@@ -347,6 +347,63 @@ void clip_cell_by_hull0(
 	clip_cell_by_hull0(back_cell, nodes, leafs, planes, node.children[1], epsilon, out_cells);
 }
 
+bool cell_touches_playable(
+	const ConvexCell &cell,
+	const vector<goldsrc::BSPNode> &nodes,
+	const vector<goldsrc::BSPLeaf> &leafs,
+	const vector<goldsrc::BSPPlane> &planes,
+	int node_index,
+	float epsilon) {
+
+	if (node_index < 0) {
+		int leaf_index = -(node_index + 1);
+		if (leaf_index < 0 || (size_t)leaf_index >= leafs.size()) return false;
+		int c = leafs[leaf_index].contents;
+		// Playable: any content the player can physically occupy.
+		// Excludes SOLID (already clipped away upstream) and SKY (unreachable).
+		// Includes EMPTY, WATER, SLIME, LAVA — preserving clip brushes in liquid volumes.
+		return c != goldsrc::CONTENTS_SOLID && c != goldsrc::CONTENTS_SKY;
+	}
+
+	if ((size_t)node_index >= nodes.size()) return false;
+	const auto &node = nodes[node_index];
+	if (node.planenum < 0 || (size_t)node.planenum >= planes.size()) return false;
+	const auto &plane = planes[node.planenum];
+
+	auto verts = compute_cell_vertices(cell.planes, epsilon);
+	if (verts.empty()) return false;
+
+	float min_dot = 1e30f, max_dot = -1e30f;
+	for (const auto &v : verts) {
+		float dot = plane.normal[0] * v.gs[0]
+		          + plane.normal[1] * v.gs[1]
+		          + plane.normal[2] * v.gs[2];
+		if (dot < min_dot) min_dot = dot;
+		if (dot > max_dot) max_dot = dot;
+	}
+
+	if (min_dot >= plane.dist - epsilon)
+		return cell_touches_playable(cell, nodes, leafs, planes, node.children[0], epsilon);
+	if (max_dot <= plane.dist + epsilon)
+		return cell_touches_playable(cell, nodes, leafs, planes, node.children[1], epsilon);
+
+	// Straddling — recurse both halves; short-circuit on first EMPTY hit.
+	ConvexCell front_cell = cell;
+	HullPlane fc;
+	fc.normal[0] = -plane.normal[0]; fc.normal[1] = -plane.normal[1]; fc.normal[2] = -plane.normal[2];
+	fc.dist = -plane.dist; fc.from_hull1 = false;
+	front_cell.planes.push_back(fc);
+	if (cell_touches_playable(front_cell, nodes, leafs, planes, node.children[0], epsilon))
+		return true;
+
+	ConvexCell back_cell = cell;
+	HullPlane bc;
+	bc.normal[0] = plane.normal[0]; bc.normal[1] = plane.normal[1]; bc.normal[2] = plane.normal[2];
+	bc.dist = plane.dist; bc.from_hull1 = false;
+	back_cell.planes.push_back(bc);
+	return cell_touches_playable(back_cell, nodes, leafs, planes, node.children[1], epsilon);
+}
+
 void clip_cell_by_clip_tree(
 	const ConvexCell &cell,
 	const vector<goldsrc::BSPClipNode> &clipnodes,

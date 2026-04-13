@@ -170,6 +170,19 @@ bool vert_near_wall(
 	const std::vector<goldsrc::BSPPlane> &planes,
 	int hull0_root, const float v[3], const float he[3]);
 
+// Returns true if any part of the cell overlaps a hull 0 leaf that the player
+// can physically occupy — i.e., any content except CONTENTS_SOLID and CONTENTS_SKY.
+// This includes CONTENTS_EMPTY, CONTENTS_WATER, CONTENTS_SLIME, CONTENTS_LAVA, etc.
+// Used to filter clip hull cells that are entirely inside sky brush volumes (unreachable
+// by the player), while preserving clip brushes inside water/slime/lava volumes.
+bool cell_touches_playable(
+	const ConvexCell &cell,
+	const std::vector<goldsrc::BSPNode> &nodes,
+	const std::vector<goldsrc::BSPLeaf> &leafs,
+	const std::vector<goldsrc::BSPPlane> &planes,
+	int node_index,
+	float epsilon);
+
 // Filter clip brush cells via a two-stage pipeline:
 //
 // Stage 1 — Vertex filter (h0 EMPTY + h1 SOLID):

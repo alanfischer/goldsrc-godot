@@ -116,6 +116,7 @@ struct BSPLeaf {
 inline constexpr int CONTENTS_EMPTY = -1;
 inline constexpr int CONTENTS_SOLID = -2;
 inline constexpr int CONTENTS_WATER = -3;
+inline constexpr int CONTENTS_SKY   = -6;
 
 // Tool textures that have no visible geometry at runtime
 inline bool is_tool_texture(const std::string &name) {

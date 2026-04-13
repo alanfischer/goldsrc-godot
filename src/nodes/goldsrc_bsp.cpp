@@ -972,6 +972,14 @@ void GoldSrcBSP::build_mesh() {
 		}
 
 		int total_mesh_instances = 0;
+		// Sky collision body built alongside rendering — shapes added per sky ArrayMesh.
+		StaticBody3D *sky_body = nullptr;
+		if (m == 0) {
+			sky_body = memnew(StaticBody3D);
+			sky_body->set_name("WorldSkyCollision");
+			sky_body->set_collision_layer(1 << 8); // layer 9 (MASK_WORLD_SKY)
+			sky_body->set_collision_mask(0);
+		}
 
 		// For brush entities (m > 0), wrap meshes + collision in AnimatableBody3D
 		// so GDScript can move them without body conversion.
@@ -1248,6 +1256,15 @@ void GoldSrcBSP::build_mesh() {
 				material.instantiate();
 				material->set_shader(sky_shader);
 				arr_mesh->surface_set_material(0, material);
+				// Reuse the already-built ArrayMesh directly for player sky collision.
+				if (sky_body) {
+					Ref<ConcavePolygonShape3D> sky_shape = arr_mesh->create_trimesh_shape();
+					if (sky_shape.is_valid()) {
+						CollisionShape3D *sky_col = memnew(CollisionShape3D);
+						sky_col->set_shape(sky_shape);
+						sky_body->add_child(sky_col);
+					}
+				}
 			} else if (is_water) {
 				// Water/liquid surface: turbulent UV warp, no lightmap.
 				Ref<ShaderMaterial> material;
@@ -1372,8 +1389,18 @@ void GoldSrcBSP::build_mesh() {
 		// Build collision for this model
 		if (m == 0) {
 			log_timing("worldspawn meshes");
-			// Hull 0: face-based collision (exact visible geometry)
+			// Hull 0: face-based collision (exact visible geometry, no sky)
+			// Projectiles use layer 1 (MASK_WORLD) — sky excluded so they pass through.
 			build_hull_collision(model_node, m, 0, "WorldCollision", 1);
+			// Sky collision body — shapes were added directly from rendering ArrayMesh
+			// objects above; no separate face iteration needed.
+			if (sky_body && sky_body->get_child_count() > 0) {
+				model_node->add_child(sky_body);
+				UtilityFunctions::print("[GoldSrc] Sky collision: ",
+					(int64_t)sky_body->get_child_count(), " shape(s) (reused from rendering mesh)");
+			} else if (sky_body) {
+				memdelete(sky_body);
+			}
 			log_timing("hull 0 collision");
 			{
 				Area3D *water = memnew(Area3D);
@@ -2727,6 +2754,26 @@ void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
 
 	UtilityFunctions::print("[GoldSrc] After clip brush filter: ",
 		(int64_t)final_cells.size(), " clip brush cells");
+
+	// Filter out cells entirely within sky brush volumes (CONTENTS_SKY in hull 0).
+	// These cells are unreachable — the player is stopped at the sky trimesh boundary
+	// (WorldSkyCollision, layer 9) before ever reaching them.
+	// Cells that border water/slime/lava are kept — players can be in those volumes
+	// and may need clip brushes to restrict movement within them.
+	{
+		vector<ConvexCell> sky_filtered;
+		sky_filtered.reserve(final_cells.size());
+		for (const auto &cell : final_cells) {
+			if (goldsrc_hull::cell_touches_playable(cell, bsp_data.nodes, bsp_data.leafs,
+					bsp_data.planes, hull0_root, EPSILON)) {
+				sky_filtered.push_back(cell);
+			}
+		}
+		UtilityFunctions::print("[GoldSrc] After sky filter: ",
+			(int64_t)sky_filtered.size(), " cells (",
+			(int64_t)(final_cells.size() - sky_filtered.size()), " sky-only removed)");
+		final_cells = std::move(sky_filtered);
+	}
 
 	// --- Triangulate cells into triangle arrays ---
 	auto triangulate_cells = [&](const vector<ConvexCell> &cells) -> PackedVector3Array {
