@@ -44,12 +44,6 @@ public:
 	// Debug: check what the BSP thinks a point is (returns contents: -1=empty, -2=solid, -3=water)
 	int point_contents(godot::Vector3 godot_pos) const;
 
-	// Classify a point against a clip hull (1-3). Returns contents (-1=empty, -2=solid, etc.)
-	int classify_point_hull(godot::Vector3 godot_pos, int hull_index) const;
-
-	// Debug: visualize hull solid/empty convex volumes as transparent meshes
-	void build_debug_hull_meshes(int hull_index);
-
 	// Look up a texture by name from BSP embedded textures or loaded WADs
 	godot::Ref<godot::ImageTexture> get_texture(const godot::String &name) const;
 
