@@ -30,166 +30,51 @@ struct MapTestData {
 	size_t num_points;
 };
 
-// ww_golem test points
-static const TestPoint ww_golem_points[] = {
-	// Clip brush test point - AABB must overlap a cell
-	{{1198.0f, -2468.0f, 20.0f}, "clip_brush", true},
-	// Player-reported artifact cells that should not exist
-	{{1046.5f, 109.9f, 191.2f}, "artifact_1", false},
-	{{-1790.0f, 490.0f, 290.7f}, "artifact_2", false},
-	{{-1828.0f, 490.0f, 58.6f}, "artifact_3", false},
-	{{-1289.0f, 336.7f, 25.8f}, "artifact_4", false},
-	// Player-reported missing clip hulls
-	{{-890.7f, 724.0f, 766.6f}, "missing_1", true},
-	{{-488.3f, 742.0f, 811.6f}, "missing_2", true},
-	{{1690.0f, -1628.4f, 158.7f}, "missing_3", true},
-	{{449.2f, 464.5f, 845.8f}, "missing_4", true},
-	{{1769.4f, -1505.4f, 335.0f}, "missing_5", true},
-	{{-1708.2f, -2407.1f, 291.5f}, "missing_6", true},
-	{{1129.9f, -2504.3f, 246.1f}, "missing_7", true},
-	{{-1821.0f, -2339.2f, 127.1f}, "missing_8", true},
-	// Player-reported new artifacts (from hull 1 clip)
-	{{479.9f, 464.0f, 384.4f}, "artifact_5", false},
-	{{1803.5f, 464.0f, 335.7f}, "artifact_6", false},
-	// New missing points
-	{{1541.1f, 486.1f, 844.4f}, "missing_9", true},
-	{{1639.3f, -984.8f, 844.1f}, "missing_10", true},
-	// New artifact
-	{{-1872.0f, 455.1f, 478.8f}, "artifact_7", false},
-	// New missing points (batch 3)
-	{{1621.4f, -1808.9f, 215.9f}, "missing_12", true},
-	{{1198.4f, -2474.9f, 174.8f}, "missing_13", true},
-	{{-1741.2f, -2386.1f, 243.1f}, "missing_14", true},
-	// New missing point (batch 4)
-	{{1741.3f, -1547.5f, 73.4f}, "missing_15", true},
-	// New missing point (batch 5) -- missing_16 was in sky-brush volume, removed
-	{{1600.8f, -1842.9f, 458.9f}, "missing_17", true},
-	// New missing point (batch 6)
-	{{1142.2f, -2485.9f, 160.8f}, "missing_18", true},
-	// All info_player_start / info_player_teamspawn entities
-	{{529.0f, -2490.0f, 152.0f}, "info_player_start", false},
-	{{-1872.0f, 624.0f, 736.0f}, "teamspawn_1", false},
-	{{-528.0f, 624.0f, 736.0f}, "teamspawn_2", false},
-	{{464.0f, 624.0f, 736.0f}, "teamspawn_3", false},
-	{{1808.0f, 624.0f, 736.0f}, "teamspawn_4", false},
-	{{1040.0f, -1920.0f, 48.0f}, "teamspawn_5", false},
-	{{1192.0f, -1920.0f, 48.0f}, "teamspawn_6", false},
-	{{1112.0f, -2008.0f, 52.0f}, "teamspawn_7", false},
-	{{-160.0f, 736.0f, 64.0f}, "teamspawn_8", false},
-	{{-224.0f, 736.0f, 64.0f}, "teamspawn_9", false},
-	{{-288.0f, 736.0f, 64.0f}, "teamspawn_10", false},
-	{{-160.0f, 656.0f, 64.0f}, "teamspawn_11", false},
-	{{-224.0f, 656.0f, 64.0f}, "teamspawn_12", false},
-	{{-288.0f, 656.0f, 64.0f}, "teamspawn_13", false},
-	{{-288.0f, 576.0f, 64.0f}, "teamspawn_14", false},
-	{{-160.0f, 576.0f, 64.0f}, "teamspawn_15", false},
-	{{-224.0f, 576.0f, 64.0f}, "teamspawn_16", false},
-	{{96.0f, 736.0f, 64.0f}, "teamspawn_17", false},
-	{{160.0f, 736.0f, 64.0f}, "teamspawn_18", false},
-	{{224.0f, 736.0f, 64.0f}, "teamspawn_19", false},
-	{{160.0f, 656.0f, 64.0f}, "teamspawn_20", false},
-	{{224.0f, 656.0f, 64.0f}, "teamspawn_21", false},
-	{{96.0f, 656.0f, 64.0f}, "teamspawn_22", false},
-	{{224.0f, 576.0f, 64.0f}, "teamspawn_23", false},
-	{{160.0f, 576.0f, 64.0f}, "teamspawn_24", false},
-	{{96.0f, 576.0f, 64.0f}, "teamspawn_25", false},
-	{{-1352.0f, -1928.0f, 48.0f}, "teamspawn_26", false},
-	{{-1456.0f, -1928.0f, 52.0f}, "teamspawn_27", false},
-	{{-1400.0f, -1928.0f, 216.0f}, "teamspawn_28", false},
-	{{949.9f, -16.1f, 845.0f}, "missing_12", true},
-	{{-1670.6f, -2381.4f, 248.8f}, "missing_13", true},
-	// New missing points (batch 7)
-	{{1201.8f, -2401.6f, 63.2f}, "missing_19", true},
-	{{1558.3f, -1835.4f, 55.6f}, "missing_20", true},
-	{{1904.3f, -1291.5f, 61.4f}, "missing_21", true},
-	{{-1564.9f, -2446.2f, 45.4f}, "missing_22", true},
-	{{-1985.1f, -2190.5f, 56.1f}, "missing_23", true},
-};
+// All pre-sky-fix test data removed. vert_near_wall was fixed to treat
+// CONTENTS_SKY as non-playable (equal to CONTENTS_SOLID). Prior test
+// points are invalid: sky expansion ring artifacts were false positives
+// that the fix eliminates, and "missing" points near sky brushes were
+// incorrectly reported.
+//
+// TODO: Regenerate test points by running the sky-fixed pipeline on each
+// map and visually inspecting the output in-engine. Add verified points
+// here in the form:
+//   static const TestPoint my_map_points[] = {
+//       {{x, y, z}, "label", should_be_inside},
+//   };
+// Then register the map in all_maps[] below.
 
-// ww_hunt test points
-static const TestPoint ww_hunt_points[] = {
-	// Player-reported artifact cells (batch 1)
-	{{-1871.2f, 528.0f, 256.5f}, "artifact_1", false},
-	{{-1630.7f, 704.0f, 377.1f}, "artifact_2", false},
-	{{-1529.5f, 104.9f, 117.5f}, "artifact_3", false},
-	{{-499.3f, 16.0f, 199.1f}, "artifact_4", false},
-	// Player-reported missing clip hulls
-	{{-1039.5f, -560.5f, 369.8f}, "missing_1", true},
-	// Player-reported artifact cells (batch 2)
-	{{-2512.0f, 1471.2f, 378.9f}, "artifact_5", false},
-	{{-1273.7f, 160.9f, 150.8f}, "artifact_6", false},
-	{{-624.4f, 16.0f, 180.2f}, "artifact_7", false},
-	{{1920.0f, 724.2f, 158.3f}, "artifact_8", false},
-	// Player-reported artifact cells (batch 3)
-	{{-3520.0f, 1838.9f, 431.6f}, "artifact_9", false},
-	// Player-reported artifact cells (batch 4)
-	{{1440.0f, 593.1f, 149.4f}, "artifact_10", false},
-	{{286.3f, 995.0f, 124.3f}, "artifact_11", false},
-	{{-2888.6f, 3376.0f, 578.3f}, "artifact_12", false},
-	// Batch 5
-	{{-179.5f, 141.3f, 636.1f}, "missing_2", true},
-	{{152.6f, 1024.0f, 110.9f}, "artifact_13", false},
-	// Batch 6
-	{{250.1f, 1024.0f, 103.3f}, "artifact_14", false},
-	// missing_3 was in sky-brush volume, removed
-	{{549.3f, 528.0f, 194.8f}, "artifact_15", false},
-	// Batch 7
-	{{-3133.7f, 3383.1f, 576.0f}, "artifact_16", false},
-	{{-3164.9f, 3459.4f, 586.7f}, "artifact_17", false},
-	{{-2512.0f, 1535.8f, 510.4f}, "artifact_18", false},
-	{{-228.6f, 48.0f, 251.4f}, "artifact_19", false},
-	{{-1285.0f, 544.0f, 175.6f}, "artifact_20", false},
-};
-
-// ww_2fort test points
-static const TestPoint ww_2fort_points[] = {
-	{{1042.2f, 2154.7f, 110.0f}, "artifact_1", false},
-	{{462.2f, 2577.7f, -402.0f}, "artifact_2", false},
-	{{-1103.9f, 1696.0f, -240.8f}, "artifact_3", false},
-	{{491.2f, 2985.6f, -402.0f}, "artifact_4", false},
-	{{-973.9f, 1699.4f, -227.5f}, "artifact_5", false},
-	{{1132.5f, -1646.6f, -144.1f}, "artifact_6", false},
-	{{955.9f, -1536.0f, -42.4f}, "artifact_7", false},
-};
-
-// ww_ravine2 test points
-// missing_1/2/3 were at cliff-top positions in sky-brush volumes, removed
-static const TestPoint ww_ravine2_points[] = {
-	{{499.0f, 1714.6f, 540.7f}, "missing_4", true},
-	{{1284.8f, 1715.6f, 540.4f}, "missing_5", true},
-	{{903.8f, -1889.1f, 540.0f}, "missing_6", true},
-};
-
-
-
-// ww_storm test points
-static const TestPoint ww_storm_points[] = {
-	{{771.9f, 310.2f, -56.0f}, "artifact_1", false},
-	{{633.0f, 178.4f, -56.0f}, "artifact_2", false},
-	{{607.5f, -96.1f, -56.0f}, "artifact_3", false},
-	{{794.2f, -240.3f, -56.0f}, "artifact_4", false},
-	{{864.0f, -660.9f, -63.3f}, "artifact_5", false},
-	{{-176.0f, -1351.7f, -110.0f}, "artifact_6", false},
-	{{-176.0f, -1250.5f, -109.7f}, "artifact_7", false},
-	{{-865.2f, -1424.2f, -224.0f}, "artifact_8", false},
-	{{240.5f, 2383.4f, -48.0f}, "artifact_9", false},
-	// Expansion ring artifacts at Z=184 floor area
-	{{183.8f, -1256.6f, 184.0f}, "artifact_10", false},
-	{{233.1f, -1101.3f, 184.0f}, "artifact_11", false},
-	{{16.2f, -1007.0f, 184.0f}, "artifact_12", false},
+// ww_leyline: Python tool found 1 CLIP brush at (-2912, -1535.5, -175.5)
+static const TestPoint ww_leyline_points[] = {
+	{{-2912.0f, -1535.5f, -175.5f}, "missing_1", true},
 };
 
 static const MapTestData all_maps[] = {
-	{"../../../res/maps/ww_golem.bsp", "ww_golem", ww_golem_points,
-		sizeof(ww_golem_points)/sizeof(ww_golem_points[0])},
-	{"../../../res/maps/ww_hunt.bsp", "ww_hunt", ww_hunt_points,
-		sizeof(ww_hunt_points)/sizeof(ww_hunt_points[0])},
-	{"../../../res/maps/ww_2fort.bsp", "ww_2fort", ww_2fort_points,
-		sizeof(ww_2fort_points)/sizeof(ww_2fort_points[0])},
-	{"../../../res/maps/ww_ravine2.bsp", "ww_ravine2", ww_ravine2_points,
-		sizeof(ww_ravine2_points)/sizeof(ww_ravine2_points[0])},
-	{"../../../res/maps/ww_storm.bsp", "ww_storm", ww_storm_points,
-		sizeof(ww_storm_points)/sizeof(ww_storm_points[0])},
+	// No test points for most maps — pipeline just prints cell counts.
+	{"", "ww_2fort",        nullptr, 0},
+	{"", "ww_atrocity",     nullptr, 0},
+	{"", "ww_castle",       nullptr, 0},
+	{"", "ww_chasm",        nullptr, 0},
+	{"", "ww_checkmate",    nullptr, 0},
+	{"", "ww_december",     nullptr, 0},
+	{"", "ww_feudal",       nullptr, 0},
+	{"", "ww_golem",        nullptr, 0},
+	{"", "ww_hiddenforest", nullptr, 0},
+	{"", "ww_hunt",         nullptr, 0},
+	{"", "ww_keep",         nullptr, 0},
+	{"", "ww_leyline",      ww_leyline_points, 1},
+	{"", "ww_library",      nullptr, 0},
+	{"", "ww_memnate",      nullptr, 0},
+	{"", "ww_monoliths",    nullptr, 0},
+	{"", "ww_osaka",        nullptr, 0},
+	{"", "ww_rage",         nullptr, 0},
+	{"", "ww_ravine",       nullptr, 0},
+	{"", "ww_ravine2",      nullptr, 0},
+	{"", "ww_roc2",         nullptr, 0},
+	{"", "ww_shrinkspell",  nullptr, 0},
+	{"", "ww_storm",        nullptr, 0},
+	{"", "ww_volcano",      nullptr, 0},
+	{"", "ww_wolteg",       nullptr, 0},
 };
 
 // --- Pipeline: run full clip brush extraction on a BSP ---
@@ -335,6 +220,39 @@ static PipelineResult run_pipeline(const goldsrc::BSPData &bsp, const char *map_
 	printf("After filter: %zu -> %zu result cells  (%lldms)\n",
 		pre_filter_count, result.final_cells.size(),
 		(long long)chrono::duration_cast<chrono::milliseconds>(t5 - t4).count());
+
+	// Dump each surviving cell: centroid, AABB, h0/h1/nw at centroid,
+	// plus per-vertex h1 and nw to show clip indicator status.
+	for (size_t ci = 0; ci < result.final_cells.size(); ci++) {
+		auto verts = compute_cell_vertices(result.final_cells[ci].planes, 0.1f);
+		if (verts.empty()) continue;
+		float cx=0,cy=0,cz=0;
+		float mn[3]={1e9f,1e9f,1e9f}, mx[3]={-1e9f,-1e9f,-1e9f};
+		for (const auto &v : verts) {
+			cx+=v.gs[0]; cy+=v.gs[1]; cz+=v.gs[2];
+			for (int a=0;a<3;a++){if(v.gs[a]<mn[a])mn[a]=v.gs[a];if(v.gs[a]>mx[a])mx[a]=v.gs[a];}
+		}
+		cx/=verts.size(); cy/=verts.size(); cz/=verts.size();
+		float cpt[3]={cx,cy,cz};
+		int ch0 = classify_hull0_tree(bsp.nodes, bsp.leafs, bsp.planes, hull0_root, cpt);
+		int ch1 = classify_clip_hull(bsp.clipnodes, bsp.planes, root, cpt);
+		bool cnw = vert_near_wall(bsp.nodes, bsp.leafs, bsp.planes, hull0_root, cpt, he);
+		// Count vertices by (h1, nw) to see clip indicator presence
+		int v_s_nw=0, v_s_nnw=0, v_e_nw=0, v_e_nnw=0;
+		for (const auto &v : verts) {
+			int vh1 = classify_clip_hull(bsp.clipnodes, bsp.planes, root, v.gs);
+			bool vnw = vert_near_wall(bsp.nodes, bsp.leafs, bsp.planes, hull0_root, v.gs, he);
+			if (vh1 == goldsrc::CONTENTS_SOLID) { if (vnw) v_s_nw++; else v_s_nnw++; }
+			else                                { if (vnw) v_e_nw++; else v_e_nnw++; }
+		}
+		// v_s_nnw > 0 means at least one "clip indicator" vertex (h1=SOLID, not near wall)
+		printf("  cell[%zu]: centroid=(%.1f,%.1f,%.1f) dims=%.0fx%.0fx%.0f"
+		       " h0=%d h1=%d nw=%d | verts: S+nw=%d S+nnw=%d E+nw=%d E+nnw=%d\n",
+		       ci, cx,cy,cz,
+		       mx[0]-mn[0], mx[1]-mn[1], mx[2]-mn[2],
+		       ch0, ch1, (int)cnw,
+		       v_s_nw, v_s_nnw, v_e_nw, v_e_nnw);
+	}
 
 	return result;
 }

@@ -695,13 +695,42 @@ bool vert_near_wall(
 	const vector<goldsrc::BSPPlane> &planes,
 	int hull0_root, const float v[3], const float he[3]) {
 
-	for (int sx = -1; sx <= 1; sx += 2) {
-		for (int sy = -1; sy <= 1; sy += 2) {
-			for (int sz = -1; sz <= 1; sz += 2) {
-				float p[3] = {v[0]+sx*he[0], v[1]+sy*he[1], v[2]+sz*he[2]};
-				int c = classify_hull0_tree(nodes, leafs, planes, hull0_root, p);
-				if (c == goldsrc::CONTENTS_SOLID) return true;
-			}
+	// Exact AABB–BSP intersection: returns true if the box [v−he, v+he]
+	// overlaps any hull 0 leaf the player cannot occupy — SOLID or SKY.
+	//
+	// SKY brushes are expanded into hull 1 as SOLID by the BSP compiler.
+	// Failing to check SKY causes false-positive clip brush detections in
+	// EMPTY space adjacent to sky ceilings (sky expansion ring artifacts).
+	//
+	// The intersection traversal descends both BSP children whenever the box
+	// straddles a split plane, so it correctly handles all geometry —
+	// axis-aligned, diagonal, and thin brushes — without sampling blind spots.
+	vector<int> stk;
+	stk.push_back(hull0_root);
+	while (!stk.empty()) {
+		int idx = stk.back();
+		stk.pop_back();
+		if (idx < 0) {
+			int leaf = -(idx + 1);
+			if (leaf < 0 || leaf >= (int)leafs.size()) return true;
+			int c = leafs[leaf].contents;
+			if (c == goldsrc::CONTENTS_SOLID || c == goldsrc::CONTENTS_SKY) return true;
+			continue;
+		}
+		const auto &node  = nodes[idx];
+		const auto &plane = planes[node.planenum];
+		float dot     = plane.normal[0]*v[0] + plane.normal[1]*v[1] + plane.normal[2]*v[2];
+		float support = fabsf(plane.normal[0])*he[0]
+		              + fabsf(plane.normal[1])*he[1]
+		              + fabsf(plane.normal[2])*he[2];
+		// AABB interval: [dot-support, dot+support] vs plane.dist
+		if (dot - support >= plane.dist) {
+			stk.push_back((int)node.children[0]);   // entirely front
+		} else if (dot + support < plane.dist) {
+			stk.push_back((int)node.children[1]);   // entirely back
+		} else {
+			stk.push_back((int)node.children[0]);   // straddles — both
+			stk.push_back((int)node.children[1]);
 		}
 	}
 	return false;
@@ -764,6 +793,65 @@ static bool touches_playable_leaf(
 	bc.dist = plane.dist; bc.from_hull1 = false;
 	back_cell.planes.push_back(bc);
 	return touches_playable_leaf(back_cell, nodes, leafs, planes, node.children[1], epsilon);
+}
+
+// Returns true if this cell contains at least one hull 0 PLAYABLE leaf
+// whose AABB-centre passes the Python check_clip_hulls.py 3-step test:
+//   (1) h0 contents is PLAYABLE  — guaranteed by the leaf we're visiting
+//   (2) h1 contents == SOLID or SKY
+//   (3) vert_near_wall() is false
+//
+// This is the most reliable possible discriminator for user-added CLIP
+// brushes: it matches the Python tool exactly.  If no PLAYABLE leaf centre
+// inside the cell passes the test, the cell is an expansion-ring artifact.
+static bool cell_has_clip_leaf(
+	const ConvexCell &cell,
+	const vector<goldsrc::BSPNode> &nodes,
+	const vector<goldsrc::BSPLeaf> &leafs,
+	const vector<goldsrc::BSPPlane> &planes,
+	const vector<goldsrc::BSPClipNode> &clipnodes,
+	int hull0_root,
+	int hull1_root,
+	const float he[3])
+{
+	vector<int> stk;
+	stk.push_back(hull0_root);
+	while (!stk.empty()) {
+		int idx = stk.back(); stk.pop_back();
+		if (idx < 0) {
+			int li = -(idx + 1);
+			if (li < 0 || (size_t)li >= leafs.size()) continue;
+			int c = leafs[li].contents;
+			// Only PLAYABLE leaves (EMPTY, WATER=-3, SLIME=-4, LAVA=-5)
+			if (c == goldsrc::CONTENTS_SOLID || c == goldsrc::CONTENTS_SKY) continue;
+			// Leaf AABB centre
+			float lc[3] = {
+				(leafs[li].mins[0] + leafs[li].maxs[0]) * 0.5f,
+				(leafs[li].mins[1] + leafs[li].maxs[1]) * 0.5f,
+				(leafs[li].mins[2] + leafs[li].maxs[2]) * 0.5f,
+			};
+			// Check lc is inside the cell.
+			// Convention (from compute_cell_vertices): interior satisfies
+			// dot <= dist for each plane, so outside means dot > dist + eps.
+			bool inside = true;
+			for (const auto &hp : cell.planes) {
+				float dot = hp.normal[0]*lc[0] + hp.normal[1]*lc[1] + hp.normal[2]*lc[2];
+				if (dot > hp.dist + 0.5f) { inside = false; break; }
+			}
+			if (!inside) continue;
+			// Step 2: h1=SOLID or SKY
+			int h1 = classify_clip_hull(clipnodes, planes, hull1_root, lc);
+			if (h1 != goldsrc::CONTENTS_SOLID && h1 != goldsrc::CONTENTS_SKY) continue;
+			// Step 3: not near wall
+			if (vert_near_wall(nodes, leafs, planes, hull0_root, lc, he)) continue;
+			return true;
+		} else {
+			const auto &node = nodes[idx];
+			stk.push_back(node.children[0]);
+			stk.push_back(node.children[1]);
+		}
+	}
+	return false;
 }
 
 vector<ConvexCell> filter_clip_brush_cells(
@@ -1157,14 +1245,20 @@ vector<ConvexCell> filter_clip_brush_cells(
 						}
 					}
 					if (!has_nnw_solid) {
-						// Could be a real floor/ceiling clip brush or a pure expansion
-						// ring artifact — both have h1-SOLID verts flush with the world
-						// surface. Distinguish via the unexpanded clip hull: expansion
-						// ring artifacts un-expand to the world surface (centroid EMPTY),
-						// while real clip brushes remain SOLID at their centroid.
-						int uh1 = classify_clip_tree_unexpanded(
-							clipnodes, planes, hull1_root, he, rcpt);
-						if (uh1 == goldsrc::CONTENTS_SOLID) rescued = true;
+						// Distinguish a real floor/ceiling clip brush from an expansion
+						// ring artifact at a ceiling/floor boundary. Both have h1-SOLID
+						// verts flush with the world surface. The reliable discriminator:
+						// the centroid of a real clip brush is solidly inside h1 (SOLID
+						// at exact classification) AND not within he of any wall. Expansion
+						// ring artifacts have centroid h1=EMPTY (the centroid is just
+						// outside the expanded solid region, at the expansion boundary).
+						// This matches the Python tool's 3-step CLIP indicator test exactly.
+						int cent_h1_exact = classify_clip_hull(
+							clipnodes, planes, hull1_root, rcpt);
+						bool cent_nw_exact = vert_near_wall(
+							nodes, leafs, planes, hull0_root, rcpt, he);
+						if (cent_h1_exact == goldsrc::CONTENTS_SOLID && !cent_nw_exact)
+							rescued = true;
 					}
 				}
 				if (!rescued) continue;
@@ -1408,15 +1502,25 @@ vector<ConvexCell> filter_clip_brush_cells(
 					// expansion ring artifacts near wall corners.
 					float md_2f = fmaxf(rdim[0], fmaxf(rdim[1], rdim[2]));
 					if (md_2f < 256.0f) {
-						// Rescue: centroid in non-EMPTY, non-SOLID content (e.g.
-						// WATER=-3) strongly indicates a real clip brush adjacent
-						// to liquid world geometry. Expansion ring artifacts here
-						// would have centroid in EMPTY space, not liquid content.
-						int ch0_2f_val = classify_hull0_tree(
-							nodes, leafs, planes, hull0_root, rcpt);
-						if (ch0_2f_val == goldsrc::CONTENTS_EMPTY ||
-							ch0_2f_val == goldsrc::CONTENTS_SOLID) continue;
-						goto keep_2f;
+						// Rescue: search hull 0 for any PLAYABLE leaf whose
+						// AABB-centre lies inside this cell and passes the
+						// Python check_clip_hulls.py 3-step test.  This is
+						// the most reliable discriminator — if no such leaf
+						// exists the cell is an expansion-ring artifact.
+						if (cell_has_clip_leaf(cell, nodes, leafs, planes,
+											   clipnodes, hull0_root,
+											   hull1_root, he))
+							goto keep_2f;
+						// Rescue: centroid in liquid content (WATER/SLIME/LAVA)
+						// is strong evidence of a clip brush on the water boundary.
+						{
+							int ch0_2f_val = classify_hull0_tree(
+								nodes, leafs, planes, hull0_root, rcpt);
+							if (ch0_2f_val != goldsrc::CONTENTS_EMPTY &&
+								ch0_2f_val != goldsrc::CONTENTS_SOLID)
+								goto keep_2f;
+						}
+						continue;
 					}
 					if (!any_h0s_2f) continue;
 				}
