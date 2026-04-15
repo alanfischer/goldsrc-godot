@@ -16,100 +16,218 @@ collision checks. There are four hulls:
 
 Hull 0 matches the visible geometry exactly. Hulls 1-3 are stored as
 separate BSP trees of `BSPClipNode` entries with direct contents encoding
-(negative child value = contents: -2 = SOLID, -1 = EMPTY).
+(negative child value = contents directly: EMPTY=-1, SOLID=-2, SKY=-6).
 
 CLIP brushes are invisible brushes that only exist in hulls 1-3 (not hull 0).
 They create collision walls with no corresponding visible geometry.
 
-## Problem
+## Contents values
 
-To use these hulls for Godot collision, we need to:
+| Value | Name  | Playable? |
+|-------|-------|-----------|
+| -1    | EMPTY | Yes       |
+| -2    | SOLID | No        |
+| -3    | WATER | Yes       |
+| -4    | SLIME | Yes       |
+| -5    | LAVA  | Yes       |
+| -6    | SKY   | **No**    |
 
-1. Walk the clip BSP tree to extract convex solid cells
-2. **Un-expand** each cell back to its original brush geometry (reverse the
-   Minkowski expansion) so collision matches the actual wall surfaces
-3. Generate `ConvexPolygonShape3D` collision shapes from the result
+**CONTENTS_SKY is non-playable and must be treated identically to
+CONTENTS_SOLID** in all clip hull logic. Sky brushes (CONTENTS_SKY in hull 0)
+are expanded by the BSP compiler into hull 1 as SOLID — exactly like world
+geometry. Players are stopped at the sky trimesh boundary before reaching sky
+volumes, so SKY space is unreachable from the player's perspective.
 
-The un-expansion (step 2) is the hard part. Naively subtracting the
-Minkowski support from every plane causes cells to collapse or produce
-incorrect geometry.
+Failing to treat SKY as non-playable (checking only `== CONTENTS_SOLID`)
+causes false-positive clip brush detections: the Minkowski expansion ring of
+sky brushes creates hull 1 SOLID in adjacent EMPTY space, and without the SKY
+check that ring is mistaken for user-added CLIP brushes.
 
-## Algorithm
+## Pipeline
 
-### Tree Walk
+The clip hull extraction pipeline in `src/bsp_hull.cpp` and
+`src/nodes/goldsrc_bsp.cpp` runs in five stages:
 
-`walk_clip_tree()` recursively walks the `BSPClipNode` tree. At each node,
-it pushes the splitting plane onto an accumulator:
-- Front child gets the **negated** plane (point is on the front side)
-- Back child gets the **original** plane (point is on the back side)
+### Stage 1: Walk clip tree
 
-Each plane also records its `sibling_child` — the opposite child at that
-split, which tells us what's on the other side of that face.
+`walk_clip_tree(hull1_root, CONTENTS_SOLID)` recursively walks the hull 1
+`BSPClipNode` tree. At each internal node, the splitting plane is pushed onto
+an accumulator. The front child gets the **negated** plane; the back child gets
+the **original** plane. Each plane records an `unexpand_sign` (±1) for
+un-expansion.
 
-When a CONTENTS_SOLID leaf is reached, the accumulated planes define a
-convex cell.
+When a CONTENTS_SOLID leaf is reached, the accumulated planes define a convex
+cell. The world model bounding-box planes are added to cap infinite cells that
+touch the map boundary.
 
-### Cell Splitting
+### Stage 2: Un-expand hull 1 planes
 
-For each face of a cell, the sibling subtree may itself be a sub-tree
-(not a single leaf). `split_cell_for_face()` walks the sibling subtree
-and splits the cell along any splitting planes that cross the face, so
-each sub-cell's face borders exactly one leaf. This gives us per-face
-knowledge of whether the neighbor is SOLID or EMPTY.
+Each hull 1 cell plane was offset outward by the Minkowski support during BSP
+compilation. Un-expansion reverses this:
 
-### Selective Un-expansion
+```
+support = |nx| * hx + |ny| * hy + |nz| * hz
+plane.dist -= support * unexpand_sign
+```
 
-For each plane of each sub-cell, we decide whether to un-expand:
+If un-expansion collapses a cell to fewer than 4 vertices, a binary search over
+scale ∈ [0, 1] finds the maximum un-expansion factor that still yields valid
+geometry (fallback rescues ~95% of collapsed cells). If the binary search also
+fails, the cell is discarded.
 
-**Pass 1 — Determine what to un-expand:**
-- If sibling = EMPTY (or water, etc.): un-expand (this face borders open space)
-- If sibling = SOLID: keep expanded (internal face between solid cells),
-  UNLESS a thickness-gated probe fired one support distance outside the
-  face lands in EMPTY (detects thin BSP artifact layers)
+### Stage 3: Clip against hull 0
 
-**Pass 2 — Antiparallel slab clamping:**
-For nearly-antiparallel plane pairs (dot < -0.8) that are both being
-un-expanded, check if the slab between them is too thin:
-- `slab_gap = di + dj` (direct plane-distance gap, NOT vertex-based thickness)
-- If `total_support > slab_gap`, clamp proportionally, preserving a minimum
-  8 GS unit wall thickness
+`clip_cell_by_hull0()` clips each un-expanded cell against the hull 0 BSP tree,
+keeping only fragments that lie in non-SOLID regions (EMPTY, SKY, WATER, etc.).
+This discards the portions of un-expanded cells that overlap visible world
+geometry.
 
-**Pass 3 — Apply:** Subtract (clamped) Minkowski support from each plane's
-distance.
+After this stage, each surviving fragment lies in hull 0 open space — either
+inside a genuine CLIP brush volume, or in the Minkowski expansion ring of nearby
+world/sky geometry that wasn't fully eliminated by un-expansion.
 
-### Fallback: Binary Search
+### Stage 4: Filter — sky pre-filter
 
-If a cell collapses after un-expansion (< 4 vertices), restore original
-distances and binary search over scale [0, 1] to find the maximum
-un-expansion that produces valid geometry. This rescues ~95% of
-collapsed cells.
+`filter_clip_brush_cells()` begins by discarding cells that are entirely within
+sky brush volumes. `touches_playable_leaf()` recursively clips a cell against
+the hull 0 BSP and returns `true` if any fragment overlaps a playable leaf
+(EMPTY, WATER, SLIME, or LAVA — **not SKY**). Cells that return `false` are
+purely inside sky space and are unreachable.
 
-### Thin-Cell Filter
+### Stage 5: Filter — vertex and expansion ring filters
 
-BSP tree splitting creates degenerate slivers (e.g. 1 GS unit thick
-horizontal cells at hull expansion boundaries). After un-expansion,
-any cell with an axis-aligned bounding box dimension < 4 GS units is
-discarded.
+Two further stages within `filter_clip_brush_cells()` separate genuine CLIP
+brush cells from world-geometry expansion ring remnants:
 
-### Collision Shape Generation
+**Stage 1 (vertex filter):** For each cell, checks:
+- Whether any vertex is in hull 0 SOLID (suggesting an expansion artifact that
+  overlaps world geometry)
+- Per-vertex hull 1 classification: a vertex that is h1 SOLID *and* not near a
+  wall is a "clip indicator" — strong evidence the cell overlaps a real CLIP
+  brush
+- Cell dimension plausibility (size gates to reject slivers and thin artifacts)
 
-Each surviving cell's vertex point cloud (already in Godot coordinates)
-is fed to `ConvexPolygonShape3D::set_points()`. All shapes are children
-of a single `StaticBody3D` on collision layer 1.
+**Stage 2 (expansion ring filter):** For each surviving cell, checks whether
+all or most vertices are "near wall" via `vert_near_wall()`. Cells where every
+vertex is inside the expansion ring of world/sky geometry are discarded.
 
-A semi-transparent purple debug mesh is also generated from the same
-cells for visual verification.
+Key sub-stages in Stage 2:
 
-## Key Formulas
+- **2aa (tolerance rescue):** Cells with all h1=EMPTY vertices (centroid
+  h1=SOLID) are rescued if the centroid is h1=SOLID AND not near wall. This
+  targets expansion ring artifacts at ceiling boundaries; their centroids are
+  in the ring (h1=SOLID at tolerance but h1=EMPTY at exact) so they correctly
+  fail and are killed.
 
-**Minkowski support** (how much a plane is expanded for a given hull):
+- **2f (r_big majority-near-wall, all h1=SOLID):** Large cells where most or
+  all vertices are near wall and all are h1=SOLID. The primary rescue is
+  `cell_has_clip_leaf()`: if any hull 0 PLAYABLE leaf whose AABB-centre lies
+  inside the cell also passes h1=SOLID + `!vert_near_wall`, the cell is
+  confirmed as a clip brush. This test is identical to the Python
+  `check_clip_hulls.py` 3-step test and is the most reliable discriminator
+  available. Expansion ring artifacts have no such leaf (their leaf centres are
+  always within `he` of the nearest wall surface); real CLIP brushes have at
+  least one leaf centre in the open interior of the brush.
+
+### cell_has_clip_leaf
+
+`cell_has_clip_leaf(cell, …)` walks the full hull 0 BSP tree. For each
+PLAYABLE leaf (EMPTY / WATER / SLIME / LAVA):
+
+1. Computes the leaf AABB centre `lc = (mins + maxs) / 2`
+2. Checks whether `lc` is inside the cell (all halfplanes: `dot ≤ dist + ε`)
+3. Checks `h1(lc) == SOLID or SKY`
+4. Checks `!vert_near_wall(lc)`
+
+Returns `true` on the first match. This is a direct C++ implementation of the
+Python 3-step test; the two tools agree by construction.
+
+## vert_near_wall
+
+`vert_near_wall(nodes, leafs, planes, hull0_root, v, he)` returns `true` if the
+player AABB `[v−he, v+he]` intersects any hull 0 region the player cannot
+occupy — SOLID or SKY.
+
+It uses an **exact AABB–BSP intersection**: at each hull 0 split plane, the
+AABB's signed-distance interval `[dot−support, dot+support]` is compared to
+`plane.dist`. If the interval is entirely on one side, only that child is
+visited. If the interval straddles the plane, **both children** are visited.
+
+```
+dot     = nx*vx + ny*vy + nz*vz
+support = |nx|*hx + |ny|*hy + |nz|*hz
+
+if dot - support >= plane.dist → front child only
+if dot + support <  plane.dist → back child only
+else                           → both children
+```
+
+At leaf nodes, `CONTENTS_SOLID` or `CONTENTS_SKY` returns `true` immediately.
+
+This correctly handles all geometry regardless of orientation, including:
+- Thin brushes (thinner than the hull half-extents)
+- Diagonal walls at any distance
+- Sky ceilings (the critical SKY case — corner sampling missed these)
+
+The older 8-corner or 14-point sampling approaches had two failure modes:
+1. They only checked `CONTENTS_SOLID`, missing SKY expansion rings entirely
+2. Corner samples at `±he` overshoot thin brushes (samples land past the brush)
+
+## Detecting user-added CLIP brushes
+
+`tools/check_clip_hulls.py` identifies maps that have user-added CLIP brushes
+(invisible collision geometry not derivable from Minkowski expansion of world
+brushes). For each PLAYABLE hull 0 leaf, it samples the AABB centre point `p`
+and applies three tests:
+
+1. `classify_hull0(p)` must be PLAYABLE (EMPTY / WATER / SLIME / LAVA)
+2. `classify_hull1(p)` must be SOLID or SKY — both indicate "blocked"
+3. `vert_near_wall(p, HULL1_HE)` must return `False`
+
+If all three hold, `p` is in hull 1 blocked space that is not the Minkowski
+expansion ring of any nearby geometry — confirmed CLIP brush.
+
+**Maps with user-added CLIP brushes (19):**
+ww_atrocity, ww_castle, ww_december, ww_golem, ww_hiddenforest, ww_hunt,
+ww_keep, ww_leyline, ww_library, ww_memnate, ww_monoliths, ww_osaka,
+ww_rage, ww_ravine2, ww_roc2, ww_shrinkspell, ww_storm, ww_volcano, ww_wolteg
+
+**Maps without user-added CLIP brushes (5):**
+ww_2fort, ww_chasm, ww_checkmate, ww_feudal, ww_ravine
+
+## Files
+
+- `src/bsp_hull.cpp` — `walk_clip_tree`, `clip_cell_by_hull0`,
+  `filter_clip_brush_cells`, `vert_near_wall`, `touches_playable_leaf`,
+  `compute_cell_vertices`
+- `src/bsp_hull.h` — shared types (`ConvexCell`, `HullPlane`, `CellVertex`)
+  and function declarations
+- `src/nodes/goldsrc_bsp.cpp` — Godot importer: runs the full pipeline and
+  produces `ConvexPolygonShape3D` collision shapes + debug mesh
+- `src/test_hull_csg.cpp` — standalone regression test harness
+- `tools/check_clip_hulls.py` — Python tool that scans BSP files to detect
+  which maps have user-added CLIP brushes
+
+## Building the test harness
+
+```bash
+cd src
+clang++ -std=c++17 -O2 -I. test_hull_csg.cpp parsers/bsp_parser.cpp bsp_hull.cpp -o test_hull_csg
+./test_hull_csg ../../res/maps/
+```
+
+## Key formulas
+
+**Minkowski support** (hull expansion distance for a plane):
 ```
 support = |nx| * hx + |ny| * hy + |nz| * hz
 ```
 
-**Slab gap** (distance between antiparallel planes, for clamping):
+**AABB–plane interval** (used by vert_near_wall):
 ```
-slab_gap = di + dj    (where nj ≈ -ni)
+dot     = n · v
+support = |nx|*hx + |ny|*hy + |nz|*hz
+interval = [dot - support, dot + support]
 ```
 
 **GoldSrc to Godot coordinate transform:**
@@ -117,47 +235,3 @@ slab_gap = di + dj    (where nj ≈ -ni)
 godot = Vector3(-gs_x * scale, gs_z * scale, gs_y * scale)
 ```
 where `scale = 0.025`.
-
-## Files
-
-- `src/nodes/goldsrc_bsp.cpp` — `build_clip_hull_debug()` and supporting
-  functions in anonymous namespace (`walk_clip_tree`, `split_cell_for_face`,
-  `compute_cell_vertices`, `triangulate_convex_cell`, `clip_tree_contents`,
-  `minkowski_support`)
-- `src/nodes/goldsrc_bsp.h` — method declaration
-- `test_clip_hull.cpp` — standalone regression tests (no Godot dependency)
-
-## Testing
-
-Build and run the regression tests against any GoldSrc BSP:
-
-```bash
-cd extern/goldsrc-godot
-clang++ -std=c++17 -O2 -I src -o test_clip_hull test_clip_hull.cpp src/parsers/bsp_parser.cpp
-./test_clip_hull ../../res/maps/ww_golem.bsp
-```
-
-The tests verify three historical bugs that were fixed:
-
-1. **angled_wall** — Antiparallel plane clamping used vertex-based thickness
-   (overstated) instead of slab gap formula. Walls collapsed.
-2. **clip_brush_wall** — Pure CLIP brush walls (hull 0 EMPTY) were clamped
-   to near-zero thickness. Minimum wall thickness of 8 GS units fixes this.
-3. **no_thin_artifact** — BSP tree splitting artifacts (1 GS unit thick
-   horizontal slivers) survived as floating geometry. Min-dimension filter
-   removes them.
-
-## Known Issues
-
-- Some cells still collapse and can't be rescued by binary search (~1%)
-- The min-dimension filter (4 GS) might occasionally remove legitimate
-  thin geometry
-- Hull 3 (crouching) is hardcoded; hull 1 (standing) would need different
-  half-extents
-
-## Credits
-
-Algorithm design and implementation by Alan Fischer and Claude (Anthropic).
-The selective un-expansion approach, slab gap formula, binary search fallback,
-and thin-cell filter were developed iteratively through testing against
-ww_golem.bsp with the standalone regression test harness.
