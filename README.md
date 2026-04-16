@@ -13,7 +13,6 @@ A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
 - Animated textures (`+0name` … `+9name` / `+aname` … `+jname` alternates) — frames collected at import and stored as `tex_anim_frames` metadata on each `MeshInstance3D`; driven at 10 FPS by `TextureAnimator` at runtime with no C++ dependency
 - Water/liquid textures (`!` and `*` prefix) rendered with a turbulent UV-warp shader (sine-wave distortion animated via `TIME`)
 - Hull 0 collision (StaticBody3D for worldspawn, AnimatableBody3D for brush entities)
-- Clip brush reconstruction from hull 1 clipping data — un-expands Minkowski-expanded hull planes back to original brush geometry, then clips against hull 0 to recover invisible collision brushes that have no render faces
 - Water volume extraction as Area3D with ConvexPolygonShape3D
 - Automatic occluder generation (OccluderInstance3D + PolygonOccluder3D) — see [Occluder Generation](#occluder-generation) below
 - PVS (Potentially Visible Set) data parsing with RLE decompression — used by `debug_occluders` mode to validate occluder effectiveness against the BSP's precomputed visibility data
@@ -21,7 +20,6 @@ A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
 - Brush entity geometry wrapped in AnimatableBody3D ("Body") with meshes and collision inside, ready for GDScript movement without body conversion
 - Point entity nodes (Node3D) with entity properties stored as metadata — classname, targetname, origin, angles, and all other key-value pairs are accessible from GDScript via `node.get_meta("entity")`
 - Entity lump parsing (key-value dictionaries accessible from GDScript)
-- Debug hull visualization meshes (optional) — renders solid/empty cells for collision debugging
 - **Ambient cube light grid baking** — traces rays in 6 directions from a 3D grid through the BSP tree, samples lightmaps at hit points, and outputs slice images for `ImageTexture3D` construction. Includes flood-fill of solid cells to prevent trilinear interpolation artifacts. Provides spatially-varying directional ambient lighting for dynamic models
 
 ### MDL Models
@@ -175,9 +173,6 @@ for child in bsp.get_children():
 
 # Or get raw entity dictionaries:
 var entities = bsp.get_entities()  # Array of Dictionaries
-
-# Optional: debug visualization of clip hull collision cells
-bsp.build_debug_hull_meshes(1)  # hull index 1-3
 
 # Optional: tune occluder generation (before build_mesh)
 bsp.occluder_min_area = 65535.0              # min face area in GoldSrc units²

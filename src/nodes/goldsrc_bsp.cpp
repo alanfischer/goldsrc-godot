@@ -19,8 +19,6 @@
 #include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/classes/time.hpp>
 
-#include "../bsp_hull.h"
-
 #include <algorithm>
 #include <cstring>
 #include <godot_cpp/classes/geometry2d.hpp>
@@ -31,9 +29,116 @@
 
 using namespace godot;
 using namespace std;
-using goldsrc_hull::HullPlane;
-using goldsrc_hull::ConvexCell;
-using goldsrc_hull::CellVertex;
+
+// Minimal structs and helpers for convex cell collision (brush entities / water).
+// These were previously in bsp_hull.h; inlined here to avoid that dependency.
+struct HullPlane {
+	float normal[3];
+	float dist;
+};
+
+struct ConvexCell {
+	std::vector<HullPlane> planes;
+};
+
+struct CellVertex {
+	float gs[3];
+};
+
+static void walk_bsp_tree(
+	const std::vector<goldsrc::BSPNode> &nodes,
+	const std::vector<goldsrc::BSPLeaf> &leafs,
+	const std::vector<goldsrc::BSPPlane> &planes,
+	int node_index,
+	std::vector<HullPlane> &accumulated,
+	std::vector<ConvexCell> &out_cells,
+	int target_contents) {
+
+	if (node_index < 0) {
+		int leaf_index = -(node_index + 1);
+		if (leaf_index < 0 || (size_t)leaf_index >= leafs.size()) return;
+		if (leafs[leaf_index].contents == target_contents) {
+			ConvexCell cell;
+			cell.planes = accumulated;
+			out_cells.push_back(std::move(cell));
+		}
+		return;
+	}
+	if ((size_t)node_index >= nodes.size()) return;
+	const auto &node = nodes[node_index];
+	if (node.planenum < 0 || (size_t)node.planenum >= planes.size()) return;
+	const auto &plane = planes[node.planenum];
+	HullPlane front_plane;
+	front_plane.normal[0] = -plane.normal[0];
+	front_plane.normal[1] = -plane.normal[1];
+	front_plane.normal[2] = -plane.normal[2];
+	front_plane.dist = -plane.dist;
+	accumulated.push_back(front_plane);
+	walk_bsp_tree(nodes, leafs, planes, node.children[0], accumulated, out_cells, target_contents);
+	accumulated.pop_back();
+	HullPlane back_plane;
+	back_plane.normal[0] = plane.normal[0];
+	back_plane.normal[1] = plane.normal[1];
+	back_plane.normal[2] = plane.normal[2];
+	back_plane.dist = plane.dist;
+	accumulated.push_back(back_plane);
+	walk_bsp_tree(nodes, leafs, planes, node.children[1], accumulated, out_cells, target_contents);
+	accumulated.pop_back();
+}
+
+static std::vector<CellVertex> compute_cell_vertices(
+	const std::vector<HullPlane> &planes, float epsilon) {
+
+	std::vector<CellVertex> verts;
+	int np = (int)planes.size();
+	for (int i = 0; i < np - 2; i++) {
+		for (int j = i + 1; j < np - 1; j++) {
+			for (int k = j + 1; k < np; k++) {
+				const auto &p1 = planes[i];
+				const auto &p2 = planes[j];
+				const auto &p3 = planes[k];
+				double n1[3] = {p1.normal[0], p1.normal[1], p1.normal[2]};
+				double n2[3] = {p2.normal[0], p2.normal[1], p2.normal[2]};
+				double n3[3] = {p3.normal[0], p3.normal[1], p3.normal[2]};
+				double d1 = p1.dist, d2 = p2.dist, d3 = p3.dist;
+				double cx = n2[1]*n3[2] - n2[2]*n3[1];
+				double cy = n2[2]*n3[0] - n2[0]*n3[2];
+				double cz = n2[0]*n3[1] - n2[1]*n3[0];
+				double denom = n1[0]*cx + n1[1]*cy + n1[2]*cz;
+				if (fabs(denom) < 1e-10) continue;
+				double ax = n3[1]*n1[2] - n3[2]*n1[1];
+				double ay = n3[2]*n1[0] - n3[0]*n1[2];
+				double az = n3[0]*n1[1] - n3[1]*n1[0];
+				double bx = n1[1]*n2[2] - n1[2]*n2[1];
+				double by = n1[2]*n2[0] - n1[0]*n2[2];
+				double bz = n1[0]*n2[1] - n1[1]*n2[0];
+				double inv_denom = 1.0 / denom;
+				float px = (float)((d1*cx + d2*ax + d3*bx) * inv_denom);
+				float py = (float)((d1*cy + d2*ay + d3*by) * inv_denom);
+				float pz = (float)((d1*cz + d2*az + d3*bz) * inv_denom);
+				bool inside = true;
+				for (int m = 0; m < np; m++) {
+					if (m == i || m == j || m == k) continue;
+					const auto &pp = planes[m];
+					float dot = pp.normal[0]*px + pp.normal[1]*py + pp.normal[2]*pz;
+					if (dot > pp.dist + epsilon) { inside = false; break; }
+				}
+				if (!inside) continue;
+				bool duplicate = false;
+				for (const auto &ev : verts) {
+					float dx = ev.gs[0]-px, dy = ev.gs[1]-py, dz = ev.gs[2]-pz;
+					if (sqrtf(dx*dx + dy*dy + dz*dz) < epsilon) { duplicate = true; break; }
+				}
+				if (!duplicate) {
+					CellVertex cv;
+					cv.gs[0] = px; cv.gs[1] = py; cv.gs[2] = pz;
+					verts.push_back(cv);
+				}
+			}
+		}
+	}
+	return verts;
+}
 
 namespace {
 
@@ -346,10 +451,8 @@ void GoldSrcBSP::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_lightstyle_image"), &GoldSrcBSP::get_lightstyle_image);
 	ClassDB::bind_method(D_METHOD("get_lightstyle_texture"), &GoldSrcBSP::get_lightstyle_texture);
 	ClassDB::bind_method(D_METHOD("point_contents", "position"), &GoldSrcBSP::point_contents);
-	ClassDB::bind_method(D_METHOD("classify_point_hull", "position", "hull_index"), &GoldSrcBSP::classify_point_hull);
 	ClassDB::bind_method(D_METHOD("get_texture", "name"), &GoldSrcBSP::get_texture);
 	ClassDB::bind_method(D_METHOD("get_face_axes", "position", "normal"), &GoldSrcBSP::get_face_axes);
-	ClassDB::bind_method(D_METHOD("build_debug_hull_meshes", "hull_index"), &GoldSrcBSP::build_debug_hull_meshes);
 	ClassDB::bind_method(D_METHOD("set_shader_lightstyles", "enabled"), &GoldSrcBSP::set_shader_lightstyles);
 	ClassDB::bind_method(D_METHOD("get_shader_lightstyles"), &GoldSrcBSP::get_shader_lightstyles);
 	ClassDB::bind_method(D_METHOD("bake_light_grid", "cell_size"), &GoldSrcBSP::bake_light_grid);
@@ -509,29 +612,6 @@ int GoldSrcBSP::point_contents(Vector3 godot_pos) const {
 	if (leaf_index < 0 || (size_t)leaf_index >= bsp_data.leafs.size())
 		return goldsrc::CONTENTS_EMPTY;
 	return bsp_data.leafs[leaf_index].contents;
-}
-
-int GoldSrcBSP::classify_point_hull(Vector3 godot_pos, int hull_index) const {
-	if (!parser) return goldsrc::CONTENTS_EMPTY;
-	const auto &bsp_data = parser->get_data();
-	if (bsp_data.models.empty() || bsp_data.clipnodes.empty()) return goldsrc::CONTENTS_EMPTY;
-	if (hull_index < 1 || hull_index > 3) return goldsrc::CONTENTS_EMPTY;
-
-	float gs_x = -godot_pos.x / scale_factor;
-	float gs_y = godot_pos.z / scale_factor;
-	float gs_z = godot_pos.y / scale_factor;
-
-	int idx = bsp_data.models[0].headnode[hull_index];
-	while (idx >= 0) {
-		if ((size_t)idx >= bsp_data.clipnodes.size()) return goldsrc::CONTENTS_EMPTY;
-		const auto &node = bsp_data.clipnodes[idx];
-		if (node.planenum < 0 || (size_t)node.planenum >= bsp_data.planes.size())
-			return goldsrc::CONTENTS_EMPTY;
-		const auto &plane = bsp_data.planes[node.planenum];
-		float dot = plane.normal[0] * gs_x + plane.normal[1] * gs_y + plane.normal[2] * gs_z;
-		idx = (dot >= plane.dist) ? node.children[0] : node.children[1];
-	}
-	return idx; // negative = contents
 }
 
 Ref<ImageTexture> GoldSrcBSP::find_texture(const string &name) const {
@@ -1633,7 +1713,7 @@ void GoldSrcBSP::build_brush_convex(Node3D *parent, int model_index,
 	for (int tc : target_types) {
 		vector<HullPlane> accumulated;
 		vector<ConvexCell> cells;
-		goldsrc_hull::walk_bsp_tree(bsp_data.nodes, bsp_data.leafs, bsp_data.planes,
+		walk_bsp_tree(bsp_data.nodes, bsp_data.leafs, bsp_data.planes,
 			mdl.headnode[0], accumulated, cells, tc);
 		all_cells.insert(all_cells.end(),
 			std::make_move_iterator(cells.begin()),
@@ -1648,7 +1728,7 @@ void GoldSrcBSP::build_brush_convex(Node3D *parent, int model_index,
 		for (int i = 0; i < 6; i++) {
 			cell.planes.push_back(bbox_planes[i]);
 		}
-		vector<CellVertex> verts = goldsrc_hull::compute_cell_vertices(
+		vector<CellVertex> verts = compute_cell_vertices(
 			cell.planes, EPSILON);
 		if ((int)verts.size() < 4) continue;
 
@@ -2609,300 +2689,6 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 			UtilityFunctions::print("    Occluder planes tested: ", (int64_t)occ_planes.size());
 		}
 	}
-}
-
-void GoldSrcBSP::build_debug_hull_meshes(int hull_index) {
-	if (!parser) return;
-	if (hull_index < 1 || hull_index > 3) {
-		UtilityFunctions::printerr("[GoldSrc] build_debug_hull_meshes: hull_index must be 1-3");
-		return;
-	}
-
-	const auto &bsp_data = parser->get_data();
-	if (bsp_data.models.empty()) return;
-	const auto &bmodel = bsp_data.models[0];
-
-	int root = bmodel.headnode[hull_index];
-	if (root < 0) {
-		UtilityFunctions::print("[GoldSrc] Hull ", (int64_t)hull_index, " headnode is empty");
-		return;
-	}
-
-	// Bounding box planes (padded) to cap infinite cells. Not from hull tree.
-	HullPlane bbox_planes[6];
-	bbox_planes[0] = {{ 1, 0, 0}, bmodel.maxs[0] + 1.0f, false};
-	bbox_planes[1] = {{-1, 0, 0}, -bmodel.mins[0] + 1.0f, false};
-	bbox_planes[2] = {{ 0, 1, 0}, bmodel.maxs[1] + 1.0f, false};
-	bbox_planes[3] = {{ 0,-1, 0}, -bmodel.mins[1] + 1.0f, false};
-	bbox_planes[4] = {{ 0, 0, 1}, bmodel.maxs[2] + 1.0f, false};
-	bbox_planes[5] = {{ 0, 0,-1}, -bmodel.mins[2] + 1.0f, false};
-
-	const float EPSILON = 0.1f;
-
-	// Hull half-extents (GoldSrc coords): [1]=(16,16,36), [2]=(32,32,32), [3]=(16,16,18)
-	float hull_half_extents[4][3] = {
-		{0, 0, 0},      // hull 0 (unused here)
-		{16, 16, 36},   // hull 1 standing
-		{32, 32, 32},   // hull 2 large
-		{16, 16, 18},   // hull 3 crouching
-	};
-
-	// Walk clip tree for expanded solid cells (all planes tagged from_hull1=true)
-	vector<HullPlane> accumulated;
-	vector<ConvexCell> solid_cells;
-	goldsrc_hull::walk_clip_tree(bsp_data.clipnodes, bsp_data.planes,
-		root, accumulated, solid_cells, goldsrc::CONTENTS_SOLID);
-
-	UtilityFunctions::print("[GoldSrc] Hull ", (int64_t)hull_index,
-		": ", (int64_t)solid_cells.size(), " expanded solid cells");
-
-	// Cap with bbox
-	for (auto &cell : solid_cells) {
-		for (int i = 0; i < 6; i++)
-			cell.planes.push_back(bbox_planes[i]);
-	}
-
-	int hull0_root = bmodel.headnode[0];
-
-	// Un-expand ALL hull 1 planes by the Minkowski support function.
-	// This collapses world brush planes back to hull 0 surface positions and
-	// shrinks clip brush planes to their original (pre-expansion) positions.
-	float *he = hull_half_extents[hull_index];
-
-	// Helper: un-expand hull 1 planes with a given factor (1.0 = full, 0.0 = none)
-	auto unexpand_cell_f = [&](const ConvexCell &cell, float factor) -> ConvexCell {
-		ConvexCell ue;
-		for (const auto &hp : cell.planes) {
-			HullPlane p = hp;
-			if (p.from_hull1) {
-				float support = fabsf(p.normal[0]) * he[0]
-				              + fabsf(p.normal[1]) * he[1]
-				              + fabsf(p.normal[2]) * he[2];
-				p.dist -= support * hp.unexpand_sign * factor;
-			}
-			ue.planes.push_back(p);
-		}
-		return ue;
-	};
-
-	vector<ConvexCell> unexpanded_cells;
-	for (auto &cell : solid_cells) {
-		ConvexCell ue = unexpand_cell_f(cell, 1.0f);
-		auto verts = goldsrc_hull::compute_cell_vertices(ue.planes, EPSILON);
-		if (verts.size() >= 4) {
-			unexpanded_cells.push_back(std::move(ue));
-			continue;
-		}
-		// Degenerate — try hull 0 clip first, then un-expand fragments
-		vector<ConvexCell> h0_fragments;
-		goldsrc_hull::clip_cell_by_hull0(cell, bsp_data.nodes, bsp_data.leafs,
-			bsp_data.planes, hull0_root, EPSILON, h0_fragments);
-		bool any_rescued = false;
-		for (auto &frag : h0_fragments) {
-			ConvexCell uf = unexpand_cell_f(frag, 1.0f);
-			auto fv = goldsrc_hull::compute_cell_vertices(uf.planes, EPSILON);
-			if (fv.size() >= 4) {
-				unexpanded_cells.push_back(std::move(uf));
-				any_rescued = true;
-			}
-		}
-		if (!any_rescued) {
-			// Partial un-expansion: binary search for the maximum factor that
-			// yields valid geometry. Handles overlap regions between expanded
-			// clip brushes where full un-expansion collapses the cell.
-			float lo = 0.0f, hi = 1.0f, best = -1.0f;
-			ConvexCell best_cell;
-			for (int iter = 0; iter < 10; iter++) {
-				float mid = (lo + hi) * 0.5f;
-				ConvexCell trial = unexpand_cell_f(cell, mid);
-				auto tv = goldsrc_hull::compute_cell_vertices(trial.planes, EPSILON);
-				if (tv.size() >= 4) {
-					best = mid;
-					best_cell = std::move(trial);
-					lo = mid;
-				} else {
-					hi = mid;
-				}
-			}
-			if (best >= 0.0f) {
-				unexpanded_cells.push_back(std::move(best_cell));
-				any_rescued = true;
-			}
-		}
-	}
-
-	UtilityFunctions::print("[GoldSrc] After un-expansion: ",
-		(int64_t)unexpanded_cells.size(), " cells (from ",
-		(int64_t)solid_cells.size(), " expanded)");
-
-	// Clip un-expanded cells against hull 0 BSP tree.
-	// World brush parts overlap hull 0 SOLID and get filtered out.
-	// Clip brush parts are in hull 0 EMPTY/SKY and survive.
-	vector<ConvexCell> clipped_cells;
-	for (const auto &cell : unexpanded_cells) {
-		goldsrc_hull::clip_cell_by_hull0(cell, bsp_data.nodes, bsp_data.leafs,
-			bsp_data.planes, hull0_root, EPSILON, clipped_cells);
-	}
-
-	UtilityFunctions::print("[GoldSrc] After hull 0 clip: ",
-		(int64_t)clipped_cells.size(), " cells in hull 0 non-solid space");
-
-	auto final_cells = goldsrc_hull::filter_clip_brush_cells(
-		std::move(clipped_cells),
-		bsp_data.nodes, bsp_data.leafs, bsp_data.clipnodes, bsp_data.planes,
-		hull0_root, root, he, EPSILON);
-
-	UtilityFunctions::print("[GoldSrc] After clip brush filter: ",
-		(int64_t)final_cells.size(), " clip brush cells");
-
-	// --- Triangulate cells into triangle arrays ---
-	auto triangulate_cells = [&](const vector<ConvexCell> &cells) -> PackedVector3Array {
-		PackedVector3Array all_tris;
-
-		for (const auto &cell : cells) {
-			auto verts = goldsrc_hull::compute_cell_vertices(cell.planes, EPSILON);
-			if ((int)verts.size() < 4) continue;
-
-			vector<Vector3> gd_verts(verts.size());
-			for (size_t i = 0; i < verts.size(); i++) {
-				gd_verts[i] = goldsrc_to_godot(verts[i].gs[0], verts[i].gs[1], verts[i].gs[2]);
-			}
-
-			for (const auto &hp : cell.planes) {
-				Vector3 plane_normal(-hp.normal[0], hp.normal[2], hp.normal[1]);
-				float plane_dist_gs = hp.dist;
-
-				vector<int> on_plane;
-				for (size_t i = 0; i < verts.size(); i++) {
-					float dot = hp.normal[0] * verts[i].gs[0]
-					          + hp.normal[1] * verts[i].gs[1]
-					          + hp.normal[2] * verts[i].gs[2];
-					if (fabsf(dot - plane_dist_gs) < EPSILON * 2.0f) {
-						on_plane.push_back((int)i);
-					}
-				}
-				if ((int)on_plane.size() < 3) continue;
-
-				Vector3 centroid(0, 0, 0);
-				for (int idx : on_plane) centroid += gd_verts[idx];
-				centroid /= (float)on_plane.size();
-
-				Vector3 n = plane_normal.normalized();
-				Vector3 ref = (fabsf(n.y) < 0.9f) ? Vector3(0, 1, 0) : Vector3(1, 0, 0);
-				Vector3 u = ref.cross(n).normalized();
-				Vector3 v = n.cross(u).normalized();
-
-				vector<pair<float, int>> angle_indices;
-				for (int idx : on_plane) {
-					Vector3 rel = gd_verts[idx] - centroid;
-					angle_indices.push_back({atan2f(rel.dot(v), rel.dot(u)), idx});
-				}
-				sort(angle_indices.begin(), angle_indices.end());
-
-				for (size_t i = 1; i + 1 < angle_indices.size(); i++) {
-					all_tris.push_back(gd_verts[angle_indices[0].second]);
-					all_tris.push_back(gd_verts[angle_indices[i].second]);
-					all_tris.push_back(gd_verts[angle_indices[i + 1].second]);
-				}
-			}
-		}
-		return all_tris;
-	};
-
-	PackedVector3Array result_tris = triangulate_cells(final_cells);
-
-	// Helper: create a MeshInstance3D from triangles with a given color
-	auto make_mesh = [&](const PackedVector3Array &tris, const Color &color, const String &name, bool visible) {
-		if (tris.is_empty()) return;
-
-		int tri_count = tris.size() / 3;
-
-		PackedVector3Array normals;
-		normals.resize(tris.size());
-		for (int i = 0; i < tri_count; i++) {
-			Vector3 a = tris[i * 3 + 1] - tris[i * 3];
-			Vector3 b = tris[i * 3 + 2] - tris[i * 3];
-			Vector3 n = a.cross(b).normalized();
-			normals[i * 3] = n;
-			normals[i * 3 + 1] = n;
-			normals[i * 3 + 2] = n;
-		}
-
-		Ref<ArrayMesh> arr_mesh;
-		arr_mesh.instantiate();
-
-		Array arrays;
-		arrays.resize(ArrayMesh::ARRAY_MAX);
-		arrays[ArrayMesh::ARRAY_VERTEX] = tris;
-		arrays[ArrayMesh::ARRAY_NORMAL] = normals;
-		arr_mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
-
-		Ref<StandardMaterial3D> material;
-		material.instantiate();
-		material->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
-		material->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-		material->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
-		material->set_albedo(color);
-		arr_mesh->surface_set_material(0, material);
-
-		MeshInstance3D *mesh_instance = memnew(MeshInstance3D);
-		mesh_instance->set_name(name);
-		mesh_instance->set_mesh(arr_mesh);
-		mesh_instance->set_visible(visible);
-		add_child(mesh_instance);
-
-		UtilityFunctions::print("[GoldSrc] Debug hull mesh '", name,
-			"': ", (int64_t)tri_count, " triangles");
-	};
-
-	make_mesh(result_tris, Color(0.0f, 1.0f, 0.5f, 0.25f), "DebugHullResult", true);
-
-	// Build collision shapes for clip brush cells.
-	// Layer 1 = world collision (player collides with this).
-	// Also keep layer 5 for debug raycasting.
-	// One StaticBody3D with one ConvexPolygonShape3D per cell.
-	StaticBody3D *hull_body = memnew(StaticBody3D);
-	hull_body->set_name("HullCellBody");
-	hull_body->set_collision_layer((1 << 4) | (1 << 5));  // layer 5 (debug) + layer 6 (clip hulls, player-only)
-	hull_body->set_collision_mask(0);               // static, doesn't detect anything
-
-	int shape_count = 0;
-	for (size_t ci = 0; ci < final_cells.size(); ci++) {
-		auto verts = goldsrc_hull::compute_cell_vertices(final_cells[ci].planes, EPSILON);
-		if (verts.size() < 4) continue;
-
-		PackedVector3Array points;
-		points.resize((int)verts.size());
-		for (size_t vi = 0; vi < verts.size(); vi++) {
-			points[(int)vi] = goldsrc_to_godot(verts[vi].gs[0], verts[vi].gs[1], verts[vi].gs[2]);
-		}
-
-		Ref<ConvexPolygonShape3D> shape;
-		shape.instantiate();
-		shape->set_points(points);
-
-		CollisionShape3D *col = memnew(CollisionShape3D);
-		col->set_name(String("Cell") + String::num_int64((int64_t)ci));
-		col->set_shape(shape);
-
-		// Store GoldSrc AABB as metadata for debug output
-		float gs_min[3] = {1e30f, 1e30f, 1e30f}, gs_max[3] = {-1e30f, -1e30f, -1e30f};
-		for (const auto &v : verts) {
-			for (int a = 0; a < 3; a++) {
-				if (v.gs[a] < gs_min[a]) gs_min[a] = v.gs[a];
-				if (v.gs[a] > gs_max[a]) gs_max[a] = v.gs[a];
-			}
-		}
-		col->set_meta("gs_min", Vector3(gs_min[0], gs_min[1], gs_min[2]));
-		col->set_meta("gs_max", Vector3(gs_max[0], gs_max[1], gs_max[2]));
-
-		hull_body->add_child(col);
-		shape_count++;
-	}
-
-	add_child(hull_body);
-	UtilityFunctions::print("[GoldSrc] Hull cell collision: ",
-		(int64_t)shape_count, " convex shapes on layer 5");
 }
 
 void GoldSrcBSP::set_lightstyle(int style_index, float brightness) {
