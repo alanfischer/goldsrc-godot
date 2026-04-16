@@ -29,3 +29,6 @@ jobs:
 
       - name: Build
         run: cmake --build build --config Debug
+
+      - name: Test
+        run: ctest --test-dir build -C Debug --output-on-failure
