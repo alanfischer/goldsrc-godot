@@ -16,7 +16,3 @@ add_subdirectory(extern/godot-cpp)
 
 # Our GDExtension library
 add_subdirectory(src)
-
-# Unit tests (pure C++, no Godot dependency)
-enable_testing()
-add_subdirectory(tests)

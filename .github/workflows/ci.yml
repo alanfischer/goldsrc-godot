@@ -30,5 +30,19 @@ jobs:
       - name: Build
         run: cmake --build build --config Debug
 
-      - name: Test
-        run: ctest --test-dir build -C Debug --output-on-failure
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S tests -B tests/build -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build tests/build
+
+      - name: Run tests
+        run: ctest --test-dir tests/build --output-on-failure
