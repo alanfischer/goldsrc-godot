@@ -120,7 +120,7 @@ inline constexpr int CONTENTS_SKY   = -6;
 
 // Tool textures that have no visible geometry at runtime
 inline bool is_tool_texture(const std::string &name) {
-	if (name.empty()) return false;
+	if (name.empty()) return true;
 	std::string lower = name;
 	for (auto &c : lower) c = (char)tolower(c);
 	if (lower.compare(0, 3, "aaa") == 0) return true;
