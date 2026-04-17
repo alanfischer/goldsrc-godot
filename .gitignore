@@ -27,6 +27,7 @@ demo/.godot/
 
 # Debug logs
 *.txt
+!**/CMakeLists.txt
 
 # OS
 .DS_Store
