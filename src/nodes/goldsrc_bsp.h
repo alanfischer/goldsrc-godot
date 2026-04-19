@@ -77,14 +77,10 @@ private:
 
 	void set_occluder_min_area(float area);
 	float get_occluder_min_area() const;
-	void set_occluder_boundary_margin(float margin);
-	float get_occluder_boundary_margin() const;
-	void set_occluder_exclude_normal(godot::Vector3 normal);
-	godot::Vector3 get_occluder_exclude_normal() const;
-	void set_occluder_exclude_threshold(float threshold);
-	float get_occluder_exclude_threshold() const;
 	void set_occluder_max_count(int count);
 	int get_occluder_max_count() const;
+	void set_occluder_pvs_min_gain(int min_gain);
+	int get_occluder_pvs_min_gain() const;
 
 	// Per-face lightmap placement info (for rebaking)
 	struct FaceLightmapInfo {
@@ -117,9 +113,9 @@ private:
 	mutable std::map<std::string, godot::Ref<godot::ImageTexture>> texture_cache;
 	float scale_factor = 0.025f; // GoldSrc units to Godot units
 	float occluder_min_area = 65535.0f; // minimum face area (GS units²) to qualify as occluder (~256×256)
-	float occluder_boundary_margin = 512.0f; // skip faces within this many GS units of the map bbox boundary
-	godot::Vector3 occluder_exclude_normal = godot::Vector3(0, 1, 0); // Godot-space axis to exclude (Y-up = horizontal faces); zero threshold disables
-	float occluder_exclude_threshold = 0.7f; // faces with abs(dot(normal, exclude_normal)) > threshold are excluded; 0 = disabled
 	int occluder_max_count = 0; // max occluders to keep after sorting by area; 0 = unlimited
+	// Greedy PVS-coverage filter: drop candidates whose marginal coverage of PVS-visible
+	// leaf pairs is below this threshold. 0 = disabled (current behavior).
+	int occluder_pvs_min_gain = 500;
 	bool mesh_built = false;
 };

@@ -26,6 +26,12 @@
 #include <set>
 #include <tuple>
 #include <numeric>
+#ifdef _MSC_VER
+#include <intrin.h>
+static inline int popcount64(uint64_t x) { return (int)__popcnt64(x); }
+#else
+static inline int popcount64(uint64_t x) { return __builtin_popcountll(x); }
+#endif
 
 using namespace godot;
 using namespace std;
@@ -228,12 +234,13 @@ void fragment() {
 }
 )";
 
-// Sky surface shader: samples sky cubemap by view direction to match the
-// WorldEnvironment sky background, while writing to depth so geometry behind
-// sky brushes is occluded. sky_cubemap is set at runtime by GDScript.
+// Sky surface shader: samples sky cubemap by view direction. Rendered first
+// (render_priority -1) with no depth write, so it acts as a true background —
+// walls occlude it normally and projectiles beyond it remain visible.
+// sky_cubemap is set at runtime by GDScript.
 static const char *SKY_SURFACE_SHADER_CODE = R"(
 shader_type spatial;
-render_mode unshaded, shadows_disabled, ambient_light_disabled, depth_draw_opaque;
+render_mode unshaded, shadows_disabled, ambient_light_disabled, depth_draw_never;
 
 uniform samplerCube sky_cubemap : source_color, hint_default_black;
 
@@ -460,27 +467,19 @@ void GoldSrcBSP::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_debug_occluders"), &GoldSrcBSP::get_debug_occluders);
 	ClassDB::bind_method(D_METHOD("set_occluder_min_area", "area"), &GoldSrcBSP::set_occluder_min_area);
 	ClassDB::bind_method(D_METHOD("get_occluder_min_area"), &GoldSrcBSP::get_occluder_min_area);
-	ClassDB::bind_method(D_METHOD("set_occluder_boundary_margin", "margin"), &GoldSrcBSP::set_occluder_boundary_margin);
-	ClassDB::bind_method(D_METHOD("get_occluder_boundary_margin"), &GoldSrcBSP::get_occluder_boundary_margin);
-	ClassDB::bind_method(D_METHOD("set_occluder_exclude_normal", "normal"), &GoldSrcBSP::set_occluder_exclude_normal);
-	ClassDB::bind_method(D_METHOD("get_occluder_exclude_normal"), &GoldSrcBSP::get_occluder_exclude_normal);
-	ClassDB::bind_method(D_METHOD("set_occluder_exclude_threshold", "threshold"), &GoldSrcBSP::set_occluder_exclude_threshold);
-	ClassDB::bind_method(D_METHOD("get_occluder_exclude_threshold"), &GoldSrcBSP::get_occluder_exclude_threshold);
 	ClassDB::bind_method(D_METHOD("set_occluder_max_count", "count"), &GoldSrcBSP::set_occluder_max_count);
 	ClassDB::bind_method(D_METHOD("get_occluder_max_count"), &GoldSrcBSP::get_occluder_max_count);
+	ClassDB::bind_method(D_METHOD("set_occluder_pvs_min_gain", "min_gain"), &GoldSrcBSP::set_occluder_pvs_min_gain);
+	ClassDB::bind_method(D_METHOD("get_occluder_pvs_min_gain"), &GoldSrcBSP::get_occluder_pvs_min_gain);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "scale_factor"), "set_scale_factor", "get_scale_factor");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "shader_lightstyles"), "set_shader_lightstyles", "get_shader_lightstyles");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "debug_occluders"), "set_debug_occluders", "get_debug_occluders");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "occluder_min_area", PROPERTY_HINT_RANGE, "0,262144,1"),
 		"set_occluder_min_area", "get_occluder_min_area");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "occluder_boundary_margin", PROPERTY_HINT_RANGE, "0,512,1"),
-		"set_occluder_boundary_margin", "get_occluder_boundary_margin");
-	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "occluder_exclude_normal"),
-		"set_occluder_exclude_normal", "get_occluder_exclude_normal");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "occluder_exclude_threshold", PROPERTY_HINT_RANGE, "0.0,1.0,0.01"),
-		"set_occluder_exclude_threshold", "get_occluder_exclude_threshold");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "occluder_max_count", PROPERTY_HINT_RANGE, "0,1024,1"),
 		"set_occluder_max_count", "get_occluder_max_count");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "occluder_pvs_min_gain", PROPERTY_HINT_RANGE, "0,10000,1"),
+		"set_occluder_pvs_min_gain", "get_occluder_pvs_min_gain");
 }
 
 Error GoldSrcBSP::load_bsp(const String &path) {
@@ -552,36 +551,19 @@ float GoldSrcBSP::get_occluder_min_area() const {
 	return occluder_min_area;
 }
 
-void GoldSrcBSP::set_occluder_boundary_margin(float margin) {
-	occluder_boundary_margin = margin;
-}
-
-float GoldSrcBSP::get_occluder_boundary_margin() const {
-	return occluder_boundary_margin;
-}
-
-void GoldSrcBSP::set_occluder_exclude_normal(Vector3 normal) {
-	occluder_exclude_normal = normal;
-}
-
-Vector3 GoldSrcBSP::get_occluder_exclude_normal() const {
-	return occluder_exclude_normal;
-}
-
-void GoldSrcBSP::set_occluder_exclude_threshold(float threshold) {
-	occluder_exclude_threshold = threshold;
-}
-
-float GoldSrcBSP::get_occluder_exclude_threshold() const {
-	return occluder_exclude_threshold;
-}
-
 void GoldSrcBSP::set_occluder_max_count(int count) {
 	occluder_max_count = count;
 }
 
 int GoldSrcBSP::get_occluder_max_count() const {
 	return occluder_max_count;
+}
+
+void GoldSrcBSP::set_occluder_pvs_min_gain(int min_gain) {
+	occluder_pvs_min_gain = min_gain;
+}
+int GoldSrcBSP::get_occluder_pvs_min_gain() const {
+	return occluder_pvs_min_gain;
 }
 
 int GoldSrcBSP::point_contents(Vector3 godot_pos) const {
@@ -1028,8 +1010,7 @@ void GoldSrcBSP::build_mesh() {
 				SpatialGroup sg;
 				sg.label = "sky_surfaces";
 				for (const auto &fr : faces_for_model) {
-					const string &tn = fr.face->texture_name;
-					if (tn.size() >= 3 && tn.compare(0, 3, "sky") == 0) {
+					if (goldsrc::is_sky_texture(fr.face->texture_name)) {
 						sg.face_refs.push_back(fr);
 					}
 				}
@@ -1062,12 +1043,24 @@ void GoldSrcBSP::build_mesh() {
 		}
 
 		// For brush entities (m > 0), wrap meshes + collision in AnimatableBody3D
-		// so GDScript can move them without body conversion.
+		// so GDScript can move them without body conversion. If all faces of this
+		// brush use sky or invisible-wall textures (e.g. func_wall sky dome, {blue
+		// chroma-keyed enclosure), put it on MASK_WORLD_SKY so projectiles/hitscans
+		// pass through like worldspawn sky. Players still collide (MASK_WORLD_AND_CLIP
+		// includes the sky bit).
 		AnimatableBody3D *body_node = nullptr;
 		if (m > 0) {
+			int sky_like_faces = 0, solid_faces = 0;
+			for (const auto &fr : faces_for_model) {
+				const std::string &tn = fr.face->texture_name;
+				if (goldsrc::is_tool_texture(tn)) continue;
+				if (goldsrc::is_sky_texture(tn) || goldsrc::is_invisible_wall_texture(tn)) sky_like_faces++;
+				else solid_faces++;
+			}
+			bool sky_brush = sky_like_faces > 0 && solid_faces == 0;
 			body_node = memnew(AnimatableBody3D);
 			body_node->set_name("Body");
-			body_node->set_collision_layer(1);
+			body_node->set_collision_layer(sky_brush ? (1u << 8) : 1u);
 			body_node->set_collision_mask(0);
 			model_node->add_child(body_node);
 		}
@@ -1325,7 +1318,7 @@ void GoldSrcBSP::build_mesh() {
 			arr_mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
 
 			Ref<ImageTexture> texture = find_texture(tex_name);
-			bool is_sky_surface = tex_name.size() >= 3 && tex_name.compare(0, 3, "sky") == 0;
+			bool is_sky_surface = goldsrc::is_sky_texture(tex_name);
 			bool is_water = !is_sky_surface && !tex_name.empty() && (tex_name[0] == '!' || tex_name[0] == '*');
 			bool is_alpha_scissor = !is_sky_surface && !is_water && !tex_name.empty() && tex_name[0] == '{';
 
@@ -1335,6 +1328,7 @@ void GoldSrcBSP::build_mesh() {
 				Ref<ShaderMaterial> material;
 				material.instantiate();
 				material->set_shader(sky_shader);
+				material->set_render_priority(-1); // draw before BSP so it's a true background
 				arr_mesh->surface_set_material(0, material);
 				// Reuse the already-built ArrayMesh directly for player sky collision.
 				if (sky_body) {
@@ -1611,7 +1605,7 @@ void GoldSrcBSP::build_hull_collision(Node3D *parent, int model_index,
 		// Skip water/slime/lava faces ('!' or old-format '*' prefix)
 		if (!face.texture_name.empty() && (face.texture_name[0] == '!' || face.texture_name[0] == '*')) continue;
 		// Skip sky faces — not solid, projectiles pass through
-		if (face.texture_name.size() >= 3 && face.texture_name.compare(0, 3, "sky") == 0) continue;
+		if (goldsrc::is_sky_texture(face.texture_name)) continue;
 		int nv = (int)face.vertices.size();
 		if (nv < 3) continue;
 		for (int i = 2; i < nv; i++) {
@@ -1771,13 +1765,22 @@ struct UnionFind {
 	}
 };
 
-using OccluderCandidate = pair<float, OccluderInstance3D*>; // area, instance
+struct OccluderCandidate {
+	float area;
+	OccluderInstance3D *instance;
+	// Plane in GoldSrc coords (same frame as bsp_data.leafs bounds / PVS math):
+	// n · p = d for any p on the plane.
+	float nx, ny, nz, d;
+};
 
 // Create an OccluderInstance3D from ordered coplanar vertices and push it
 // into candidates. Does nothing (returns false) if the polygon is degenerate.
+// gs_nx/gs_ny/gs_nz/gs_d is the occluder plane in GoldSrc coords (for later
+// PVS-coverage filtering); the Godot-space geometry is derived from gd_normal.
 bool create_polygon_occluder(
 	const vector<Vector3> &gd_verts,
 	const Vector3 &gd_normal,
+	float gs_nx, float gs_ny, float gs_nz, float gs_d,
 	vector<OccluderCandidate> &candidates)
 {
 	if ((int)gd_verts.size() < 3) return false;
@@ -1858,7 +1861,7 @@ bool create_polygon_occluder(
 	OccluderInstance3D *inst = memnew(OccluderInstance3D);
 	inst->set_occluder(occluder);
 	inst->set_transform(xform);
-	candidates.push_back({area, inst});
+	candidates.push_back({area, inst, gs_nx, gs_ny, gs_nz, gs_d});
 	return true;
 }
 
@@ -1931,37 +1934,145 @@ static bool hole_polygon_all_solid(
 	    && hole_polygon_all_solid(back_poly,  node.children[1], bsp_data);
 }
 
+// Greedy set-cover filter: keep only the occluders that each cover enough
+// previously-uncovered PVS-visible empty-leaf pairs. An occluder "covers" a
+// pair (A, B) when B is potentially visible from A per PVS AND the occluder's
+// plane strictly separates the two leaf AABBs. Redundant occluders (three
+// parallel walls along the same corridor all separating the same pairs)
+// collapse to the single biggest representative.
+//
+// min_gain = minimum new pairs a candidate must contribute to survive. 0
+// disables filtering. 1 drops only strictly-redundant candidates.
+static void filter_occluders_by_pvs_coverage(
+	vector<OccluderCandidate> &candidates,
+	const goldsrc::BSPData &bsp_data,
+	int min_gain)
+{
+	if (min_gain <= 0) return;
+	if (bsp_data.visibility.empty()) return;
+	if (candidates.size() < 2) return;
+
+	// Collect empty-leaf AABBs in GoldSrc coords.
+	int num_leafs = (int)bsp_data.leafs.size();
+	vector<int> empty_leaf_idx;
+	struct LeafAABB { float mn[3], mx[3]; };
+	vector<LeafAABB> leaf_aabb;
+	empty_leaf_idx.reserve(num_leafs);
+	leaf_aabb.reserve(num_leafs);
+	for (int li = 1; li < num_leafs; li++) {
+		if (bsp_data.leafs[li].contents != goldsrc::CONTENTS_EMPTY) continue;
+		empty_leaf_idx.push_back(li);
+		leaf_aabb.push_back({
+			{(float)bsp_data.leafs[li].mins[0], (float)bsp_data.leafs[li].mins[1], (float)bsp_data.leafs[li].mins[2]},
+			{(float)bsp_data.leafs[li].maxs[0], (float)bsp_data.leafs[li].maxs[1], (float)bsp_data.leafs[li].maxs[2]}
+		});
+	}
+	int N = (int)empty_leaf_idx.size();
+	if (N < 2) return;
+
+	// Enumerate PVS-visible pairs (i, j) with i < j.
+	vector<pair<int,int>> pairs;
+	pairs.reserve((size_t)N * 8);
+	for (int i = 0; i < N; i++) {
+		auto pvs = bsp_data.decompress_pvs(empty_leaf_idx[i]);
+		for (int j = i + 1; j < N; j++) {
+			if (pvs[empty_leaf_idx[j]]) pairs.push_back({i, j});
+		}
+	}
+	int P = (int)pairs.size();
+	if (P == 0) return;
+
+	// Bitsets: coverage packed as C × W uint64 words, total C × W words.
+	int C = (int)candidates.size();
+	size_t W = (size_t)((P + 63) / 64);
+	vector<uint64_t> coverage((size_t)C * W, 0);
+	// Per-leaf AABB side-of-plane against one candidate's plane:
+	//   -1 entire leaf AABB on negative side
+	//   +1 entire leaf AABB on positive side
+	//    0 leaf AABB straddles the plane (ambiguous — conservatively non-separating)
+	vector<int8_t> side(N);
+	// Strict separation requires AABB on one side AND the other leaf's AABB on
+	// the opposite side — straddling leaves are NOT counted as separated. This
+	// avoids crediting occluders that skim across a leaf without actually
+	// dividing it from its PVS partner.
+	for (int c = 0; c < C; c++) {
+		const auto &cand = candidates[c];
+		for (int i = 0; i < N; i++) {
+			float nx = cand.nx, ny = cand.ny, nz = cand.nz, d = cand.d;
+			// Support of the AABB along ±n: {min_dot, max_dot} of n·corner.
+			float lo = (nx >= 0 ? nx * leaf_aabb[i].mn[0] : nx * leaf_aabb[i].mx[0])
+			         + (ny >= 0 ? ny * leaf_aabb[i].mn[1] : ny * leaf_aabb[i].mx[1])
+			         + (nz >= 0 ? nz * leaf_aabb[i].mn[2] : nz * leaf_aabb[i].mx[2]) - d;
+			float hi = (nx >= 0 ? nx * leaf_aabb[i].mx[0] : nx * leaf_aabb[i].mn[0])
+			         + (ny >= 0 ? ny * leaf_aabb[i].mx[1] : ny * leaf_aabb[i].mn[1])
+			         + (nz >= 0 ? nz * leaf_aabb[i].mx[2] : nz * leaf_aabb[i].mn[2]) - d;
+			if (lo > 0.0f)      side[i] = 1;
+			else if (hi < 0.0f) side[i] = -1;
+			else                side[i] = 0;
+		}
+		uint64_t *row = coverage.data() + (size_t)c * W;
+		for (int p = 0; p < P; p++) {
+			int8_t sa = side[pairs[p].first];
+			int8_t sb = side[pairs[p].second];
+			if (sa != 0 && sb != 0 && sa != sb) {
+				row[p >> 6] |= (uint64_t)1 << (p & 63);
+			}
+		}
+	}
+
+	// Greedy pick via popcount on bitmap rows.
+	vector<uint64_t> covered_bits(W, 0);
+	vector<bool> kept(C, false);
+	int kept_count = 0;
+	while (true) {
+		int best_c = -1;
+		int best_gain = min_gain - 1;
+		float best_area = -1.0f;
+		for (int c = 0; c < C; c++) {
+			if (kept[c]) continue;
+			const uint64_t *row = coverage.data() + (size_t)c * W;
+			int gain = 0;
+			for (size_t w = 0; w < W; w++) {
+				gain += popcount64(row[w] & ~covered_bits[w]);
+			}
+			if (gain > best_gain || (gain == best_gain && candidates[c].area > best_area)) {
+				best_gain = gain;
+				best_area = candidates[c].area;
+				best_c = c;
+			}
+		}
+		if (best_c < 0) break;
+		kept[best_c] = true;
+		kept_count++;
+		const uint64_t *row = coverage.data() + (size_t)best_c * W;
+		for (size_t w = 0; w < W; w++) covered_bits[w] |= row[w];
+	}
+
+	// Compact: delete rejected instances, keep survivors in original iteration order.
+	vector<OccluderCandidate> filtered;
+	filtered.reserve(kept_count);
+	int dropped = 0;
+	for (int c = 0; c < C; c++) {
+		if (kept[c]) filtered.push_back(candidates[c]);
+		else { memdelete(candidates[c].instance); dropped++; }
+	}
+
+	int pairs_covered = 0;
+	for (size_t w = 0; w < W; w++) pairs_covered += popcount64(covered_bits[w]);
+	UtilityFunctions::print("[GoldSrc] PVS coverage filter: kept ",
+		(int64_t)kept_count, "/", (int64_t)C, " occluders (dropped ",
+		(int64_t)dropped, " with marginal gain < ", (int64_t)min_gain, "); ",
+		(int64_t)pairs_covered, "/", (int64_t)P, " PVS-visible pairs covered");
+
+	candidates = std::move(filtered);
+}
+
 } // namespace
 
 void GoldSrcBSP::build_occluders(Node3D *parent) {
 	const auto &bsp_data = parser->get_data();
 
 	const float MIN_AREA_GS = occluder_min_area;
-	const float BOUNDARY_MARGIN = occluder_boundary_margin;
-
-	// Convert exclude_normal from Godot coords (Y-up) to GoldSrc coords (Z-up).
-	// Godot(x,y,z) → GS(-x, z, y). Normalize to handle non-unit input.
-	float ex = 0.0f, ey = 0.0f, ez = 0.0f;
-	const bool use_exclude_normal = occluder_exclude_threshold > 0.0f;
-	if (use_exclude_normal) {
-		ex = -occluder_exclude_normal.x;
-		ey =  occluder_exclude_normal.z;
-		ez =  occluder_exclude_normal.y;
-		float elen = sqrtf(ex*ex + ey*ey + ez*ez);
-		if (elen > 1e-6f) { ex /= elen; ey /= elen; ez /= elen; }
-		else { ex = 0.0f; ey = 0.0f; ez = 1.0f; } // fallback: GS Z-up
-	}
-	const auto &bmodel = bsp_data.models[0];
-	// Returns true when the plane (n, d) sits on the outer surface of the map bbox.
-	// d = n·p for any point p on the plane (GoldSrc coords).
-	// The minimum possible d for any point inside the bbox is the support of (-n),
-	// i.e. min over axis i of (n_i * mins[i], n_i * maxs[i]).
-	auto is_boundary_face = [&](float nx, float ny, float nz, float d) -> bool {
-		float min_d = std::min(nx * bmodel.mins[0], nx * bmodel.maxs[0])
-		            + std::min(ny * bmodel.mins[1], ny * bmodel.maxs[1])
-		            + std::min(nz * bmodel.mins[2], nz * bmodel.maxs[2]);
-		return d <= min_d + BOUNDARY_MARGIN;
-	};
 
 	// --- Step 1: Collect qualifying faces ---
 	struct FaceInfo {
@@ -1981,11 +2092,6 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 		if (tn[0] == '!') continue;
 		if (tn.compare(0, 3, "sky") == 0) continue;
 		if (goldsrc::is_tool_texture(tn)) continue;
-
-		if (use_exclude_normal) {
-			float dot = fabsf(face.normal[0]*ex + face.normal[1]*ey + face.normal[2]*ez);
-			if (dot > occluder_exclude_threshold) continue;
-		}
 
 		int nv = (int)face.vertices.size();
 		if (nv < 3) continue;
@@ -2025,8 +2131,6 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 	int count_merged = 0, count_individual = 0, count_groups = 0;
 	// Debug stats
 	int dbg_components_too_small = 0;
-	int dbg_components_boundary = 0;  // on outer map bbox — no occlusion value
-	int dbg_standalone_boundary = 0;
 	int dbg_components_solid = 0;     // single loop → merged occluder
 	int dbg_components_solid_holes = 0; // multiple loops, all holes solid-backed → merged occluder
 	int dbg_components_holes = 0;     // multiple loops with real openings → per-face fallback
@@ -2110,14 +2214,16 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 
 			const auto &ref_face = bsp_data.faces[qualifying[group[comp[0]]].face_index];
 
-			// Skip faces on the outer map boundary — players are never on both sides
-			{
-				float fnx = ref_face.normal[0], fny = ref_face.normal[1], fnz = ref_face.normal[2];
-				float fd = fnx * ref_face.vertices[0].pos[0]
-				         + fny * ref_face.vertices[0].pos[1]
-				         + fnz * ref_face.vertices[0].pos[2];
-				if (is_boundary_face(fnx, fny, fnz, fd)) { dbg_components_boundary++; continue; }
-			}
+			// Component plane in GoldSrc coords — all faces in this coplanar group
+			// share it. Used by the PVS-coverage filter and every create_polygon_occluder
+			// call site below.
+			const float fnx = ref_face.normal[0];
+			const float fny = ref_face.normal[1];
+			const float fnz = ref_face.normal[2];
+			const float fd  = fnx * ref_face.vertices[0].pos[0]
+			                + fny * ref_face.vertices[0].pos[1]
+			                + fnz * ref_face.vertices[0].pos[2];
+
 			Vector3 gd_normal(-ref_face.normal[0], ref_face.normal[2], ref_face.normal[1]);
 			gd_normal.normalize();
 
@@ -2232,7 +2338,7 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 				gd_verts.reserve(loops[0].size());
 				for (auto &qv : loops[0]) gd_verts.push_back(qvert_to_pos[qv]);
 
-				create_polygon_occluder(gd_verts, gd_normal, candidates);
+				create_polygon_occluder(gd_verts, gd_normal, fnx, fny, fnz, fd, candidates);
 				if (debug_occluders) {
 					const auto &v0 = ref_face.vertices[0].pos;
 					float d = ref_face.normal[0]*v0[0] + ref_face.normal[1]*v0[1] + ref_face.normal[2]*v0[2];
@@ -2285,7 +2391,7 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 							face.vertices[i].pos[2]);
 					}
 
-					create_polygon_occluder(gd_verts, gd_normal, candidates);
+					create_polygon_occluder(gd_verts, gd_normal, fnx, fny, fnz, fd, candidates);
 					dbg_individual_area += qualifying[group[gi]].area;
 					count_individual++;
 				}
@@ -2297,7 +2403,6 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 				// If all holes are solid-backed, generate a merged occluder from the
 				// outer loop; otherwise fall back to per-face.
 				const float SOLID_OFFSET = 4.0f; // GoldSrc units — push behind face plane
-				float fnx = ref_face.normal[0], fny = ref_face.normal[1], fnz = ref_face.normal[2];
 				int bsp_root = bsp_data.models[0].headnode[0];
 
 				// Debug: is this a multi-loop component near the investigation point?
@@ -2344,7 +2449,7 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 					vector<Vector3> gd_verts;
 					gd_verts.reserve(loops[0].size());
 					for (auto &qv : loops[0]) gd_verts.push_back(qvert_to_pos[qv]);
-					create_polygon_occluder(gd_verts, gd_normal, candidates);
+					create_polygon_occluder(gd_verts, gd_normal, fnx, fny, fnz, fd, candidates);
 					if (debug_occluders) {
 						const auto &v0 = ref_face.vertices[0].pos;
 						float d = ref_face.normal[0]*v0[0] + ref_face.normal[1]*v0[1] + ref_face.normal[2]*v0[2];
@@ -2435,13 +2540,13 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 					}
 
 					// --- Sub-merge: create occluder(s) from loops ---
-					// (fnx/fny/fnz, bsp_root, SOLID_OFFSET already in scope from above)
+					// (fnx/fny/fnz, fd, bsp_root, SOLID_OFFSET already in scope from above)
 					if (sq_loops.size() == 1) {
 						// All qualifying faces merged into one solid patch
 						vector<Vector3> gd_verts;
 						gd_verts.reserve(sq_loops[0].size());
 						for (auto &qv : sq_loops[0]) gd_verts.push_back(sq_pos[qv]);
-						create_polygon_occluder(gd_verts, gd_normal, candidates);
+						create_polygon_occluder(gd_verts, gd_normal, fnx, fny, fnz, fd, candidates);
 						dbg_merged_area += total_area;
 						count_merged++;
 					} else if (!sq_loops.empty()) {
@@ -2465,7 +2570,7 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 							vector<Vector3> gd_verts;
 							gd_verts.reserve(sq_loops[0].size());
 							for (auto &qv : sq_loops[0]) gd_verts.push_back(sq_pos[qv]);
-							create_polygon_occluder(gd_verts, gd_normal, candidates);
+							create_polygon_occluder(gd_verts, gd_normal, fnx, fny, fnz, fd, candidates);
 							dbg_merged_area += total_area;
 							count_merged++;
 						} else {
@@ -2478,7 +2583,7 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 									gd_verts[i] = goldsrc_to_godot(sface.vertices[i].pos[0],
 									                               sface.vertices[i].pos[1],
 									                               sface.vertices[i].pos[2]);
-								create_polygon_occluder(gd_verts, gd_normal, candidates);
+								create_polygon_occluder(gd_verts, gd_normal, fnx, fny, fnz, fd, candidates);
 								dbg_individual_area += qualifying[group[gi]].area;
 								count_individual++;
 							}
@@ -2493,7 +2598,7 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 								gd_verts[i] = goldsrc_to_godot(sface.vertices[i].pos[0],
 								                               sface.vertices[i].pos[1],
 								                               sface.vertices[i].pos[2]);
-							create_polygon_occluder(gd_verts, gd_normal, candidates);
+							create_polygon_occluder(gd_verts, gd_normal, fnx, fny, fnz, fd, candidates);
 							dbg_individual_area += qualifying[group[gi]].area;
 							count_individual++;
 						}
@@ -2509,13 +2614,11 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 		if (qualifying[qi].area < MIN_AREA_GS) { dbg_standalone_too_small++; continue; }
 
 		const auto &face = bsp_data.faces[qualifying[qi].face_index];
-		{
-			float nx = face.normal[0], ny = face.normal[1], nz = face.normal[2];
-			float d = nx * face.vertices[0].pos[0]
-			        + ny * face.vertices[0].pos[1]
-			        + nz * face.vertices[0].pos[2];
-			if (is_boundary_face(nx, ny, nz, d)) { dbg_standalone_boundary++; continue; }
-		}
+		const float nx = face.normal[0], ny = face.normal[1], nz = face.normal[2];
+		const float d = nx * face.vertices[0].pos[0]
+		              + ny * face.vertices[0].pos[1]
+		              + nz * face.vertices[0].pos[2];
+
 		int nv = (int)face.vertices.size();
 
 		vector<Vector3> gd_verts(nv);
@@ -2529,20 +2632,22 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 		Vector3 gd_normal(-face.normal[0], face.normal[2], face.normal[1]);
 		gd_normal.normalize();
 
-		create_polygon_occluder(gd_verts, gd_normal, candidates);
+		create_polygon_occluder(gd_verts, gd_normal, nx, ny, nz, d, candidates);
 		if (debug_occluders) {
-			const auto &v0 = face.vertices[0].pos;
-			float d = face.normal[0]*v0[0] + face.normal[1]*v0[1] + face.normal[2]*v0[2];
-			occ_planes.push_back({{face.normal[0], face.normal[1], face.normal[2]}, d});
+			occ_planes.push_back({{nx, ny, nz}, d});
 		}
 		dbg_individual_area += qualifying[qi].area;
 		dbg_standalone++;
 		count_individual++;
 	}
 
+	// Greedy PVS-coverage filter runs before sort/cap so that the cap (if set)
+	// applies to the already-pruned survivors rather than the raw candidate pool.
+	filter_occluders_by_pvs_coverage(candidates, bsp_data, occluder_pvs_min_gain);
+
 	// Sort candidates by area descending (largest = most important)
 	sort(candidates.begin(), candidates.end(),
-		[](const OccluderCandidate &a, const OccluderCandidate &b) { return a.first > b.first; });
+		[](const OccluderCandidate &a, const OccluderCandidate &b) { return a.area > b.area; });
 
 	// Use candidates.size() — count_merged/count_individual include polygons that
 	// create_polygon_occluder() rejected as degenerate (returns false, no push_back).
@@ -2551,10 +2656,10 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 		? occluder_max_count : total;
 
 	for (int i = 0; i < n_add; i++) {
-		parent->add_child(candidates[i].second);
+		parent->add_child(candidates[i].instance);
 	}
 	for (int i = n_add; i < total; i++) {
-		memdelete(candidates[i].second);
+		memdelete(candidates[i].instance);
 	}
 
 	UtilityFunctions::print("[GoldSrc] Built ", (int64_t)n_add, " occluders (",
@@ -2587,10 +2692,8 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 			UtilityFunctions::print("    Edge walk failures (per-face): ", (int64_t)dbg_components_walk_fail);
 		}
 		UtilityFunctions::print("    Too small (skipped): ", (int64_t)dbg_components_too_small);
-		UtilityFunctions::print("    On map boundary (skipped): ", (int64_t)dbg_components_boundary);
 		UtilityFunctions::print("  Standalone faces: ", (int64_t)dbg_standalone,
-			" (", (int64_t)dbg_standalone_too_small, " too small, ",
-			(int64_t)dbg_standalone_boundary, " on boundary)");
+			" (", (int64_t)dbg_standalone_too_small, " too small)");
 		float occluder_area = dbg_merged_area + dbg_individual_area;
 		float coverage = total_wall_area > 0 ? (occluder_area / total_wall_area * 100.0f) : 0;
 		UtilityFunctions::print("  Occluder coverage: ", (int64_t)occluder_area,

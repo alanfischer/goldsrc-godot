@@ -40,6 +40,7 @@ public:
 
 private:
 	void build_skeleton();
+	void build_hitboxes();
 	void build_meshes();
 	void build_animations();
 
