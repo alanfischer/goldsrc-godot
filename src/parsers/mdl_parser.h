@@ -72,6 +72,13 @@ struct MDLBone {
 	float scale[6];
 };
 
+struct MDLHitbox {
+	int32_t bone;
+	int32_t group;      // body part group — 1 = head in HL player models
+	float bbmin[3];
+	float bbmax[3];
+};
+
 struct MDLBoneController {
 	int32_t bone;
 	int32_t type;
@@ -182,6 +189,13 @@ struct ParsedBone {
 	float rot[3]; // euler angles
 };
 
+struct ParsedHitbox {
+	int bone;
+	int group;      // 1 = head in HL player models
+	float bbmin[3]; // in bone-local GoldSrc space, unscaled
+	float bbmax[3];
+};
+
 struct ParsedMDLTexture {
 	std::string name;
 	int width, height;
@@ -229,6 +243,7 @@ struct ParsedSequence {
 
 struct MDLData {
 	std::vector<ParsedBone> bones;
+	std::vector<ParsedHitbox> hitboxes;
 	std::vector<ParsedMDLTexture> textures;
 	std::vector<int16_t> skin_table; // numskinref * numskinfamilies
 	int num_skin_ref;
@@ -244,6 +259,7 @@ public:
 
 private:
 	void parse_bones(const uint8_t *data, size_t size);
+	void parse_hitboxes(const uint8_t *data, size_t size);
 	void parse_textures(const uint8_t *data, size_t size);
 	void parse_skins(const uint8_t *data, size_t size);
 	void parse_bodyparts(const uint8_t *data, size_t size);

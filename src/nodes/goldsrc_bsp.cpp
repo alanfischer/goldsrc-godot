@@ -228,12 +228,13 @@ void fragment() {
 }
 )";
 
-// Sky surface shader: samples sky cubemap by view direction to match the
-// WorldEnvironment sky background, while writing to depth so geometry behind
-// sky brushes is occluded. sky_cubemap is set at runtime by GDScript.
+// Sky surface shader: samples sky cubemap by view direction. Rendered first
+// (render_priority -1) with no depth write, so it acts as a true background —
+// walls occlude it normally and projectiles beyond it remain visible.
+// sky_cubemap is set at runtime by GDScript.
 static const char *SKY_SURFACE_SHADER_CODE = R"(
 shader_type spatial;
-render_mode unshaded, shadows_disabled, ambient_light_disabled, depth_draw_opaque;
+render_mode unshaded, shadows_disabled, ambient_light_disabled, depth_draw_never;
 
 uniform samplerCube sky_cubemap : source_color, hint_default_black;
 
@@ -1003,8 +1004,7 @@ void GoldSrcBSP::build_mesh() {
 				SpatialGroup sg;
 				sg.label = "sky_surfaces";
 				for (const auto &fr : faces_for_model) {
-					const string &tn = fr.face->texture_name;
-					if (tn.size() >= 3 && tn.compare(0, 3, "sky") == 0) {
+					if (goldsrc::is_sky_texture(fr.face->texture_name)) {
 						sg.face_refs.push_back(fr);
 					}
 				}
@@ -1037,12 +1037,24 @@ void GoldSrcBSP::build_mesh() {
 		}
 
 		// For brush entities (m > 0), wrap meshes + collision in AnimatableBody3D
-		// so GDScript can move them without body conversion.
+		// so GDScript can move them without body conversion. If all faces of this
+		// brush use sky or invisible-wall textures (e.g. func_wall sky dome, {blue
+		// chroma-keyed enclosure), put it on MASK_WORLD_SKY so projectiles/hitscans
+		// pass through like worldspawn sky. Players still collide (MASK_WORLD_AND_CLIP
+		// includes the sky bit).
 		AnimatableBody3D *body_node = nullptr;
 		if (m > 0) {
+			int sky_like_faces = 0, solid_faces = 0;
+			for (const auto &fr : faces_for_model) {
+				const std::string &tn = fr.face->texture_name;
+				if (goldsrc::is_tool_texture(tn)) continue;
+				if (goldsrc::is_sky_texture(tn) || goldsrc::is_invisible_wall_texture(tn)) sky_like_faces++;
+				else solid_faces++;
+			}
+			bool sky_brush = sky_like_faces > 0 && solid_faces == 0;
 			body_node = memnew(AnimatableBody3D);
 			body_node->set_name("Body");
-			body_node->set_collision_layer(1);
+			body_node->set_collision_layer(sky_brush ? (1u << 8) : 1u);
 			body_node->set_collision_mask(0);
 			model_node->add_child(body_node);
 		}
@@ -1300,7 +1312,7 @@ void GoldSrcBSP::build_mesh() {
 			arr_mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
 
 			Ref<ImageTexture> texture = find_texture(tex_name);
-			bool is_sky_surface = tex_name.size() >= 3 && tex_name.compare(0, 3, "sky") == 0;
+			bool is_sky_surface = goldsrc::is_sky_texture(tex_name);
 			bool is_water = !is_sky_surface && !tex_name.empty() && (tex_name[0] == '!' || tex_name[0] == '*');
 			bool is_alpha_scissor = !is_sky_surface && !is_water && !tex_name.empty() && tex_name[0] == '{';
 
@@ -1310,6 +1322,7 @@ void GoldSrcBSP::build_mesh() {
 				Ref<ShaderMaterial> material;
 				material.instantiate();
 				material->set_shader(sky_shader);
+				material->set_render_priority(-1); // draw before BSP so it's a true background
 				arr_mesh->surface_set_material(0, material);
 				// Reuse the already-built ArrayMesh directly for player sky collision.
 				if (sky_body) {
@@ -1586,7 +1599,7 @@ void GoldSrcBSP::build_hull_collision(Node3D *parent, int model_index,
 		// Skip water/slime/lava faces ('!' or old-format '*' prefix)
 		if (!face.texture_name.empty() && (face.texture_name[0] == '!' || face.texture_name[0] == '*')) continue;
 		// Skip sky faces — not solid, projectiles pass through
-		if (face.texture_name.size() >= 3 && face.texture_name.compare(0, 3, "sky") == 0) continue;
+		if (goldsrc::is_sky_texture(face.texture_name)) continue;
 		int nv = (int)face.vertices.size();
 		if (nv < 3) continue;
 		for (int i = 2; i < nv; i++) {

@@ -128,6 +128,25 @@ inline bool is_tool_texture(const std::string &name) {
 	       lower == "bevel" || lower == "hint" || lower == "skip";
 }
 
+// Sky faces — case-insensitive "sky" prefix (WW maps use SkY*, SKY*, etc.).
+inline bool is_sky_texture(const std::string &name) {
+	if (name.size() < 3) return false;
+	return (name[0] == 's' || name[0] == 'S') &&
+	       (name[1] == 'k' || name[1] == 'K') &&
+	       (name[2] == 'y' || name[2] == 'Y');
+}
+
+// Invisible-wall textures used as sky enclosures (e.g. {blue chroma-keyed
+// func_walls boxing in the playable area). Treated as sky for collision so
+// spells/hitscans pass through while player movement still collides.
+inline bool is_invisible_wall_texture(const std::string &name) {
+	if (name.size() < 5) return false;
+	if (name[0] != '{') return false;
+	std::string lower = name.substr(1);
+	for (auto &c : lower) c = (char)tolower(c);
+	return lower == "blue";
+}
+
 // Parsed face data ready for mesh building
 struct ParsedVertex {
 	float pos[3];

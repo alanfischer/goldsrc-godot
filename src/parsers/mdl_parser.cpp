@@ -23,12 +23,31 @@ bool MDLParser::parse(const uint8_t *data, size_t size) {
 	}
 
 	parse_bones(data, size);
+	parse_hitboxes(data, size);
 	parse_textures(data, size);
 	parse_skins(data, size);
 	parse_bodyparts(data, size);
 	parse_sequences(data, size);
 
 	return true;
+}
+
+void MDLParser::parse_hitboxes(const uint8_t *data, size_t size) {
+	if (header->numhitboxes <= 0) return;
+	if (!check_range(header->hitboxindex, header->numhitboxes, sizeof(MDLHitbox), size)) return;
+
+	const MDLHitbox *boxes = reinterpret_cast<const MDLHitbox *>(data + header->hitboxindex);
+
+	mdl_data.hitboxes.resize(header->numhitboxes);
+	for (int i = 0; i < header->numhitboxes; i++) {
+		ParsedHitbox &ph = mdl_data.hitboxes[i];
+		ph.bone = boxes[i].bone;
+		ph.group = boxes[i].group;
+		for (int j = 0; j < 3; j++) {
+			ph.bbmin[j] = boxes[i].bbmin[j];
+			ph.bbmax[j] = boxes[i].bbmax[j];
+		}
+	}
 }
 
 void MDLParser::parse_bones(const uint8_t *data, size_t size) {

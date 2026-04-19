@@ -9,6 +9,10 @@
 #include <godot_cpp/classes/standard_material3d.hpp>
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
+#include <godot_cpp/classes/bone_attachment3d.hpp>
+#include <godot_cpp/classes/area3d.hpp>
+#include <godot_cpp/classes/collision_shape3d.hpp>
+#include <godot_cpp/classes/box_shape3d.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/variant/basis.hpp>
 
@@ -228,6 +232,7 @@ void GoldSrcMDL::build_model() {
 	model_built = true;
 
 	build_skeleton();
+	build_hitboxes();
 	build_meshes();
 	build_animations();
 }
@@ -278,6 +283,91 @@ void GoldSrcMDL::build_skeleton() {
 
 	// Cache rest-pose world transforms for transforming vertices to model space
 	rest_bone_world = compute_bone_world_transforms(rest_frame);
+}
+
+// MDL hitboxes are axis-aligned boxes in bone-LOCAL GoldSrc space.
+// Attach each via a BoneAttachment3D so Godot follows the animated bone.
+// Hitboxes live on collision_layer MASK_HITBOX (bit 9 = 512) and are queryable-only
+// (monitoring=false, monitorable=true). Weapons raycast against this layer with
+// collide_with_areas=true, read the "hitbox_group" meta (1 = head in HL models),
+// and apply the damage multiplier accordingly.
+void GoldSrcMDL::build_hitboxes() {
+	const auto &mdl = parser->get_data();
+	if (mdl.hitboxes.empty() || !skeleton) return;
+
+	// Hitbox layer — keep in sync with GameConsts.MASK_HITBOX (LAYER_HITBOX=10, bit 9).
+	const uint32_t HITBOX_LAYER = 1u << 9;
+
+	for (int i = 0; i < (int)mdl.hitboxes.size(); i++) {
+		const auto &hb = mdl.hitboxes[i];
+		if (hb.bone < 0 || hb.bone >= (int)mdl.bones.size()) continue;
+
+		BoneAttachment3D *attach = memnew(BoneAttachment3D);
+		attach->set_name(String("Hitbox_") + String::num_int64(i));
+		skeleton->add_child(attach);
+		attach->set_bone_idx(hb.bone);
+
+		Area3D *area = memnew(Area3D);
+		area->set_name("Area");
+		area->set_collision_layer(HITBOX_LAYER);
+		area->set_collision_mask(0);
+		area->set_monitoring(false);
+		area->set_monitorable(true);
+		// WW wizard/monster MDLs don't use HL's hitbox group convention — every
+		// hitbox has group=0. Fall back to bone name: if the bone contains "head"
+		// (case-insensitive), tag this hitbox as the head group so headshot
+		// multipliers trigger. Preserve explicit groups when models do set them.
+		int group = hb.group;
+		if (group == 0) {
+			const std::string &bname = mdl.bones[hb.bone].name;
+			for (size_t c = 0; c + 3 < bname.size(); c++) {
+				char a = (char)tolower(bname[c]);
+				char b = (char)tolower(bname[c + 1]);
+				char d = (char)tolower(bname[c + 2]);
+				char e = (char)tolower(bname[c + 3]);
+				if (a == 'h' && b == 'e' && d == 'a' && e == 'd') {
+					group = 1;
+					break;
+				}
+			}
+		}
+		area->set_meta("hitbox_group", group);
+		attach->add_child(area);
+
+		// GoldSrc→Godot axis swizzle: GS(x,y,z) → Godot(x, z, -y)
+		// So Godot-local extents are:
+		//   x: [bbmin[0], bbmax[0]]
+		//   y: [bbmin[2], bbmax[2]]
+		//   z: [-bbmax[1], -bbmin[1]]
+		float gx_min = hb.bbmin[0], gx_max = hb.bbmax[0];
+		float gy_min = hb.bbmin[2], gy_max = hb.bbmax[2];
+		float gz_min = -hb.bbmax[1], gz_max = -hb.bbmin[1];
+
+		Vector3 center(
+			(gx_min + gx_max) * 0.5f * scale_factor,
+			(gy_min + gy_max) * 0.5f * scale_factor,
+			(gz_min + gz_max) * 0.5f * scale_factor
+		);
+		Vector3 size(
+			(gx_max - gx_min) * scale_factor,
+			(gy_max - gy_min) * scale_factor,
+			(gz_max - gz_min) * scale_factor
+		);
+
+		Ref<BoxShape3D> box;
+		box.instantiate();
+		box->set_size(size);
+
+		CollisionShape3D *cshape = memnew(CollisionShape3D);
+		cshape->set_name("Shape");
+		cshape->set_shape(box);
+		Transform3D xform;
+		xform.origin = center;
+		cshape->set_transform(xform);
+		area->add_child(cshape);
+	}
+
+	UtilityFunctions::print("[GoldSrc] Built ", (int64_t)mdl.hitboxes.size(), " hitboxes");
 }
 
 void GoldSrcMDL::build_meshes() {
