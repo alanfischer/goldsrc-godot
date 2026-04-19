@@ -26,6 +26,12 @@
 #include <set>
 #include <tuple>
 #include <numeric>
+#ifdef _MSC_VER
+#include <intrin.h>
+static inline int popcount64(uint64_t x) { return (int)__popcnt64(x); }
+#else
+static inline int popcount64(uint64_t x) { return __builtin_popcountll(x); }
+#endif
 
 using namespace godot;
 using namespace std;
@@ -2027,7 +2033,7 @@ static void filter_occluders_by_pvs_coverage(
 			const uint64_t *row = coverage.data() + (size_t)c * W;
 			int gain = 0;
 			for (size_t w = 0; w < W; w++) {
-				gain += __builtin_popcountll(row[w] & ~covered_bits[w]);
+				gain += popcount64(row[w] & ~covered_bits[w]);
 			}
 			if (gain > best_gain || (gain == best_gain && candidates[c].area > best_area)) {
 				best_gain = gain;
@@ -2052,7 +2058,7 @@ static void filter_occluders_by_pvs_coverage(
 	}
 
 	int pairs_covered = 0;
-	for (size_t w = 0; w < W; w++) pairs_covered += __builtin_popcountll(covered_bits[w]);
+	for (size_t w = 0; w < W; w++) pairs_covered += popcount64(covered_bits[w]);
 	UtilityFunctions::print("[GoldSrc] PVS coverage filter: kept ",
 		(int64_t)kept_count, "/", (int64_t)C, " occluders (dropped ",
 		(int64_t)dropped, " with marginal gain < ", (int64_t)min_gain, "); ",
