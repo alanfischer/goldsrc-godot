@@ -17,8 +17,9 @@ A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
 - Automatic occluder generation (OccluderInstance3D + PolygonOccluder3D) — see [Occluder Generation](#occluder-generation) below
 - PVS (Potentially Visible Set) data parsing with RLE decompression — exposed for runtime visibility culling via `VisibilityManager` and used by `debug_occluders` mode to validate occluder effectiveness; a stripped PVS blob (PLANES, VISIBILITY, NODES, LEAFS, MODELS only) is baked into each `.scn` as `pvs_data` metadata so `VisibilityManager` can initialize without the original `.bsp`
 - Worldspawn spatial splitting — walks the BSP tree to group faces into spatial clusters, producing separate MeshInstance3D nodes per group for better frustum culling
-- Brush entity root nodes are AnimatableBody3D instances — meshes and collision shapes are direct children, so entity scripts extend AnimatableBody3D directly without a body wrapper
-- Point entity nodes (Node3D) with entity properties stored as metadata — classname, targetname, origin, angles, and all other key-value pairs are accessible from GDScript via `node.get_meta("entity")`
+- Brush entity root nodes are AnimatableBody3D instances — meshes and collision shapes are direct children
+- Point entity root nodes are plain Node3D instances
+- Entity properties stored as metadata on each node — classname, targetname, origin, angles, and all other key-value pairs are accessible from GDScript via `node.get_meta("entity")`
 - Entity lump parsing (key-value dictionaries accessible from GDScript)
 - **Ambient cube light grid baking** — traces rays in 6 directions from a 3D grid through the BSP tree, samples lightmaps at hit points, and outputs slice images for `ImageTexture3D` construction. Includes flood-fill of solid cells to prevent trilinear interpolation artifacts. Provides spatially-varying directional ambient lighting for dynamic models
 
