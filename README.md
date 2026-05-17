@@ -111,23 +111,6 @@ The importer automatically generates `OccluderInstance3D` + `PolygonOccluder3D` 
 7. **Importance sorting and capping** — surviving candidates are sorted by polygon area (largest first). If `occluder_max_count` is non-zero, only the top N are kept.
 8. **Polygon cleanup** — duplicate and collinear vertices are removed, and each polygon is pre-validated against Godot's triangulator before being committed as an occluder.
 
-### Import Parameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `occluder_min_area` | 65535 | Minimum face area in GoldSrc units² for a face to qualify as an occluder. ~256×256 at default. Raise to get fewer, larger occluders; lower to include smaller walls. |
-| `occluder_pvs_min_gain` | 500 | Greedy PVS-coverage filter threshold. Candidates whose marginal BSP-visible leaf-pair coverage is below this value are dropped before area sorting. `0` = disabled (keep all candidates). |
-| `occluder_max_count` | 0 | Maximum number of occluders after sorting by area. `0` = unlimited. Applied after the PVS-coverage filter. |
-
-These can be set per-map in the Godot Import tab or directly in the `.bsp.import` file:
-
-```ini
-[params]
-occluder_min_area=65535.0
-occluder_pvs_min_gain=500
-occluder_max_count=0
-```
-
 ### Debug Mode
 
 Set `debug_occluders = true` on the `GoldSrcBSP` node before calling `build_mesh()` to print a full pipeline report including: face counts, component breakdown by type (solid/solid-holes/real-openings/walk-failures), occluder coverage percentage, overfill checks on merged polygons, and PVS validation (what fraction of BSP-invisible leaf pairs have an occluder plane between them).
@@ -278,10 +261,10 @@ for child in bsp.get_children():
 # Or get raw entity dictionaries:
 var entities = bsp.get_entities()  # Array of Dictionaries
 
-# Optional: tune occluder generation (before build_mesh)
-bsp.occluder_min_area = 65535.0   # min face area in GoldSrc units²
+# Tune occluder generation before calling build_mesh():
+bsp.occluder_min_area = 65535.0   # min face area in GoldSrc units² (~256×256 default)
 bsp.occluder_pvs_min_gain = 500   # greedy PVS-coverage filter; 0 = disabled
-bsp.occluder_max_count = 0        # cap on occluder count after PVS filter (0 = unlimited)
+bsp.occluder_max_count = 0        # cap on occluder count after PVS filter; 0 = unlimited
 bsp.debug_occluders = true        # prints PVS validation, overfill checks, pipeline stats
 
 # PVS query API (useful for runtime visibility culling)
