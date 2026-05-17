@@ -68,28 +68,6 @@ func _get_import_options(_path: String, _preset_index: int) -> Array[Dictionary]
 			"property_hint": PROPERTY_HINT_DIR,
 			"hint_string": "",
 		},
-		{
-			"name": "occluder_min_area",
-			"default_value": 65535.0,
-			"property_hint": PROPERTY_HINT_RANGE,
-			"hint_string": "0,262144,1",
-		},
-		{
-			"name": "occluder_max_count",
-			"default_value": 0,
-			"property_hint": PROPERTY_HINT_RANGE,
-			"hint_string": "0,1024,1",
-		},
-		# Greedy PVS-coverage filter: drop occluder candidates whose marginal
-		# coverage of PVS-visible leaf pairs is below this threshold. 0 disables.
-		# 1 drops only strictly-redundant occluders (same PVS pairs as a bigger
-		# one already kept). Higher values trade cull quality for fewer occluders.
-		{
-			"name": "occluder_pvs_min_gain",
-			"default_value": 500,
-			"property_hint": PROPERTY_HINT_RANGE,
-			"hint_string": "0,10000,1",
-		},
 	]
 
 
@@ -102,16 +80,10 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 	var wad_directory: String = options.get("wad_directory", "")
 	var scale_factor: float = options.get("scale_factor", 0.025)
 	var model_directory: String = options.get("model_directory", "")
-	var occluder_min_area: float = options.get("occluder_min_area", 16384.0)
-	var occluder_max_count: int = options.get("occluder_max_count", 0)
-	var occluder_pvs_min_gain: int = options.get("occluder_pvs_min_gain", 500)
 
 	# Create the BSP node and configure it
 	var bsp := GoldSrcBSP.new()
 	bsp.set_scale_factor(scale_factor)
-	bsp.set_occluder_min_area(occluder_min_area)
-	bsp.set_occluder_max_count(occluder_max_count)
-	bsp.set_occluder_pvs_min_gain(occluder_pvs_min_gain)
 
 	# Load WAD files if a directory is specified
 	if wad_directory != "":
@@ -144,6 +116,12 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 		root.add_child(child)
 
 	_instantiate_entity_models(root, model_directory)
+
+	# Bake stripped PVS data (PLANES/NODES/LEAFS/VISIBILITY/MODELS only) so
+	# VisibilityManager can initialise from the .scn without the original .bsp.
+	var pvs_blob: PackedByteArray = bsp.get_pvs_blob()
+	if not pvs_blob.is_empty():
+		root.set_meta("pvs_data", pvs_blob)
 
 	_set_owner_recursive(root, root)
 
@@ -201,3 +179,5 @@ func _instantiate_entity_models(root: Node3D, model_dir: String) -> void:
 
 		instance.name = model_path.get_file().get_basename()
 		child.add_child(instance)
+
+

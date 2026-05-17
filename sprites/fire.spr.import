@@ -1,0 +1,16 @@
+[remap]
+
+importer="goldsrc.spr"
+type="PackedScene"
+uid="uid://d2isjfypkpfo5"
+path="res://.godot/imported/fire.spr-230eb0012d545f6bf983f73aeb310406.scn"
+
+[deps]
+
+source_file="res://sprites/fire.spr"
+dest_files=["res://.godot/imported/fire.spr-230eb0012d545f6bf983f73aeb310406.scn"]
+
+[params]
+
+animation_fps=10.0
+loop=true

@@ -398,15 +398,36 @@ static void collect_faces_recursive(
 	}
 }
 
-// Walk BSP tree to target_depth, collecting face groups from subtrees
+// Collect all BSP leaf indices reachable from a subtree.
+static void collect_leaves_recursive(
+	const std::vector<goldsrc::BSPNode> &nodes,
+	const std::vector<goldsrc::BSPLeaf> &leafs,
+	int node_index,
+	std::vector<int> &out_leaves)
+{
+	if (node_index < 0) {
+		int leaf_idx = -(node_index + 1);
+		if ((size_t)leaf_idx < leafs.size())
+			out_leaves.push_back(leaf_idx);
+		return;
+	}
+	if ((size_t)node_index >= nodes.size()) return;
+	const auto &node = nodes[node_index];
+	collect_leaves_recursive(nodes, leafs, node.children[0], out_leaves);
+	collect_leaves_recursive(nodes, leafs, node.children[1], out_leaves);
+}
+
+// Walk BSP tree to target_depth, collecting face groups and leaf sets from subtrees.
 static void collect_spatial_groups(
 	const std::vector<goldsrc::BSPNode> &nodes,
+	const std::vector<goldsrc::BSPLeaf> &leafs,
 	const std::vector<int> &raw_to_parsed,
 	int node_index, int current_depth, int target_depth,
 	std::vector<std::vector<int>> &groups,
+	std::vector<std::vector<int>> &leaf_groups,
 	std::vector<int> &orphan_faces)
 {
-	if (node_index < 0) return; // leaf
+	if (node_index < 0) return; // leaf — handled by collect_leaves_recursive
 	if ((size_t)node_index >= nodes.size()) return;
 
 	const auto &node = nodes[node_index];
@@ -415,6 +436,8 @@ static void collect_spatial_groups(
 		// This subtree becomes one spatial group
 		groups.emplace_back();
 		collect_faces_recursive(nodes, raw_to_parsed, node_index, groups.back());
+		leaf_groups.emplace_back();
+		collect_leaves_recursive(nodes, leafs, node_index, leaf_groups.back());
 		return;
 	}
 
@@ -431,8 +454,8 @@ static void collect_spatial_groups(
 
 	// Recurse into children
 	for (int c = 0; c < 2; c++) {
-		collect_spatial_groups(nodes, raw_to_parsed, node.children[c],
-			current_depth + 1, target_depth, groups, orphan_faces);
+		collect_spatial_groups(nodes, leafs, raw_to_parsed, node.children[c],
+			current_depth + 1, target_depth, groups, leaf_groups, orphan_faces);
 	}
 }
 
@@ -446,6 +469,8 @@ GoldSrcBSP::GoldSrcBSP() {
 
 void GoldSrcBSP::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("load_bsp", "path"), &GoldSrcBSP::load_bsp);
+	ClassDB::bind_method(D_METHOD("load_bsp_from_data", "data"), &GoldSrcBSP::load_bsp_from_data);
+	ClassDB::bind_method(D_METHOD("get_pvs_blob"), &GoldSrcBSP::get_pvs_blob);
 	ClassDB::bind_method(D_METHOD("set_wad", "wad"), &GoldSrcBSP::set_wad);
 	ClassDB::bind_method(D_METHOD("add_wad", "wad"), &GoldSrcBSP::add_wad);
 	ClassDB::bind_method(D_METHOD("get_entities"), &GoldSrcBSP::get_entities);
@@ -458,6 +483,10 @@ void GoldSrcBSP::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_lightstyle_image"), &GoldSrcBSP::get_lightstyle_image);
 	ClassDB::bind_method(D_METHOD("get_lightstyle_texture"), &GoldSrcBSP::get_lightstyle_texture);
 	ClassDB::bind_method(D_METHOD("point_contents", "position"), &GoldSrcBSP::point_contents);
+	ClassDB::bind_method(D_METHOD("point_to_leaf", "position"), &GoldSrcBSP::point_to_leaf);
+	ClassDB::bind_method(D_METHOD("get_leaf_count"), &GoldSrcBSP::get_leaf_count);
+	ClassDB::bind_method(D_METHOD("get_leaf_pvs", "leaf_index"), &GoldSrcBSP::get_leaf_pvs);
+	ClassDB::bind_method(D_METHOD("get_leaves_in_aabb", "aabb"), &GoldSrcBSP::get_leaves_in_aabb);
 	ClassDB::bind_method(D_METHOD("get_texture", "name"), &GoldSrcBSP::get_texture);
 	ClassDB::bind_method(D_METHOD("get_face_axes", "position", "normal"), &GoldSrcBSP::get_face_axes);
 	ClassDB::bind_method(D_METHOD("set_shader_lightstyles", "enabled"), &GoldSrcBSP::set_shader_lightstyles);
@@ -504,6 +533,56 @@ Error GoldSrcBSP::load_bsp(const String &path) {
 		" (", (int64_t)parser->get_data().faces.size(), " faces, ",
 		(int64_t)parser->get_data().entities.size(), " entities)");
 	return OK;
+}
+
+Error GoldSrcBSP::load_bsp_from_data(const PackedByteArray &data) {
+	if (data.is_empty()) return ERR_INVALID_DATA;
+	parser = make_unique<goldsrc::BSPParser>();
+	if (!parser->parse(data.ptr(), data.size())) {
+		parser.reset();
+		return ERR_PARSE_ERROR;
+	}
+	mesh_built = false;
+	return OK;
+}
+
+PackedByteArray GoldSrcBSP::get_pvs_blob() const {
+	if (!parser) return PackedByteArray();
+	const auto &d = parser->get_data();
+	if (d.nodes.empty() || d.leafs.empty()) return PackedByteArray();
+
+	size_t planes_sz = d.planes.size()     * sizeof(goldsrc::BSPPlane);
+	size_t vis_sz    = d.visibility.size();
+	size_t nodes_sz  = d.nodes.size()      * sizeof(goldsrc::BSPNode);
+	size_t leafs_sz  = d.leafs.size()      * sizeof(goldsrc::BSPLeaf);
+	size_t models_sz = d.models.size()     * sizeof(goldsrc::BSPModel);
+	size_t hdr_sz    = sizeof(goldsrc::BSPHeader);
+	size_t total     = hdr_sz + planes_sz + vis_sz + nodes_sz + leafs_sz + models_sz;
+
+	PackedByteArray out;
+	out.resize((int64_t)total);
+	uint8_t *p = out.ptrw();
+	memset(p, 0, total);
+
+	auto *hdr = reinterpret_cast<goldsrc::BSPHeader *>(p);
+	hdr->version = goldsrc::HLBSP_VERSION;
+
+	size_t cur = hdr_sz;
+	auto write_lump = [&](int idx, const void *data, size_t sz) {
+		if (sz == 0) return;
+		hdr->lumps[idx].fileofs = (int32_t)cur;
+		hdr->lumps[idx].filelen = (int32_t)sz;
+		memcpy(p + cur, data, sz);
+		cur += sz;
+	};
+
+	write_lump(goldsrc::LUMP_PLANES,     d.planes.data(),     planes_sz);
+	write_lump(goldsrc::LUMP_VISIBILITY, d.visibility.data(), vis_sz);
+	write_lump(goldsrc::LUMP_NODES,      d.nodes.data(),      nodes_sz);
+	write_lump(goldsrc::LUMP_LEAFS,      d.leafs.data(),      leafs_sz);
+	write_lump(goldsrc::LUMP_MODELS,     d.models.data(),     models_sz);
+
+	return out;
 }
 
 void GoldSrcBSP::set_wad(const Ref<GoldSrcWAD> &wad) {
@@ -594,6 +673,108 @@ int GoldSrcBSP::point_contents(Vector3 godot_pos) const {
 	if (leaf_index < 0 || (size_t)leaf_index >= bsp_data.leafs.size())
 		return goldsrc::CONTENTS_EMPTY;
 	return bsp_data.leafs[leaf_index].contents;
+}
+
+int GoldSrcBSP::point_to_leaf(Vector3 godot_pos) const {
+	if (!parser) return -1;
+	const auto &bsp_data = parser->get_data();
+	if (bsp_data.nodes.empty() || bsp_data.leafs.empty()) return -1;
+
+	float gs_x = -godot_pos.x / scale_factor;
+	float gs_y =  godot_pos.z / scale_factor;
+	float gs_z =  godot_pos.y / scale_factor;
+
+	int node_index = bsp_data.models[0].headnode[0];
+	while (node_index >= 0) {
+		if ((size_t)node_index >= bsp_data.nodes.size()) return -1;
+		const auto &node = bsp_data.nodes[node_index];
+		const auto &plane = bsp_data.planes[node.planenum];
+		float dot = plane.normal[0]*gs_x + plane.normal[1]*gs_y + plane.normal[2]*gs_z;
+		node_index = node.children[dot < plane.dist ? 1 : 0];
+	}
+	int leaf = -(node_index + 1);
+	return ((size_t)leaf < bsp_data.leafs.size()) ? leaf : -1;
+}
+
+int GoldSrcBSP::get_leaf_count() const {
+	if (!parser) return 0;
+	return (int)parser->get_data().leafs.size();
+}
+
+PackedInt32Array GoldSrcBSP::get_leaf_pvs(int leaf_index) const {
+	PackedInt32Array result;
+	if (!parser) return result;
+	const auto &bsp_data = parser->get_data();
+	const auto pvs = bsp_data.decompress_pvs(leaf_index);
+	for (int i = 0; i < (int)pvs.size(); i++)
+		if (pvs[i]) result.append(i);
+	return result;
+}
+
+void GoldSrcBSP::_collect_leaves_in_aabb(int node_idx, const float gs_min[3], const float gs_max[3],
+		PackedInt32Array &result) const {
+	if (node_idx < 0) {
+		// Leaf node: index = ~node_idx (GoldSrc uses -(idx+1))
+		int leaf = -(node_idx + 1);
+		const auto &bsp_data = parser->get_data();
+		if (leaf >= 0 && leaf < (int)bsp_data.leafs.size())
+			result.append(leaf);
+		return;
+	}
+	const auto &bsp_data = parser->get_data();
+	if (node_idx >= (int)bsp_data.nodes.size()) return;
+	const auto &node = bsp_data.nodes[node_idx];
+	const auto &plane = bsp_data.planes[node.planenum];
+
+	// Compute the projection interval [d_near, d_far] of the AABB onto the plane normal.
+	// d_near is the minimum projection (back-side extreme), d_far is the maximum (front-side extreme).
+	float d_near = 0.0f, d_far = 0.0f;
+	for (int i = 0; i < 3; i++) {
+		if (plane.normal[i] >= 0.0f) {
+			d_near += plane.normal[i] * gs_min[i];
+			d_far  += plane.normal[i] * gs_max[i];
+		} else {
+			d_near += plane.normal[i] * gs_max[i];
+			d_far  += plane.normal[i] * gs_min[i];
+		}
+	}
+
+	// children[0] = front (dot >= dist), children[1] = back (dot < dist)
+	if (d_far < plane.dist)
+		_collect_leaves_in_aabb(node.children[1], gs_min, gs_max, result);
+	else if (d_near >= plane.dist)
+		_collect_leaves_in_aabb(node.children[0], gs_min, gs_max, result);
+	else {
+		_collect_leaves_in_aabb(node.children[0], gs_min, gs_max, result);
+		_collect_leaves_in_aabb(node.children[1], gs_min, gs_max, result);
+	}
+}
+
+PackedInt32Array GoldSrcBSP::get_leaves_in_aabb(AABB godot_aabb) const {
+	PackedInt32Array result;
+	if (!parser) return result;
+	const auto &bsp_data = parser->get_data();
+	if (bsp_data.nodes.empty() || bsp_data.leafs.empty()) return result;
+
+	// Convert Godot AABB to GoldSrc space.
+	// Godot → GoldSrc: gs_x = -godot_x/sf, gs_y = godot_z/sf, gs_z = godot_y/sf
+	// The x-axis negation swaps min/max for that axis.
+	Vector3 g_min = godot_aabb.position;
+	Vector3 g_max = godot_aabb.position + godot_aabb.size;
+
+	float gs_min[3] = {
+		-g_max.x / scale_factor,   // gs X: negated, so godot max_x → gs min_x
+		 g_min.z / scale_factor,   // gs Y = godot Z
+		 g_min.y / scale_factor,   // gs Z = godot Y
+	};
+	float gs_max[3] = {
+		-g_min.x / scale_factor,
+		 g_max.z / scale_factor,
+		 g_max.y / scale_factor,
+	};
+
+	_collect_leaves_in_aabb(bsp_data.models[0].headnode[0], gs_min, gs_max, result);
+	return result;
 }
 
 Ref<ImageTexture> GoldSrcBSP::find_texture(const string &name) const {
@@ -907,8 +1088,18 @@ void GoldSrcBSP::build_mesh() {
 			}
 		}
 
-		// Create a Node3D for this model
-		Node3D *model_node = memnew(Node3D);
+		// Create a node for this model. Worldspawn is a plain container; brush
+		// entities are AnimatableBody3D roots so their entity transform is the
+		// physical/rendered brush transform.
+		Node3D *model_node = nullptr;
+		AnimatableBody3D *body_node = nullptr;
+		if (m == 0) {
+			model_node = memnew(Node3D);
+		} else {
+			body_node = memnew(AnimatableBody3D);
+			body_node->set_collision_mask(0);
+			model_node = body_node;
+		}
 		String node_name;
 		if (m == 0) {
 			node_name = "worldspawn";
@@ -961,6 +1152,7 @@ void GoldSrcBSP::build_mesh() {
 
 		struct SpatialGroup {
 			vector<FaceRef> face_refs;
+			vector<int> pvs_leaves;
 			string label;
 		};
 		vector<SpatialGroup> spatial_groups;
@@ -970,14 +1162,17 @@ void GoldSrcBSP::build_mesh() {
 			int root_node = bsp_data.models[0].headnode[0];
 
 			vector<vector<int>> bsp_groups;
+			vector<vector<int>> bsp_leaf_groups;
 			vector<int> orphan_indices;
-			collect_spatial_groups(bsp_data.nodes, bsp_data.raw_to_parsed,
-				root_node, 0, TARGET_DEPTH, bsp_groups, orphan_indices);
+			collect_spatial_groups(bsp_data.nodes, bsp_data.leafs, bsp_data.raw_to_parsed,
+				root_node, 0, TARGET_DEPTH, bsp_groups, bsp_leaf_groups, orphan_indices);
 
 			// Convert parsed face indices to FaceRef vectors
 			for (size_t gi = 0; gi < bsp_groups.size(); gi++) {
 				SpatialGroup sg;
 				sg.label = "spatial_" + std::to_string(gi);
+				if (gi < bsp_leaf_groups.size())
+					sg.pvs_leaves = bsp_leaf_groups[gi];
 				for (int parsed_idx : bsp_groups[gi]) {
 					if (parsed_idx >= 0 && parsed_idx < (int)bsp_data.faces.size()) {
 						sg.face_refs.push_back({&bsp_data.faces[parsed_idx], parsed_idx});
@@ -1042,13 +1237,11 @@ void GoldSrcBSP::build_mesh() {
 			sky_body->set_collision_mask(0);
 		}
 
-		// For brush entities (m > 0), wrap meshes + collision in AnimatableBody3D
-		// so GDScript can move them without body conversion. If all faces of this
-		// brush use sky or invisible-wall textures (e.g. func_wall sky dome, {blue
-		// chroma-keyed enclosure), put it on MASK_WORLD_SKY so projectiles/hitscans
-		// pass through like worldspawn sky. Players still collide (MASK_WORLD_AND_CLIP
-		// includes the sky bit).
-		AnimatableBody3D *body_node = nullptr;
+		// For brush entities (m > 0), the entity root itself is the
+		// AnimatableBody3D. If all faces of this brush use sky or invisible-wall
+		// textures (e.g. func_wall sky dome, {blue chroma-keyed enclosure), put it
+		// on MASK_WORLD_SKY so projectiles/hitscans pass through like worldspawn
+		// sky. Players still collide (MASK_WORLD_AND_CLIP includes the sky bit).
 		if (m > 0) {
 			int sky_like_faces = 0, solid_faces = 0;
 			for (const auto &fr : faces_for_model) {
@@ -1058,11 +1251,7 @@ void GoldSrcBSP::build_mesh() {
 				else solid_faces++;
 			}
 			bool sky_brush = sky_like_faces > 0 && solid_faces == 0;
-			body_node = memnew(AnimatableBody3D);
-			body_node->set_name("Body");
 			body_node->set_collision_layer(sky_brush ? (1u << 8) : 1u);
-			body_node->set_collision_mask(0);
-			model_node->add_child(body_node);
 		}
 
 		for (size_t sg_idx = 0; sg_idx < spatial_groups.size(); sg_idx++) {
@@ -1070,12 +1259,20 @@ void GoldSrcBSP::build_mesh() {
 
 			// For worldspawn spatial groups, create an intermediate Node3D
 			// so each texture-group MeshInstance3D gets a localized AABB.
-			// For brush entities, meshes go inside the AnimatableBody3D.
+			// For brush entities, meshes go directly inside the AnimatableBody3D root.
 			Node3D *group_parent = (m > 0) ? (Node3D *)body_node : model_node;
 			if (m == 0 && spatial_groups.size() > 1) {
 				group_parent = memnew(Node3D);
 				group_parent->set_name(String(sg.label.c_str()));
 				model_node->add_child(group_parent);
+				if (!sg.pvs_leaves.empty()) {
+					PackedInt32Array leaves_arr;
+					leaves_arr.resize((int64_t)sg.pvs_leaves.size());
+					int32_t *w = leaves_arr.ptrw();
+					for (size_t li = 0; li < sg.pvs_leaves.size(); li++)
+						w[li] = sg.pvs_leaves[li];
+					group_parent->set_meta("pvs_leaves", leaves_arr);
+				}
 			}
 
 			// Group this spatial group's faces by texture
@@ -1400,11 +1597,14 @@ void GoldSrcBSP::build_mesh() {
 			}
 
 			MeshInstance3D *mesh_instance = memnew(MeshInstance3D);
-			mesh_instance->set_name(String(tex_name.c_str()));
+			mesh_instance->set_name(tex_name.empty() ? String("unnamed") : String(tex_name.c_str()));
 			mesh_instance->set_mesh(arr_mesh);
 			mesh_instance->set_layer_mask(2); // Layer 2 only — map lights (layer 1) skip BSP, weapon lights (layers 1+2) hit it
 			if (is_sky_surface) {
 				mesh_instance->set_meta("is_sky_surface", true);
+			}
+			if (is_water) {
+				mesh_instance->set_meta("is_water_surface", true);
 			}
 
 			// Animated texture: +0name–+9name (primary) or +aname–+jname (alternate).
@@ -1490,8 +1690,7 @@ void GoldSrcBSP::build_mesh() {
 					memdelete(water);
 				}
 			}
-			build_occluders(model_node);
-			log_timing("water + occluders");
+			log_timing("water volumes");
 		} else {
 			// Brush entity collision: convex shapes from BSP leaf decomposition.
 			// To revert to triangle-soup collision: change to build_brush_concave.

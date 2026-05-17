@@ -15,9 +15,9 @@ A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
 - Hull 0 collision (StaticBody3D for worldspawn, AnimatableBody3D for brush entities)
 - Water volume extraction as Area3D with ConvexPolygonShape3D
 - Automatic occluder generation (OccluderInstance3D + PolygonOccluder3D) — see [Occluder Generation](#occluder-generation) below
-- PVS (Potentially Visible Set) data parsing with RLE decompression — used by `debug_occluders` mode to validate occluder effectiveness against the BSP's precomputed visibility data
+- PVS (Potentially Visible Set) data parsing with RLE decompression — exposed for runtime visibility culling via `VisibilityManager` and used by `debug_occluders` mode to validate occluder effectiveness; a stripped PVS blob (PLANES, VISIBILITY, NODES, LEAFS, MODELS only) is baked into each `.scn` as `pvs_data` metadata so `VisibilityManager` can initialize without the original `.bsp`
 - Worldspawn spatial splitting — walks the BSP tree to group faces into spatial clusters, producing separate MeshInstance3D nodes per group for better frustum culling
-- Brush entity geometry wrapped in AnimatableBody3D ("Body") with meshes and collision inside, ready for GDScript movement without body conversion
+- Brush entity root nodes are AnimatableBody3D instances — meshes and collision shapes are direct children, so entity scripts extend AnimatableBody3D directly without a body wrapper
 - Point entity nodes (Node3D) with entity properties stored as metadata — classname, targetname, origin, angles, and all other key-value pairs are accessible from GDScript via `node.get_meta("entity")`
 - Entity lump parsing (key-value dictionaries accessible from GDScript)
 - **Ambient cube light grid baking** — traces rays in 6 directions from a 3D grid through the BSP tree, samples lightmaps at hit points, and outputs slice images for `ImageTexture3D` construction. Includes flood-fill of solid cells to prevent trilinear interpolation artifacts. Provides spatially-varying directional ambient lighting for dynamic models
@@ -90,7 +90,7 @@ Options:
 - `--overbright` — lightmap brightness multiplier (default: `1.0`)
 - `--rotate` — rotate 180 degrees around Y to match alternate coordinate conventions
 
-Outputs a `.scn` PackedScene file per map with all geometry, collision, occluders, and entity nodes baked in.
+Outputs a `.scn` PackedScene file per map with all geometry, collision, occluders, entity nodes, and a `pvs_data` PackedByteArray stored as root node metadata for `VisibilityManager` initialization.
 
 ## Occluder Generation
 
@@ -98,7 +98,7 @@ The importer automatically generates `OccluderInstance3D` + `PolygonOccluder3D` 
 
 ### Algorithm
 
-1. **Face collection** — worldspawn wall faces are gathered. Sky, water, transparent, and tool textures are excluded. Faces whose normal aligns with `occluder_exclude_normal` beyond `occluder_exclude_threshold` are excluded (default: horizontal faces such as floors and ceilings; set threshold to `0` to disable).
+1. **Face collection** — worldspawn wall faces are gathered. Sky, water, transparent, and tool textures are excluded.
 2. **Coplanar grouping** — faces are grouped by quantized plane key (normal + distance) to find walls that share a plane.
 3. **Connected components** — within each plane group, union-find on shared vertices identifies contiguous face patches.
 4. **Boundary edge merging** — shared interior edges cancel out, leaving only the true outer boundary of each patch (plus any interior holes from doorways/windows).
@@ -106,8 +106,8 @@ The importer automatically generates `OccluderInstance3D` + `PolygonOccluder3D` 
    - **Single loop** → solid wall, one merged occluder.
    - **Multiple loops, holes BSP-solid** → the "holes" are backed by solid geometry (e.g. recessed detail), so one merged occluder from the outer loop is safe.
    - **Multiple loops, real openings** → doorways/windows detected via BSP tree traversal. The algorithm re-runs edge cancellation on only the qualifying faces (area ≥ `occluder_min_area`). Adjacent solid panels merge into one occluder; the doorway spaces become the natural exterior boundary rather than interior holes.
-6. **Boundary filtering** — faces whose plane sits within `occluder_boundary_margin` GoldSrc units of the worldspawn bbox are skipped. Players can never be on both sides of an outer-hull face, so it provides no occlusion value.
-7. **Importance sorting and capping** — all candidate occluders are sorted by polygon area (largest first). If `occluder_max_count` is non-zero, only the top N are kept. This provides a performance budget while ensuring the most impactful occluders are always retained.
+6. **PVS-coverage filtering** — a greedy pass drops candidates whose marginal contribution to covering BSP-visible leaf pairs falls below `occluder_pvs_min_gain`. This removes occluders that add geometry overhead without meaningfully improving culling coverage. Runs before the area sort so the count cap applies to survivors only.
+7. **Importance sorting and capping** — surviving candidates are sorted by polygon area (largest first). If `occluder_max_count` is non-zero, only the top N are kept.
 8. **Polygon cleanup** — duplicate and collinear vertices are removed, and each polygon is pre-validated against Godot's triangulator before being committed as an occluder.
 
 ### Import Parameters
@@ -115,19 +115,15 @@ The importer automatically generates `OccluderInstance3D` + `PolygonOccluder3D` 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `occluder_min_area` | 65535 | Minimum face area in GoldSrc units² for a face to qualify as an occluder. ~256×256 at default. Raise to get fewer, larger occluders; lower to include smaller walls. |
-| `occluder_boundary_margin` | 512 | Faces within this many GoldSrc units of the map's bounding box boundary are skipped. Outer-hull faces provide no occlusion value since the player is never on both sides of them. |
-| `occluder_exclude_normal` | `Vector3(0, 1, 0)` | Faces whose normal aligns with this axis (in Godot space) beyond `occluder_exclude_threshold` are excluded. Default excludes horizontal faces (floors/ceilings). For vertical levels, set this to the axis that is "horizontal" in that level. |
-| `occluder_exclude_threshold` | 0.7 | Alignment threshold for `occluder_exclude_normal`: faces where `abs(dot(face_normal, exclude_normal)) > threshold` are excluded. Set to `0` to disable normal-based exclusion entirely. |
-| `occluder_max_count` | 0 | Maximum number of occluders to generate. Candidates are sorted by area (largest first) and the top N are kept. `0` = unlimited. Useful for bounding culling overhead on complex maps. |
+| `occluder_pvs_min_gain` | 500 | Greedy PVS-coverage filter threshold. Candidates whose marginal BSP-visible leaf-pair coverage is below this value are dropped before area sorting. `0` = disabled (keep all candidates). |
+| `occluder_max_count` | 0 | Maximum number of occluders after sorting by area. `0` = unlimited. Applied after the PVS-coverage filter. |
 
 These can be set per-map in the Godot Import tab or directly in the `.bsp.import` file:
 
 ```ini
 [params]
 occluder_min_area=65535.0
-occluder_boundary_margin=512.0
-occluder_exclude_normal=Vector3(0, 1, 0)
-occluder_exclude_threshold=0.7
+occluder_pvs_min_gain=500
 occluder_max_count=0
 ```
 
@@ -175,12 +171,23 @@ for child in bsp.get_children():
 var entities = bsp.get_entities()  # Array of Dictionaries
 
 # Optional: tune occluder generation (before build_mesh)
-bsp.occluder_min_area = 65535.0              # min face area in GoldSrc units²
-bsp.occluder_boundary_margin = 512.0         # skip faces near outer map hull
-bsp.occluder_exclude_normal = Vector3(0,1,0) # Godot-space axis to exclude (default: Y-up = horizontal)
-bsp.occluder_exclude_threshold = 0.7         # exclusion strength; 0 = disabled
-bsp.occluder_max_count = 0                   # cap on occluder count (0 = unlimited); sorted by area
-bsp.debug_occluders = true                   # prints PVS validation, overfill checks, pipeline stats
+bsp.occluder_min_area = 65535.0   # min face area in GoldSrc units²
+bsp.occluder_pvs_min_gain = 500   # greedy PVS-coverage filter; 0 = disabled
+bsp.occluder_max_count = 0        # cap on occluder count after PVS filter (0 = unlimited)
+bsp.debug_occluders = true        # prints PVS validation, overfill checks, pipeline stats
+
+# PVS query API (useful for runtime visibility culling)
+var leaf_count = bsp.get_leaf_count()                  # total BSP leaf count
+var leaf = bsp.point_to_leaf(Vector3(0, 0, 0))         # leaf index for a world position
+var visible_leaves = bsp.get_leaf_pvs(leaf)            # PackedInt32Array of PVS-visible leaf indices
+var aabb_leaves = bsp.get_leaves_in_aabb(my_aabb)      # PackedInt32Array of leaves touching an AABB
+
+# Export a stripped PVS blob (PLANES, VISIBILITY, NODES, LEAFS, MODELS only).
+# Embed this in .scn metadata so VisibilityManager can initialize without the .bsp.
+var pvs_blob: PackedByteArray = bsp.get_pvs_blob()
+
+# Load a stripped PVS blob for PVS-only queries (no WADs or build_mesh needed)
+bsp.load_bsp_from_data(pvs_blob)
 
 # Bake ambient cube light grid (call after build_mesh)
 var grid = bsp.bake_light_grid(32.0)  # cell size in GoldSrc units
@@ -191,6 +198,46 @@ var grid = bsp.bake_light_grid(32.0)  # cell size in GoldSrc units
 #   dir_slices: Array of 6 Arrays of Images — one per axis direction
 #     (+X, -X, +Y, -Y, +Z, -Z), each array contains depth-slice Images
 #     for ImageTexture3D construction
+```
+
+### VisibilityManager
+
+BSP PVS-based runtime visibility culling. Load the BSP once (no WADs or mesh build needed) and query observer/entity visibility per-frame.
+
+```gdscript
+var vm = VisibilityManager.new()
+add_child(vm)
+
+# Preferred: initialize from pvs_data metadata baked into the .scn at import time.
+# No .bsp file required at runtime.
+var pvs_blob: PackedByteArray = map_root.get_meta("pvs_data", PackedByteArray())
+var leaf_count = vm.setup_from_data(pvs_blob, 0.025)  # returns leaf count; 0 = failure
+
+# Alternative: load directly from a .bsp file
+var leaf_count = vm.setup("maps/mymap.bsp", 0.025)
+
+# Observers — a viewpoint whose PVS is cached and updated lazily (only on leaf change)
+var cam_handle = vm.add_observer(0, camera.global_position)   # peer_id=0 for local camera
+vm.update_observer_position(cam_handle, camera.global_position)
+
+# Entities — tracked by world-space AABB; leaf set recomputes when AABB changes
+var ent_handle = vm.register_entity(my_node.get_aabb())
+vm.update_entity_aabb(ent_handle, my_node.get_aabb())
+var visible = vm.is_entity_visible_to_observer(ent_handle, cam_handle)
+
+# Leaf sets — for pre-baked leaf arrays (e.g. worldspawn spatial groups)
+var set_handle = vm.register_leaf_set(packed_int32_leaves)
+var ls_visible = vm.is_leaf_set_visible_to_observer(set_handle, cam_handle)
+
+# Point queries
+var leaf_vis = vm.is_leaf_visible_to_observer(leaf_index, cam_handle)
+var pos_vis  = vm.is_position_visible_to_observer(some_pos, cam_handle)
+
+# Cleanup
+vm.remove_observer(cam_handle)
+vm.unregister_entity(ent_handle)
+vm.unregister_leaf_set(set_handle)
+vm.teardown()
 ```
 
 ### GoldSrcMDL

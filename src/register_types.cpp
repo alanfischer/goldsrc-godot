@@ -9,6 +9,7 @@
 #include "nodes/goldsrc_spr.h"
 #include "nodes/goldsrc_bsp.h"
 #include "nodes/goldsrc_mdl.h"
+#include "nodes/visibility_manager.h"
 
 using namespace godot;
 
@@ -21,6 +22,7 @@ void initialize_goldsrc_module(ModuleInitializationLevel p_level) {
 	GDREGISTER_CLASS(GoldSrcSPR);
 	GDREGISTER_CLASS(GoldSrcBSP);
 	GDREGISTER_CLASS(GoldSrcMDL);
+	GDREGISTER_CLASS(VisibilityManager);
 }
 
 void uninitialize_goldsrc_module(ModuleInitializationLevel p_level) {
