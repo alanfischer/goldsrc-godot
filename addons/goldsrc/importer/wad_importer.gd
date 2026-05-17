@@ -76,7 +76,7 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 	var extract: bool = options.get("extract_textures", true)
 
 	var wad := GoldSrcWAD.new()
-	var err := wad.load_wad(source_file)
+	var err = wad.load_wad(source_file)
 	if err != OK:
 		push_error("WAD Importer: Failed to load '%s': %s" % [source_file, error_string(err)])
 		return err
@@ -90,13 +90,13 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 
 		DirAccess.make_dir_recursive_absolute(output_dir)
 
-		var names := wad.get_texture_names()
+		var names = wad.get_texture_names()
 		var count := 0
 		for tex_name in names:
-			var tex := wad.get_texture(tex_name)
+			var tex = wad.get_texture(tex_name)
 			if tex == null:
 				continue
-			var img := tex.get_image()
+			var img = tex.get_image()
 			if img == null:
 				continue
 			var png_path := output_dir.path_join(tex_name.to_lower() + ".png")

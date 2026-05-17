@@ -64,7 +64,7 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 	var mdl := GoldSrcMDL.new()
 	mdl.set_scale_factor(scale_factor)
 
-	var err := mdl.load_mdl(source_file)
+	var err = mdl.load_mdl(source_file)
 	if err != OK:
 		push_error("MDL Importer: Failed to load '%s': %s" % [source_file, error_string(err)])
 		return err

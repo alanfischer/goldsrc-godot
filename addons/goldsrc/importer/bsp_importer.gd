@@ -185,5 +185,3 @@ func _instantiate_entity_models(root: Node3D, model_dir: String) -> void:
 			node_name = "unnamed_entity_model"
 		instance.name = node_name
 		child.add_child(instance)
-
-
