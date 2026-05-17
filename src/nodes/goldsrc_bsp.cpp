@@ -1597,7 +1597,7 @@ void GoldSrcBSP::build_mesh() {
 			}
 
 			MeshInstance3D *mesh_instance = memnew(MeshInstance3D);
-			mesh_instance->set_name(String(tex_name.c_str()));
+			mesh_instance->set_name(tex_name.empty() ? String("unnamed") : String(tex_name.c_str()));
 			mesh_instance->set_mesh(arr_mesh);
 			mesh_instance->set_layer_mask(2); // Layer 2 only — map lights (layer 1) skip BSP, weapon lights (layers 1+2) hit it
 			if (is_sky_surface) {
@@ -1732,9 +1732,7 @@ void GoldSrcBSP::build_mesh() {
 			continue;
 		}
 
-		AnimatableBody3D *node = memnew(AnimatableBody3D);
-		node->set_collision_layer(0);
-		node->set_collision_mask(0);
+		Node3D *node = memnew(Node3D);
 
 		// Set position from "origin" key
 		auto origin_it = ent.properties.find("origin");
