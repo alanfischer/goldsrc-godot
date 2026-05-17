@@ -8,6 +8,7 @@
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/vector3.hpp>
 #include <godot_cpp/variant/aabb.hpp>
+#include <godot_cpp/variant/packed_byte_array.hpp>
 
 #include "../parsers/bsp_parser.h"
 #include "goldsrc_wad.h"
@@ -25,6 +26,13 @@ public:
 	~GoldSrcBSP() = default;
 
 	godot::Error load_bsp(const godot::String &path);
+	godot::Error load_bsp_from_data(const godot::PackedByteArray &data);
+
+	// Returns a stripped BSP30 blob containing only the lumps needed for PVS
+	// queries (PLANES, VISIBILITY, NODES, LEAFS, MODELS). Suitable for storing
+	// as scene metadata so VisibilityManager can run without the original .bsp.
+	godot::PackedByteArray get_pvs_blob() const;
+
 	void set_wad(const godot::Ref<GoldSrcWAD> &wad);
 	void add_wad(const godot::Ref<GoldSrcWAD> &wad);
 	godot::Array get_entities() const;

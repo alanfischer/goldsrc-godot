@@ -469,6 +469,8 @@ GoldSrcBSP::GoldSrcBSP() {
 
 void GoldSrcBSP::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("load_bsp", "path"), &GoldSrcBSP::load_bsp);
+	ClassDB::bind_method(D_METHOD("load_bsp_from_data", "data"), &GoldSrcBSP::load_bsp_from_data);
+	ClassDB::bind_method(D_METHOD("get_pvs_blob"), &GoldSrcBSP::get_pvs_blob);
 	ClassDB::bind_method(D_METHOD("set_wad", "wad"), &GoldSrcBSP::set_wad);
 	ClassDB::bind_method(D_METHOD("add_wad", "wad"), &GoldSrcBSP::add_wad);
 	ClassDB::bind_method(D_METHOD("get_entities"), &GoldSrcBSP::get_entities);
@@ -531,6 +533,56 @@ Error GoldSrcBSP::load_bsp(const String &path) {
 		" (", (int64_t)parser->get_data().faces.size(), " faces, ",
 		(int64_t)parser->get_data().entities.size(), " entities)");
 	return OK;
+}
+
+Error GoldSrcBSP::load_bsp_from_data(const PackedByteArray &data) {
+	if (data.is_empty()) return ERR_INVALID_DATA;
+	parser = make_unique<goldsrc::BSPParser>();
+	if (!parser->parse(data.ptr(), data.size())) {
+		parser.reset();
+		return ERR_PARSE_ERROR;
+	}
+	mesh_built = false;
+	return OK;
+}
+
+PackedByteArray GoldSrcBSP::get_pvs_blob() const {
+	if (!parser) return PackedByteArray();
+	const auto &d = parser->get_data();
+	if (d.nodes.empty() || d.leafs.empty()) return PackedByteArray();
+
+	size_t planes_sz = d.planes.size()     * sizeof(goldsrc::BSPPlane);
+	size_t vis_sz    = d.visibility.size();
+	size_t nodes_sz  = d.nodes.size()      * sizeof(goldsrc::BSPNode);
+	size_t leafs_sz  = d.leafs.size()      * sizeof(goldsrc::BSPLeaf);
+	size_t models_sz = d.models.size()     * sizeof(goldsrc::BSPModel);
+	size_t hdr_sz    = sizeof(goldsrc::BSPHeader);
+	size_t total     = hdr_sz + planes_sz + vis_sz + nodes_sz + leafs_sz + models_sz;
+
+	PackedByteArray out;
+	out.resize((int64_t)total);
+	uint8_t *p = out.ptrw();
+	memset(p, 0, total);
+
+	auto *hdr = reinterpret_cast<goldsrc::BSPHeader *>(p);
+	hdr->version = goldsrc::HLBSP_VERSION;
+
+	size_t cur = hdr_sz;
+	auto write_lump = [&](int idx, const void *data, size_t sz) {
+		if (sz == 0) return;
+		hdr->lumps[idx].fileofs = (int32_t)cur;
+		hdr->lumps[idx].filelen = (int32_t)sz;
+		memcpy(p + cur, data, sz);
+		cur += sz;
+	};
+
+	write_lump(goldsrc::LUMP_PLANES,     d.planes.data(),     planes_sz);
+	write_lump(goldsrc::LUMP_VISIBILITY, d.visibility.data(), vis_sz);
+	write_lump(goldsrc::LUMP_NODES,      d.nodes.data(),      nodes_sz);
+	write_lump(goldsrc::LUMP_LEAFS,      d.leafs.data(),      leafs_sz);
+	write_lump(goldsrc::LUMP_MODELS,     d.models.data(),     models_sz);
+
+	return out;
 }
 
 void GoldSrcBSP::set_wad(const Ref<GoldSrcWAD> &wad) {

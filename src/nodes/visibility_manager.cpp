@@ -8,6 +8,7 @@ using namespace godot;
 
 void VisibilityManager::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("setup", "bsp_path", "scale_factor"), &VisibilityManager::setup);
+	ClassDB::bind_method(D_METHOD("setup_from_data", "pvs_blob", "scale_factor"), &VisibilityManager::setup_from_data);
 	ClassDB::bind_method(D_METHOD("teardown"), &VisibilityManager::teardown);
 	ClassDB::bind_method(D_METHOD("is_ready"), &VisibilityManager::is_ready);
 	ClassDB::bind_method(D_METHOD("get_leaf_count"), &VisibilityManager::get_leaf_count);
@@ -37,6 +38,18 @@ int VisibilityManager::setup(String bsp_path, float scale_factor) {
 	bsp = memnew(GoldSrcBSP);
 	bsp->set_scale_factor(scale_factor);
 	if (bsp->load_bsp(bsp_path) != Error::OK) {
+		memdelete(bsp);
+		bsp = nullptr;
+		return 0;
+	}
+	return bsp->get_leaf_count();
+}
+
+int VisibilityManager::setup_from_data(PackedByteArray pvs_blob, float scale_factor) {
+	teardown();
+	bsp = memnew(GoldSrcBSP);
+	bsp->set_scale_factor(scale_factor);
+	if (bsp->load_bsp_from_data(pvs_blob) != Error::OK) {
 		memdelete(bsp);
 		bsp = nullptr;
 		return 0;

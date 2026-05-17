@@ -15,7 +15,7 @@ A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
 - Hull 0 collision (StaticBody3D for worldspawn, AnimatableBody3D for brush entities)
 - Water volume extraction as Area3D with ConvexPolygonShape3D
 - Automatic occluder generation (OccluderInstance3D + PolygonOccluder3D) — see [Occluder Generation](#occluder-generation) below
-- PVS (Potentially Visible Set) data parsing with RLE decompression — exposed for runtime visibility culling via `VisibilityManager` and used by `debug_occluders` mode to validate occluder effectiveness
+- PVS (Potentially Visible Set) data parsing with RLE decompression — exposed for runtime visibility culling via `VisibilityManager` and used by `debug_occluders` mode to validate occluder effectiveness; a stripped PVS blob (PLANES, VISIBILITY, NODES, LEAFS, MODELS only) is baked into each `.scn` as `pvs_data` metadata so `VisibilityManager` can initialize without the original `.bsp`
 - Worldspawn spatial splitting — walks the BSP tree to group faces into spatial clusters, producing separate MeshInstance3D nodes per group for better frustum culling
 - Brush entity root nodes are AnimatableBody3D instances — meshes and collision shapes are direct children, so entity scripts extend AnimatableBody3D directly without a body wrapper
 - Point entity nodes (Node3D) with entity properties stored as metadata — classname, targetname, origin, angles, and all other key-value pairs are accessible from GDScript via `node.get_meta("entity")`
@@ -90,7 +90,7 @@ Options:
 - `--overbright` — lightmap brightness multiplier (default: `1.0`)
 - `--rotate` — rotate 180 degrees around Y to match alternate coordinate conventions
 
-Outputs a `.scn` PackedScene file per map with all geometry, collision, occluders, and entity nodes baked in.
+Outputs a `.scn` PackedScene file per map with all geometry, collision, occluders, entity nodes, and a `pvs_data` PackedByteArray stored as root node metadata for `VisibilityManager` initialization.
 
 ## Occluder Generation
 
@@ -182,6 +182,13 @@ var leaf = bsp.point_to_leaf(Vector3(0, 0, 0))         # leaf index for a world 
 var visible_leaves = bsp.get_leaf_pvs(leaf)            # PackedInt32Array of PVS-visible leaf indices
 var aabb_leaves = bsp.get_leaves_in_aabb(my_aabb)      # PackedInt32Array of leaves touching an AABB
 
+# Export a stripped PVS blob (PLANES, VISIBILITY, NODES, LEAFS, MODELS only).
+# Embed this in .scn metadata so VisibilityManager can initialize without the .bsp.
+var pvs_blob: PackedByteArray = bsp.get_pvs_blob()
+
+# Load a stripped PVS blob for PVS-only queries (no WADs or build_mesh needed)
+bsp.load_bsp_from_data(pvs_blob)
+
 # Bake ambient cube light grid (call after build_mesh)
 var grid = bsp.bake_light_grid(32.0)  # cell size in GoldSrc units
 # Returns Dictionary with:
@@ -201,7 +208,12 @@ BSP PVS-based runtime visibility culling. Load the BSP once (no WADs or mesh bui
 var vm = VisibilityManager.new()
 add_child(vm)
 
-# Load BSP for PVS queries (returns leaf count; 0 = failure)
+# Preferred: initialize from pvs_data metadata baked into the .scn at import time.
+# No .bsp file required at runtime.
+var pvs_blob: PackedByteArray = map_root.get_meta("pvs_data", PackedByteArray())
+var leaf_count = vm.setup_from_data(pvs_blob, 0.025)  # returns leaf count; 0 = failure
+
+# Alternative: load directly from a .bsp file
 var leaf_count = vm.setup("maps/mymap.bsp", 0.025)
 
 # Observers — a viewpoint whose PVS is cached and updated lazily (only on leaf change)

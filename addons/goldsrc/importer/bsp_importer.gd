@@ -117,6 +117,12 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 
 	_instantiate_entity_models(root, model_directory)
 
+	# Bake stripped PVS data (PLANES/NODES/LEAFS/VISIBILITY/MODELS only) so
+	# VisibilityManager can initialise from the .scn without the original .bsp.
+	var pvs_blob: PackedByteArray = bsp.get_pvs_blob()
+	if not pvs_blob.is_empty():
+		root.set_meta("pvs_data", pvs_blob)
+
 	_set_owner_recursive(root, root)
 
 	# Pack and save

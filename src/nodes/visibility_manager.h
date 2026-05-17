@@ -36,6 +36,7 @@ public:
 	// Load BSP for query-only (no mesh build, no WADs needed).
 	// Returns leaf count on success, 0 on failure.
 	int setup(godot::String bsp_path, float scale_factor);
+	int setup_from_data(godot::PackedByteArray pvs_blob, float scale_factor);
 	void teardown();
 	bool is_ready() const;
 	int get_leaf_count() const;
