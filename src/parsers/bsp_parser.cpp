@@ -1,4 +1,5 @@
 #include "bsp_parser.h"
+#include "parse_utils.h"
 #include "texture_decode.h"
 #include <cstring>
 #include <cmath>
@@ -10,19 +11,15 @@ namespace goldsrc {
 
 template <typename T>
 static vector<T> read_lump(const uint8_t *data, size_t file_size, const BSPLump &lump) {
-	vector<T> result;
-	if (lump.fileofs < 0 || lump.filelen <= 0) return result;
-	if ((size_t)lump.fileofs + lump.filelen > file_size) return result;
-	size_t count = lump.filelen / sizeof(T);
-	result.resize(count);
-	memcpy(result.data(), data + lump.fileofs, count * sizeof(T));
-	return result;
+	if (lump.fileofs < 0 || lump.filelen <= 0) return {};
+	if ((size_t)lump.fileofs + lump.filelen > file_size) return {};
+	return read_arr<T>(data, (size_t)lump.fileofs, lump.filelen / sizeof(T));
 }
 
 bool BSPParser::parse(const uint8_t *data, size_t size) {
 	if (size < sizeof(BSPHeader)) return false;
 
-	memcpy(&header, data, sizeof(BSPHeader));
+	header = read_from<BSPHeader>(data);
 
 	if (header.version != HLBSP_VERSION) {
 		return false;
@@ -85,50 +82,47 @@ void BSPParser::parse_textures(const uint8_t *data, size_t size) {
 	// Need at least 4 bytes for nummiptex
 	if (lump_size < 4) return;
 
-	int32_t count;
-	memcpy(&count, tex_base, sizeof(int32_t));
+	int32_t count = read_from<int32_t>(tex_base);
 	if (count <= 0) return;
 
 	// Validate offset array fits: 4 + count * 4
 	size_t offsets_end = 4 + (size_t)count * sizeof(int32_t);
 	if (offsets_end > lump_size) return;
 
-	const int32_t *offsets = reinterpret_cast<const int32_t *>(tex_base + 4);
-
 	bsp_data.textures.resize(count);
 
 	for (int32_t i = 0; i < count; i++) {
-		int32_t ofs = offsets[i];
+		int32_t ofs = read_from<int32_t>(tex_base + 4 + (size_t)i * sizeof(int32_t));
 		if (ofs < 0) continue;
 
 		// Validate miptex header fits within lump
 		if ((size_t)ofs + sizeof(BSPMipTex) > lump_size) continue;
 
-		const BSPMipTex *miptex = reinterpret_cast<const BSPMipTex *>(tex_base + ofs);
+		BSPMipTex miptex = read_from<BSPMipTex>(tex_base + ofs);
 
 		BSPTextureData &tex = bsp_data.textures[i];
-		tex.name = string(miptex->name, strnlen(miptex->name, 16));
-		tex.width = miptex->width;
-		tex.height = miptex->height;
+		tex.name = string(miptex.name, strnlen(miptex.name, 16));
+		tex.width = miptex.width;
+		tex.height = miptex.height;
 		tex.has_data = false;
 
 		// If offsets[0] > 0, texture data is embedded in the BSP
-		if (miptex->offsets[0] > 0 && miptex->width > 0 && miptex->height > 0) {
+		if (miptex.offsets[0] > 0 && miptex.width > 0 && miptex.height > 0) {
 			// Guard against overflow: cap dimensions to reasonable BSP limits
-			if (miptex->width > 4096 || miptex->height > 4096) continue;
+			if (miptex.width > 4096 || miptex.height > 4096) continue;
 
-			uint32_t pixels = miptex->width * miptex->height;
+			uint32_t pixels = miptex.width * miptex.height;
 			uint32_t datasize = pixels + (pixels / 4) + (pixels / 16) + (pixels / 64);
 
 			// Validate pixel data + palette (2-byte count + 256*3 palette) fits within lump
-			size_t pixel_start = (size_t)ofs + miptex->offsets[0];
+			size_t pixel_start = (size_t)ofs + miptex.offsets[0];
 			size_t palette_end = pixel_start + datasize + 2 + 256 * 3;
 			if (palette_end > lump_size) continue;
 
 			const uint8_t *pixel_data = tex_base + pixel_start;
 			const uint8_t *palette = tex_base + pixel_start + datasize + 2;
 
-			bool has_transparency = (miptex->name[0] == '{');
+			bool has_transparency = (miptex.name[0] == '{');
 			decode_palette_pixels(pixel_data, palette, pixels, has_transparency, tex.data);
 			tex.has_data = true;
 		}

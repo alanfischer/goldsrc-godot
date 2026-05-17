@@ -1,4 +1,5 @@
 #include "wad_parser.h"
+#include "parse_utils.h"
 #include "texture_decode.h"
 #include <cstring>
 
@@ -9,22 +10,22 @@ namespace goldsrc {
 bool WADParser::parse(const uint8_t *data, size_t size) {
 	if (size < sizeof(WADHeader)) return false;
 
-	const WADHeader *header = reinterpret_cast<const WADHeader *>(data);
+	WADHeader hdr = read_from<WADHeader>(data);
 
-	if (strncmp(header->identification, "WAD2", 4) != 0 &&
-		strncmp(header->identification, "WAD3", 4) != 0) {
+	if (strncmp(hdr.identification, "WAD2", 4) != 0 &&
+		strncmp(hdr.identification, "WAD3", 4) != 0) {
 		return false;
 	}
 
-	int32_t numlumps = header->numlumps;
-	int32_t infotableofs = header->infotableofs;
+	int32_t numlumps = hdr.numlumps;
+	int32_t infotableofs = hdr.infotableofs;
 
 	if (numlumps <= 0 || infotableofs < 0) return false;
 	if ((size_t)infotableofs + (size_t)numlumps * sizeof(WADLumpInfo) > size) {
 		return false;
 	}
 
-	const WADLumpInfo *lumps = reinterpret_cast<const WADLumpInfo *>(data + infotableofs);
+	auto lumps = read_arr<WADLumpInfo>(data, (size_t)infotableofs, (size_t)numlumps);
 
 	for (int32_t i = 0; i < numlumps; i++) {
 		const WADLumpInfo &lump = lumps[i];
@@ -39,13 +40,13 @@ bool WADParser::parse(const uint8_t *data, size_t size) {
 
 		if ((size_t)lump.disksize < sizeof(WADMipTex)) continue;
 
-		const WADMipTex *miptex = reinterpret_cast<const WADMipTex *>(data + lump.filepos);
+		WADMipTex miptex = read_from<WADMipTex>(data + lump.filepos);
 
-		if (miptex->width == 0 || miptex->height == 0 || miptex->offsets[0] == 0) {
+		if (miptex.width == 0 || miptex.height == 0 || miptex.offsets[0] == 0) {
 			continue;
 		}
 
-		decode_texture(miptex, data + lump.filepos, lump.disksize);
+		decode_texture(&miptex, data + lump.filepos, lump.disksize);
 	}
 
 	return true;

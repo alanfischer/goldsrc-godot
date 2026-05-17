@@ -269,7 +269,8 @@ private:
 		const MDLSequenceDesc *seq, int blend,
 		std::vector<ParsedAnimFrame> &frames);
 
-	const MDLHeader *header = nullptr;
+	MDLHeader header_data = {};
+	std::vector<MDLBone> raw_bones;
 	MDLData mdl_data;
 };
 

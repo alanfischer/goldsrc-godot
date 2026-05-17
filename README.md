@@ -16,7 +16,7 @@ A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
 - Water volume extraction as Area3D with ConvexPolygonShape3D
 - Automatic occluder generation (OccluderInstance3D + PolygonOccluder3D) — see [Occluder Generation](#occluder-generation) below
 - PVS (Potentially Visible Set) data parsing with RLE decompression — exposed for runtime visibility culling via `VisibilityManager` and used by `debug_occluders` mode to validate occluder effectiveness; a stripped PVS blob (PLANES, VISIBILITY, NODES, LEAFS, MODELS only) is baked into each `.scn` as `pvs_data` metadata so `VisibilityManager` can initialize without the original `.bsp`
-- Worldspawn spatial splitting — walks the BSP tree to group faces into spatial clusters, producing separate MeshInstance3D nodes per group for better frustum culling
+- Worldspawn spatial splitting — walks the BSP tree to group faces into spatial clusters, producing separate MeshInstance3D nodes per group for better frustum culling; each group node has `pvs_leaves` metadata (PackedInt32Array) for use with `VisibilityManager.register_leaf_set()`
 - Brush entity root nodes are AnimatableBody3D instances — meshes and collision shapes are direct children
 - Point entity root nodes are plain Node3D instances
 - Entity properties stored as metadata on each node — classname, targetname, origin, angles, and all other key-value pairs are accessible from GDScript via `node.get_meta("entity")`
@@ -132,6 +132,113 @@ occluder_max_count=0
 
 Set `debug_occluders = true` on the `GoldSrcBSP` node before calling `build_mesh()` to print a full pipeline report including: face counts, component breakdown by type (solid/solid-holes/real-openings/walk-failures), occluder coverage percentage, overfill checks on merged polygons, and PVS validation (what fraction of BSP-invisible leaf pairs have an occluder plane between them).
 
+## PVS Runtime Visibility Culling
+
+### Concept
+
+BSP maps are divided into convex regions called *leaves*. During map compilation, the compiler precomputes which leaves can see each other — the Potentially Visible Set (PVS) — stored as a run-length–encoded bitfield. Knowing an observer's current leaf lets you look up the full set of visible leaves in O(1) with no raycasting.
+
+`VisibilityManager` wraps this data with two abstractions:
+
+- **Observers** — viewpoints (camera or network peers) whose PVS is cached and updated lazily: the PVS bitfield is only recomputed when the observer crosses a BSP leaf boundary. Positions within the same leaf reuse the cached result at no cost.
+- **Leaf sets** — sets of BSP leaves that represent a tracked object, either derived from an AABB pushed through the BSP tree (for moving entities) or pre-baked from import metadata (for static mesh groups). Visibility is a single bitset scan across the leaf set.
+
+### Data Flow
+
+```
+.bsp import
+    └─ BSP importer strips PVS-relevant lumps (PLANES, VISIBILITY, NODES, LEAFS, MODELS)
+       and bakes them into .scn as pvs_data metadata on the root node
+           └─ runtime: setup_from_data(pvs_data, scale_factor)
+                  └─ VisibilityManager ready — no .bsp file needed at runtime
+```
+
+The `pvs_data` blob is written by both the editor importer and the headless batch converter. Retrieve it from the instantiated map scene:
+
+```gdscript
+var pvs_blob: PackedByteArray = map_root.get_meta("pvs_data", PackedByteArray())
+var leaf_count = vm.setup_from_data(pvs_blob, 0.025)
+if leaf_count == 0:
+    push_error("PVS setup failed — pvs_data missing or corrupt")
+```
+
+### Use Case 1: Rendering Culling
+
+The BSP importer groups worldspawn faces into spatial clusters and emits a separate `MeshInstance3D` per group. Each group node has `pvs_leaves` metadata (a `PackedInt32Array`) stamped by the builder. Register these as leaf sets once on map load, then cull per-frame.
+
+```gdscript
+var vm: VisibilityManager
+var cam_handle: int
+var mesh_leaf_sets: Dictionary  # MeshInstance3D -> leaf_set handle
+
+func _ready() -> void:
+    vm = VisibilityManager.new()
+    add_child(vm)
+
+    var pvs_blob = map_root.get_meta("pvs_data", PackedByteArray())
+    if vm.setup_from_data(pvs_blob, 0.025) == 0:
+        return
+
+    cam_handle = vm.add_observer(0, camera.global_position)
+
+    for mesh_node in map_root.find_children("*", "MeshInstance3D", true, false):
+        if mesh_node.has_meta("pvs_leaves"):
+            var leaves: PackedInt32Array = mesh_node.get_meta("pvs_leaves")
+            mesh_leaf_sets[mesh_node] = vm.register_leaf_set(leaves)
+
+func _process(_delta: float) -> void:
+    vm.update_observer_position(cam_handle, camera.global_position)
+    for mesh_node in mesh_leaf_sets:
+        var handle: int = mesh_leaf_sets[mesh_node]
+        mesh_node.visible = vm.is_leaf_set_visible_to_observer(handle, cam_handle)
+```
+
+### Use Case 2: Network Entity Culling
+
+On a multiplayer server, give each connected peer its own observer. Skip sending entity updates to peers whose PVS doesn't cover the entity's leaves.
+
+```gdscript
+var vm: VisibilityManager
+var peer_handles: Dictionary   # peer_id -> observer handle
+var entity_handles: Dictionary # node -> entity handle
+
+func _ready() -> void:
+    vm = VisibilityManager.new()
+    add_child(vm)
+    var pvs_blob = map_root.get_meta("pvs_data", PackedByteArray())
+    vm.setup_from_data(pvs_blob, 0.025)
+
+func on_peer_connected(peer_id: int, initial_pos: Vector3) -> void:
+    peer_handles[peer_id] = vm.add_observer(peer_id, initial_pos)
+
+func on_peer_disconnected(peer_id: int) -> void:
+    vm.remove_observer(peer_handles[peer_id])
+    peer_handles.erase(peer_id)
+
+func on_peer_moved(peer_id: int, pos: Vector3) -> void:
+    vm.update_observer_position(peer_handles[peer_id], pos)
+
+func register_game_entity(node: Node3D) -> void:
+    entity_handles[node] = vm.register_entity(node.get_aabb())
+
+func on_entity_moved(node: Node3D) -> void:
+    vm.update_entity_aabb(entity_handles[node], node.get_aabb())
+
+func send_updates_to_peer(peer_id: int) -> void:
+    var obs = peer_handles.get(peer_id, -1)
+    if obs == -1:
+        return
+    for node in entity_handles:
+        if vm.is_entity_visible_to_observer(entity_handles[node], obs):
+            send_entity_update(peer_id, node)
+```
+
+### Handle Lifetime
+
+All handles are stable integers until the matching `remove_observer` / `unregister_entity` / `unregister_leaf_set` call. Handles from removed entries are recycled internally — do not use a handle after removal.
+
+Call `teardown()` (or free the node) when unloading a map. All registered observers, entities, and leaf sets are released automatically.
+
 ## Building
 
 Requires CMake 3.22+ and a C++17 compiler.
@@ -203,7 +310,7 @@ var grid = bsp.bake_light_grid(32.0)  # cell size in GoldSrc units
 
 ### VisibilityManager
 
-BSP PVS-based runtime visibility culling. Load the BSP once (no WADs or mesh build needed) and query observer/entity visibility per-frame.
+BSP PVS-based runtime visibility culling. See [PVS Runtime Visibility Culling](#pvs-runtime-visibility-culling) for end-to-end examples.
 
 ```gdscript
 var vm = VisibilityManager.new()
@@ -214,19 +321,22 @@ add_child(vm)
 var pvs_blob: PackedByteArray = map_root.get_meta("pvs_data", PackedByteArray())
 var leaf_count = vm.setup_from_data(pvs_blob, 0.025)  # returns leaf count; 0 = failure
 
-# Alternative: load directly from a .bsp file
+# Alternative: load directly from a .bsp file (no WADs or mesh build needed)
 var leaf_count = vm.setup("maps/mymap.bsp", 0.025)
 
-# Observers — a viewpoint whose PVS is cached and updated lazily (only on leaf change)
-var cam_handle = vm.add_observer(0, camera.global_position)   # peer_id=0 for local camera
+# Observers — a viewpoint with a cached PVS bitfield (one bool per BSP leaf).
+# PVS is recomputed only when the observer crosses a BSP leaf boundary.
+# peer_id=0 is conventional for the local camera; use the multiplayer peer ID for remote players.
+var cam_handle = vm.add_observer(0, camera.global_position)
 vm.update_observer_position(cam_handle, camera.global_position)
 
-# Entities — tracked by world-space AABB; leaf set recomputes when AABB changes
+# Entities — tracked by world-space AABB; leaf set recomputes when AABB changes.
 var ent_handle = vm.register_entity(my_node.get_aabb())
 vm.update_entity_aabb(ent_handle, my_node.get_aabb())
 var visible = vm.is_entity_visible_to_observer(ent_handle, cam_handle)
 
-# Leaf sets — for pre-baked leaf arrays (e.g. worldspawn spatial groups)
+# Leaf sets — for pre-baked leaf arrays (worldspawn spatial groups from pvs_leaves metadata).
+# The leaf set never changes after registration.
 var set_handle = vm.register_leaf_set(packed_int32_leaves)
 var ls_visible = vm.is_leaf_set_visible_to_observer(set_handle, cam_handle)
 
@@ -234,7 +344,7 @@ var ls_visible = vm.is_leaf_set_visible_to_observer(set_handle, cam_handle)
 var leaf_vis = vm.is_leaf_visible_to_observer(leaf_index, cam_handle)
 var pos_vis  = vm.is_position_visible_to_observer(some_pos, cam_handle)
 
-# Cleanup
+# Cleanup — or call teardown() / free the node to release everything at once.
 vm.remove_observer(cam_handle)
 vm.unregister_entity(ent_handle)
 vm.unregister_leaf_set(set_handle)

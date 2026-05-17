@@ -1,4 +1,5 @@
 #include "spr_parser.h"
+#include "parse_utils.h"
 #include <cstring>
 
 using namespace std;
@@ -26,21 +27,21 @@ static void decode_spr_pixels(vector<uint8_t> &dest, const uint8_t *src,
 bool SPRParser::parse(const uint8_t *data, size_t size) {
 	if (size < sizeof(SPRHeader)) return false;
 
-	const SPRHeader *header = reinterpret_cast<const SPRHeader *>(data);
+	SPRHeader header = read_from<SPRHeader>(data);
 
-	if (header->magic != SPR_MAGIC || header->version != SPR_VERSION) {
+	if (header.magic != SPR_MAGIC || header.version != SPR_VERSION) {
 		return false;
 	}
 
-	spr_data.type = static_cast<SPRType>(header->type);
-	spr_data.texture_format = static_cast<SPRTextureFormat>(header->texture_format);
-	spr_data.bounding_radius = header->bounding_radius;
+	spr_data.type = static_cast<SPRType>(header.type);
+	spr_data.texture_format = static_cast<SPRTextureFormat>(header.texture_format);
+	spr_data.bounding_radius = header.bounding_radius;
 
 	size_t offset = sizeof(SPRHeader);
 
 	// Read palette (256 colors, 3 bytes each)
 	if (offset + 2 > size) return false;
-	uint16_t palette_size = *reinterpret_cast<const uint16_t *>(data + offset);
+	uint16_t palette_size = read_from<uint16_t>(data + offset);
 	offset += 2;
 
 	if (palette_size != 256 || offset + palette_size * 3 > size) return false;
@@ -49,16 +50,16 @@ bool SPRParser::parse(const uint8_t *data, size_t size) {
 	memcpy(palette, data + offset, 256 * 3);
 	offset += palette_size * 3;
 
-	for (int32_t i = 0; i < header->num_frames; i++) {
+	for (int32_t i = 0; i < header.num_frames; i++) {
 		if (offset + sizeof(int32_t) > size) return false;
 
-		int32_t frame_type = *reinterpret_cast<const int32_t *>(data + offset);
+		int32_t frame_type = read_from<int32_t>(data + offset);
 		offset += sizeof(int32_t);
 
 		if (frame_type != 0) {
 			// Group sprite — read count and intervals, then frames
 			if (offset + sizeof(int32_t) > size) return false;
-			int32_t group_count = *reinterpret_cast<const int32_t *>(data + offset);
+			int32_t group_count = read_from<int32_t>(data + offset);
 			offset += sizeof(int32_t);
 
 			if (group_count <= 0) continue;
@@ -71,10 +72,10 @@ bool SPRParser::parse(const uint8_t *data, size_t size) {
 			for (int32_t g = 0; g < group_count; g++) {
 				if (offset + 4 * sizeof(int32_t) > size) return false;
 
-				int32_t origin_x = *reinterpret_cast<const int32_t *>(data + offset); offset += 4;
-				int32_t origin_y = *reinterpret_cast<const int32_t *>(data + offset); offset += 4;
-				int32_t width = *reinterpret_cast<const int32_t *>(data + offset); offset += 4;
-				int32_t height = *reinterpret_cast<const int32_t *>(data + offset); offset += 4;
+				int32_t origin_x = read_from<int32_t>(data + offset); offset += 4;
+				int32_t origin_y = read_from<int32_t>(data + offset); offset += 4;
+				int32_t width    = read_from<int32_t>(data + offset); offset += 4;
+				int32_t height   = read_from<int32_t>(data + offset); offset += 4;
 
 				if (width <= 0 || height <= 0 || width > 4096 || height > 4096) return false;
 				size_t pixel_count = (size_t)width * height;
@@ -94,10 +95,10 @@ bool SPRParser::parse(const uint8_t *data, size_t size) {
 			// Single frame
 			if (offset + 4 * sizeof(int32_t) > size) return false;
 
-			int32_t origin_x = *reinterpret_cast<const int32_t *>(data + offset); offset += 4;
-			int32_t origin_y = *reinterpret_cast<const int32_t *>(data + offset); offset += 4;
-			int32_t width = *reinterpret_cast<const int32_t *>(data + offset); offset += 4;
-			int32_t height = *reinterpret_cast<const int32_t *>(data + offset); offset += 4;
+			int32_t origin_x = read_from<int32_t>(data + offset); offset += 4;
+			int32_t origin_y = read_from<int32_t>(data + offset); offset += 4;
+			int32_t width    = read_from<int32_t>(data + offset); offset += 4;
+			int32_t height   = read_from<int32_t>(data + offset); offset += 4;
 
 			if (width <= 0 || height <= 0 || width > 4096 || height > 4096) return false;
 			size_t pixel_count = (size_t)width * height;
