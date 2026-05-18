@@ -100,14 +100,19 @@ void VisibilityManager::_update_observer_pvs(Observer &obs, int new_leaf) {
 	if (new_leaf == obs.leaf) return;
 	obs.leaf = new_leaf;
 	int n = bsp->get_leaf_count();
+	// Leaf 0 is the GoldSrc solid/void leaf (no PVS data); leaf < 0 means fully outside
+	// the BSP. Grant full visibility in both cases so noclip players and out-of-world
+	// observers see everything rather than nothing.
+	if (new_leaf <= 0) {
+		obs.pvs.assign(n, true);
+		return;
+	}
 	obs.pvs.assign(n, false);
-	if (new_leaf >= 0) {
-		PackedInt32Array arr = bsp->get_leaf_pvs(new_leaf);
-		for (int i = 0; i < arr.size(); i++) {
-			int l = arr[i];
-			if (l >= 0 && l < n)
-				obs.pvs[l] = true;
-		}
+	PackedInt32Array arr = bsp->get_leaf_pvs(new_leaf);
+	for (int i = 0; i < arr.size(); i++) {
+		int l = arr[i];
+		if (l >= 0 && l < n)
+			obs.pvs[l] = true;
 	}
 }
 
