@@ -424,8 +424,7 @@ static void collect_spatial_groups(
 	const std::vector<int> &raw_to_parsed,
 	int node_index, int current_depth, int target_depth,
 	std::vector<std::vector<int>> &groups,
-	std::vector<std::vector<int>> &leaf_groups,
-	std::vector<int> &orphan_faces)
+	std::vector<std::vector<int>> &leaf_groups)
 {
 	if (node_index < 0) return; // leaf — handled by collect_leaves_recursive
 	if ((size_t)node_index >= nodes.size()) return;
@@ -441,21 +440,30 @@ static void collect_spatial_groups(
 		return;
 	}
 
-	// Above target depth: this node's own faces become orphans
-	for (uint16_t i = 0; i < node.numfaces; i++) {
-		int raw_idx = (int)node.firstface + i;
-		if (raw_idx < (int)raw_to_parsed.size()) {
-			int parsed = raw_to_parsed[raw_idx];
-			if (parsed >= 0) {
-				orphan_faces.push_back(parsed);
+	// Faces on this node's splitting plane get their own group with pvs_leaves =
+	// all descendant leaves, so they participate in PVS culling like any other face.
+	if (node.numfaces > 0) {
+		std::vector<int> node_faces;
+		for (uint16_t i = 0; i < node.numfaces; i++) {
+			int raw_idx = (int)node.firstface + i;
+			if (raw_idx < (int)raw_to_parsed.size()) {
+				int parsed = raw_to_parsed[raw_idx];
+				if (parsed >= 0)
+					node_faces.push_back(parsed);
 			}
+		}
+		if (!node_faces.empty()) {
+			groups.push_back(std::move(node_faces));
+			std::vector<int> subtree_leaves;
+			collect_leaves_recursive(nodes, leafs, node_index, subtree_leaves);
+			leaf_groups.push_back(std::move(subtree_leaves));
 		}
 	}
 
 	// Recurse into children
 	for (int c = 0; c < 2; c++) {
 		collect_spatial_groups(nodes, leafs, raw_to_parsed, node.children[c],
-			current_depth + 1, target_depth, groups, leaf_groups, orphan_faces);
+			current_depth + 1, target_depth, groups, leaf_groups);
 	}
 }
 
@@ -1163,9 +1171,8 @@ void GoldSrcBSP::build_mesh() {
 
 			vector<vector<int>> bsp_groups;
 			vector<vector<int>> bsp_leaf_groups;
-			vector<int> orphan_indices;
 			collect_spatial_groups(bsp_data.nodes, bsp_data.leafs, bsp_data.raw_to_parsed,
-				root_node, 0, TARGET_DEPTH, bsp_groups, bsp_leaf_groups, orphan_indices);
+				root_node, 0, TARGET_DEPTH, bsp_groups, bsp_leaf_groups);
 
 			// Convert parsed face indices to FaceRef vectors
 			for (size_t gi = 0; gi < bsp_groups.size(); gi++) {
@@ -1183,42 +1190,10 @@ void GoldSrcBSP::build_mesh() {
 				}
 			}
 
-			// Orphan faces (on splitting-plane nodes above target depth)
-			if (!orphan_indices.empty()) {
-				SpatialGroup sg;
-				sg.label = "spatial_orphans";
-				for (int parsed_idx : orphan_indices) {
-					if (parsed_idx >= 0 && parsed_idx < (int)bsp_data.faces.size()) {
-						sg.face_refs.push_back({&bsp_data.faces[parsed_idx], parsed_idx});
-					}
-				}
-				if (!sg.face_refs.empty()) {
-					spatial_groups.push_back(std::move(sg));
-				}
-			}
-
-			// Sky faces are not referenced by BSP node face lists (the BSP
-			// compiler assigns them differently), so they're absent from all
-			// spatial groups above. Add them in a dedicated group here so they
-			// get meshes and write depth to occlude geometry behind sky holes.
-			{
-				SpatialGroup sg;
-				sg.label = "sky_surfaces";
-				for (const auto &fr : faces_for_model) {
-					if (goldsrc::is_sky_texture(fr.face->texture_name)) {
-						sg.face_refs.push_back(fr);
-					}
-				}
-				if (!sg.face_refs.empty()) {
-					UtilityFunctions::print("[GoldSrc] Sky surfaces group: ",
-						(int64_t)sg.face_refs.size(), " faces");
-					spatial_groups.push_back(std::move(sg));
-				}
-			}
 
 			UtilityFunctions::print("[GoldSrc] Worldspawn spatial split: ",
 				(int64_t)spatial_groups.size(), " groups from depth ",
-				(int64_t)TARGET_DEPTH, " (", (int64_t)orphan_indices.size(), " orphan faces)");
+				(int64_t)TARGET_DEPTH);
 		} else {
 			// Brush entities or fallback: single group with all faces
 			SpatialGroup sg;
