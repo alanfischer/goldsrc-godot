@@ -20,3 +20,6 @@ linux.debug.x86_64        = "res://addons/goldsrc/bin/libgoldsrc.linux.template_
 linux.release.x86_64      = "res://addons/goldsrc/bin/libgoldsrc.linux.template_release.x86_64.so"
 linux.debug.arm64         = "res://addons/goldsrc/bin/libgoldsrc.linux.template_debug.arm64.so"
 linux.release.arm64       = "res://addons/goldsrc/bin/libgoldsrc.linux.template_release.arm64.so"
+
+android.debug.arm64       = "res://addons/goldsrc/bin/libgoldsrc.android.template_debug.arm64.so"
+android.release.arm64     = "res://addons/goldsrc/bin/libgoldsrc.android.template_release.arm64.so"
