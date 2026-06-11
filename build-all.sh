@@ -8,6 +8,10 @@
 #   ./build-all.sh macos        # macOS arm64 + x86_64 + universal only
 #   ./build-all.sh linux        # Linux x86_64 + arm64 only
 #   ./build-all.sh windows      # Windows x86_64 only
+#   ./build-all.sh android      # Android arm64 (Meta Quest) only
+#
+# Android requires the Android NDK. Set ANDROID_NDK or ANDROID_HOME, or install
+# it via Android Studio to a standard SDK location (auto-detected below).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -83,18 +87,34 @@ build_windows() {
     cmake_build build-windows-x86_64-release toolchain-windows-x86_64.cmake Release
 }
 
+build_android() {
+    # Locate the Android SDK/NDK if the user hasn't set ANDROID_NDK/ANDROID_HOME.
+    if [[ -z "${ANDROID_NDK:-}" && -z "${ANDROID_HOME:-}" ]]; then
+        for candidate in "$HOME/Library/Android/sdk" "$HOME/Android/Sdk" "$HOME/Android/sdk"; do
+            if [[ -d "$candidate/ndk" ]]; then
+                export ANDROID_HOME="$candidate"
+                break
+            fi
+        done
+    fi
+    cmake_build build-android-arm64-debug   toolchain-android-arm64.cmake Debug
+    cmake_build build-android-arm64-release toolchain-android-arm64.cmake Release
+}
+
 case "$filter" in
     macos)   build_macos ;;
     linux)   build_linux ;;
     windows) build_windows ;;
+    android) build_android ;;
     all)
         build_macos
         build_linux
         build_windows
+        build_android
         ;;
     *)
         echo "Unknown target: $filter"
-        echo "Usage: $0 [macos|linux|windows|all]"
+        echo "Usage: $0 [macos|linux|windows|android|all]"
         exit 1
         ;;
 esac
