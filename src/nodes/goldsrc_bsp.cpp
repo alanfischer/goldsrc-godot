@@ -3166,7 +3166,12 @@ static void trace_ray_bsp(
 Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 	if (!parser) return Dictionary();
 	const auto &bsp_data = parser->get_data();
-	if (bsp_data.models.empty() || bsp_data.lighting.empty()) return Dictionary();
+	// No lightmap atlases means build_mesh() found no usable lightmap data even
+	// if the raw lighting lump is non-empty (e.g. stale/mismatched offsets).
+	// Baking without atlases would still iterate every grid cell and sample
+	// lightmaps that don't exist, producing garbage and taking arbitrarily long.
+	if (bsp_data.models.empty() || bsp_data.lighting.empty() || lm_atlases.empty())
+		return Dictionary();
 
 	uint64_t t0 = Time::get_singleton()->get_ticks_msec();
 
