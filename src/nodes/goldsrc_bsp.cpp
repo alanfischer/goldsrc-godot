@@ -2370,24 +2370,6 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 			float total_area = 0;
 			for (int gi : comp) total_area += qualifying[group[gi]].area;
 
-			// Debug: log components near investigation point even if filtered
-			{
-				const float INV_X = 21.0f, INV_Y = 1012.0f, INV_Z = 75.0f;
-				float dcx = 0, dcy = 0, dcz = 0; int dcv = 0;
-				for (int gi : comp) {
-					const auto &face = bsp_data.faces[qualifying[group[gi]].face_index];
-					for (auto &v : face.vertices) { dcx += v.pos[0]; dcy += v.pos[1]; dcz += v.pos[2]; dcv++; }
-				}
-				if (dcv > 0) { dcx /= dcv; dcy /= dcv; dcz /= dcv; }
-				if (fabsf(dcx - INV_X) < 256 && fabsf(dcy - INV_Y) < 256 && fabsf(dcz - INV_Z) < 256) {
-					const auto &rf = bsp_data.faces[qualifying[group[comp[0]]].face_index];
-					UtilityFunctions::print("[OccluderDebug] component @ (", dcx, ",", dcy, ",", dcz,
-						") normal=(", rf.normal[0], ",", rf.normal[1], ",", rf.normal[2],
-						") area=", total_area, " faces=", (int64_t)comp.size(),
-						total_area < MIN_AREA_GS ? " [FILTERED: too small]" : "");
-				}
-			}
-
 			if (total_area < MIN_AREA_GS) { dbg_components_too_small++; continue; }
 
 			const auto &ref_face = bsp_data.faces[qualifying[group[comp[0]]].face_index];
@@ -2489,26 +2471,6 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 
 			for (int gi : comp) handled[group[gi]] = true;
 
-			// Debug: log all components near the investigation point
-			{
-				const float INV_X = 21.0f, INV_Y = 1012.0f, INV_Z = 75.0f;
-				// Compute component centroid from face vertices (GoldSrc space)
-				float dcx = 0, dcy = 0, dcz = 0; int dcv = 0;
-				for (int gi : comp) {
-					const auto &face = bsp_data.faces[qualifying[group[gi]].face_index];
-					for (auto &v : face.vertices) {
-						dcx += v.pos[0]; dcy += v.pos[1]; dcz += v.pos[2]; dcv++;
-					}
-				}
-				if (dcv > 0) { dcx /= dcv; dcy /= dcv; dcz /= dcv; }
-				if (fabsf(dcx - INV_X) < 256 && fabsf(dcy - INV_Y) < 256 && fabsf(dcz - INV_Z) < 256) {
-					UtilityFunctions::print("[OccluderDebug] component near (", dcx, ",", dcy, ",", dcz,
-						") normal=(", ref_face.normal[0], ",", ref_face.normal[1], ",", ref_face.normal[2],
-						") area=", total_area, " faces=", (int64_t)comp.size(),
-						" loops=", (int64_t)loops.size());
-				}
-			}
-
 			if (loops.size() == 1) {
 				// Solid wall — single boundary loop becomes one large occluder
 				dbg_components_solid++;
@@ -2583,8 +2545,7 @@ void GoldSrcBSP::build_occluders(Node3D *parent) {
 				const float SOLID_OFFSET = 4.0f; // GoldSrc units — push behind face plane
 				int bsp_root = bsp_data.models[0].headnode[0];
 
-				// Debug: is this a multi-loop component near the investigation point?
-				bool dbg_this_comp = (loops.size() > 1);
+				bool dbg_this_comp = debug_occluders && (loops.size() > 1);
 
 				bool all_holes_solid = true;
 				for (int li = 1; li < (int)loops.size() && all_holes_solid; li++) {
