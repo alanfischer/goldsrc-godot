@@ -1021,6 +1021,11 @@ void GoldSrcBSP::build_mesh() {
 		face_lm_info.resize(bsp_data.faces.size());
 	}
 
+	// Count faces that actually receive a lightmap, independent of which path
+	// bakes them. lm_atlases is only populated in the legacy path, so it can't
+	// be used to report lightmap coverage when shader_lightstyles is on.
+	int lit_face_count = 0;
+
 	// Sky surface shader: always created, used for all 'sky*' texture faces
 	Ref<Shader> sky_shader;
 	sky_shader.instantiate();
@@ -1314,6 +1319,7 @@ void GoldSrcBSP::build_mesh() {
 							fp.atlas_x, fp.atlas_y)) {
 							fp.has_lightmap = true;
 							has_any_lightmap = true;
+							lit_face_count++;
 
 							// Record in face_lm_info for legacy rebaking path
 							if (!shader_lightstyles) {
@@ -1746,7 +1752,7 @@ void GoldSrcBSP::build_mesh() {
 		(int64_t)num_models, " models, ",
 		(int64_t)point_entity_count, " point entities, ",
 		(int64_t)bsp_data.faces.size(), " faces, ",
-		(int64_t)lm_atlases.size(), " lightmap atlases");
+		(int64_t)lit_face_count, " lightmapped");
 
 	// Add a self-contained texture animator node so the saved .scn animates
 	// automatically on load with no external file or manual wiring required.
@@ -3166,11 +3172,14 @@ static void trace_ray_bsp(
 Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 	if (!parser) return Dictionary();
 	const auto &bsp_data = parser->get_data();
-	// No lightmap atlases means build_mesh() found no usable lightmap data even
-	// if the raw lighting lump is non-empty (e.g. stale/mismatched offsets).
-	// Baking without atlases would still iterate every grid cell and sample
-	// lightmaps that don't exist, producing garbage and taking arbitrarily long.
-	if (bsp_data.models.empty() || bsp_data.lighting.empty() || lm_atlases.empty())
+	// Bake reads the raw lighting lump + per-face lightmap offsets directly
+	// (see sample_lightmap_at), not lm_atlases — so do NOT gate on lm_atlases.
+	// In the shader-lightstyle path (shader_lightstyles = true, which the game
+	// always uses) build_mesh populates layer_textures[] but never lm_atlases,
+	// so gating on it here suppressed the grid on every map. A non-empty lighting
+	// lump is the correct signal that lightmaps exist; sample_lightmap_at bounds-
+	// checks each offset, so stale/mismatched offsets just read as unlit.
+	if (bsp_data.models.empty() || bsp_data.lighting.empty())
 		return Dictionary();
 
 	uint64_t t0 = Time::get_singleton()->get_ticks_msec();
