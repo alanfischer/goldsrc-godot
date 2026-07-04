@@ -3017,6 +3017,19 @@ struct LightGridRayHit {
 	float hit_pos[3] = {0, 0, 0};
 };
 
+// A ray "reaches the sky" if it hits nothing, or if its closest hit is a
+// sky-textured brush face. GoldSrc maps are sealed by sky brushes, so a ray
+// aimed upward/outward hits the sky face rather than escaping into the void —
+// but that point still sees open sky (and the sun). Treating a sky-face hit as
+// an occluder (the old behavior) left virtually no cell sunlit on sealed maps.
+static inline bool ray_reached_sky(
+	const goldsrc::BSPData &bsp_data, const LightGridRayHit &hit)
+{
+	if (hit.face_index < 0) return true;
+	if ((size_t)hit.face_index >= bsp_data.faces.size()) return false;
+	return goldsrc::is_sky_texture(bsp_data.faces[hit.face_index].texture_name);
+}
+
 // Ray-polygon intersection: check if ray hits a convex polygon.
 // Returns distance along ray, or -1 if no hit.
 static float ray_polygon_intersect(
@@ -3325,7 +3338,8 @@ Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 					trace_ray_bsp(bsp_data, head_node, gs_pos, directions[d],
 						0.0f, max_trace_dist, hit);
 
-					if (hit.face_index >= 0) {
+					bool reached_sky = ray_reached_sky(bsp_data, hit);
+					if (!reached_sky) {
 						float r, g, b;
 						sample_lightmap_at(bsp_data.faces[hit.face_index],
 							hit.hit_pos, bsp_data.lighting, r, g, b);
@@ -3333,7 +3347,7 @@ Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 						pixel_data[d][px_ofs + 1] = (uint8_t)clamp(g, 0.0f, 255.0f);
 						pixel_data[d][px_ofs + 2] = (uint8_t)clamp(b, 0.0f, 255.0f);
 					} else if (has_sky_light) {
-						// Ray escaped — ambient sky fill for non-sun directions
+						// Ray reached the sky — ambient sky fill for non-sun directions
 						float ambient_sky = 0.15f;
 						float r = sky_color[0] * ambient_sky * 255.0f;
 						float g = sky_color[1] * ambient_sky * 255.0f;
@@ -3344,15 +3358,16 @@ Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 					}
 				}
 
-				// Trace one extra ray toward the sun. If it escapes (hits sky),
-				// this cell has direct sunlight — add sun color to each cube face
-				// weighted by alignment with the sun direction.
+				// Trace one extra ray toward the sun. If it reaches the sky
+				// (hits a sky brush or nothing), this cell has direct sunlight —
+				// add sun color to each cube face weighted by alignment with the
+				// sun direction.
 				if (has_sky_light) {
 					LightGridRayHit sun_hit;
 					trace_ray_bsp(bsp_data, head_node, gs_pos, sun_dir,
 						0.0f, max_trace_dist, sun_hit);
 
-					if (sun_hit.face_index < 0) {
+					if (ray_reached_sky(bsp_data, sun_hit)) {
 						cells_sunlit++;
 						// Cell has direct sunlight — distribute sun color to cube faces
 						// weighted by alignment toward the sun
