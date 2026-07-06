@@ -1125,12 +1125,23 @@ void GoldSrcBSP::build_mesh() {
 		}
 		model_node->set_name(node_name);
 
-		// Set origin for brush entities
+		// Set origin for brush entities. CSG rebases brush entities that contain
+		// an ORIGIN brush: their geometry is stored local to the origin-brush
+		// center and the world placement lives in the entity's "origin" key
+		// (the model-lump origin field stays zero). Apply the key so the node
+		// sits at its pivot and rotating/riding entities work in place.
 		if (m > 0) {
 			const auto &bmodel = bsp_data.models[m];
-			if (bmodel.origin[0] != 0 || bmodel.origin[1] != 0 || bmodel.origin[2] != 0) {
-				model_node->set_position(goldsrc_to_godot(
-					bmodel.origin[0], bmodel.origin[1], bmodel.origin[2]));
+			float ox = bmodel.origin[0], oy = bmodel.origin[1], oz = bmodel.origin[2];
+			auto ent_it = model_entities.find(model_key);
+			if (ent_it != model_entities.end()) {
+				auto o = ent_it->second->properties.find("origin");
+				if (o != ent_it->second->properties.end()) {
+					sscanf(o->second.c_str(), "%f %f %f", &ox, &oy, &oz);
+				}
+			}
+			if (ox != 0 || oy != 0 || oz != 0) {
+				model_node->set_position(goldsrc_to_godot(ox, oy, oz));
 			}
 		}
 
