@@ -245,10 +245,19 @@ void GoldSrcMDL::build_skeleton() {
 	skeleton->set_name("Skeleton3D");
 	add_child(skeleton);
 
-	// Add bones
+	// Add bones. Skeleton3D::add_bone() rejects names that are empty or contain
+	// ':' / '/', returning -1 without adding the bone. GoldSrc models legitimately
+	// carry unnamed bones (e.g. gib models), so a raw name would silently drop the
+	// bone AND shift every later bone index — corrupting vertex weights, parents,
+	// hitboxes and animation frames (all index-based). Substitute a safe unique
+	// fallback name so every source bone maps 1:1 to a skeleton bone.
 	for (int i = 0; i < (int)mdl.bones.size(); i++) {
 		const auto &bone = mdl.bones[i];
-		skeleton->add_bone(String(bone.name.c_str()));
+		String bone_name = String(bone.name.c_str());
+		if (bone_name.is_empty() || bone_name.contains(":") || bone_name.contains("/")) {
+			bone_name = "bone_" + String::num_int64(i);
+		}
+		skeleton->add_bone(bone_name);
 		if (bone.parent >= 0) {
 			skeleton->set_bone_parent(i, bone.parent);
 		}
