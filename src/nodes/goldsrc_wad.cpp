@@ -52,7 +52,6 @@ Ref<ImageTexture> GoldSrcWAD::get_texture(const String &name) const {
 
 	string sname = str_to_lower(string(name.utf8().get_data()));
 
-	// Check cache
 	auto it = texture_cache.find(sname);
 	if (it != texture_cache.end()) {
 		return it->second;

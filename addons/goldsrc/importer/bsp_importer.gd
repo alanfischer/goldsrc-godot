@@ -81,7 +81,6 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 	var scale_factor: float = options.get("scale_factor", 0.025)
 	var model_directory: String = options.get("model_directory", "")
 
-	# Create the BSP node and configure it
 	var bsp := GoldSrcBSP.new()
 	bsp.set_scale_factor(scale_factor)
 
@@ -102,7 +101,6 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 		else:
 			push_warning("BSP Importer: Could not open WAD directory '%s'" % wad_directory)
 
-	# Load and build the BSP
 	bsp.load_bsp(source_file)
 	bsp.build_mesh()
 
@@ -128,7 +126,6 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 
 	_set_owner_recursive(root, root)
 
-	# Pack and save
 	var scene := PackedScene.new()
 	var pack_err := scene.pack(root)
 	if pack_err != OK:

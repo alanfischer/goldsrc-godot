@@ -78,7 +78,6 @@ func _convert_one(bsp_path: String, wads: Array[GoldSrcWAD],
 		use_shader: bool, overbright: float, do_rotate: bool) -> bool:
 	var t0 := Time.get_ticks_msec()
 
-	# Create and configure GoldSrcBSP
 	var bsp := GoldSrcBSP.new()
 	bsp.set_scale_factor(scale)
 	if bsp.has_method("set_shader_lightstyles"):
