@@ -382,7 +382,6 @@ void GoldSrcMDL::build_hitboxes() {
 void GoldSrcMDL::build_meshes() {
 	const auto &mdl = parser->get_data();
 
-	// Create textures
 	vector<Ref<ImageTexture>> godot_textures;
 	vector<Ref<StandardMaterial3D>> materials;
 
@@ -513,7 +512,6 @@ void GoldSrcMDL::build_meshes() {
 
 			arr_mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
 
-			// Apply material
 			int skin_ref = mesh.skin_ref;
 			int tex_idx = skin_ref;
 			if (tex_idx >= 0 && tex_idx < (int)mdl.skin_table.size()) {
