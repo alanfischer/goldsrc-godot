@@ -14,8 +14,7 @@ A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
 - Water/liquid textures (`!` and `*` prefix) rendered with a turbulent UV-warp shader (sine-wave distortion animated via `TIME`)
 - Hull 0 collision (StaticBody3D for worldspawn, AnimatableBody3D for brush entities)
 - Water volume extraction as Area3D with ConvexPolygonShape3D
-- Automatic occluder generation (OccluderInstance3D + PolygonOccluder3D) — see [Occluder Generation](#occluder-generation) below
-- PVS (Potentially Visible Set) data parsing with RLE decompression — exposed for runtime visibility culling via `VisibilityManager` and used by `debug_occluders` mode to validate occluder effectiveness; a stripped PVS blob (PLANES, VISIBILITY, NODES, LEAFS, MODELS only) is baked into each `.scn` as `pvs_data` metadata so `VisibilityManager` can initialize without the original `.bsp`
+- PVS (Potentially Visible Set) data parsing with RLE decompression — exposed for runtime visibility culling via `VisibilityManager`; a stripped PVS blob (PLANES, VISIBILITY, NODES, LEAFS, MODELS only) is baked into each `.scn` as `pvs_data` metadata so `VisibilityManager` can initialize without the original `.bsp`
 - Worldspawn spatial splitting — walks the BSP tree to group faces into spatial clusters, producing separate MeshInstance3D nodes per group for better frustum culling; each group node has `pvs_leaves` metadata (PackedInt32Array) for use with `VisibilityManager.register_leaf_set()`
 - Brush entity root nodes are AnimatableBody3D instances — meshes and collision shapes are direct children
 - Point entity root nodes are plain Node3D instances
@@ -54,7 +53,7 @@ Drop files into a project and they auto-import:
 | SPR | `.spr` | `.scn` | PackedScene with self-animating Sprite3D and SpriteAnimationPlayer child |
 | WAD | `.wad` | `.png` files | Extracts individual textures as PNGs |
 
-All imported scenes contain only standard Godot types (Node3D, MeshInstance3D, ArrayMesh, Skeleton3D, AnimationPlayer, StaticBody3D, AnimatableBody3D, OccluderInstance3D, etc.) and do **not** require the GDExtension at runtime.
+All imported scenes contain only standard Godot types (Node3D, MeshInstance3D, ArrayMesh, Skeleton3D, AnimationPlayer, StaticBody3D, AnimatableBody3D, etc.) and do **not** require the GDExtension at runtime.
 
 ### BSP Entity Model Instantiation
 
@@ -91,29 +90,7 @@ Options:
 - `--overbright` — lightmap brightness multiplier (default: `1.0`)
 - `--rotate` — rotate 180 degrees around Y to match alternate coordinate conventions
 
-Outputs a `.scn` PackedScene file per map with all geometry, collision, occluders, entity nodes, and a `pvs_data` PackedByteArray stored as root node metadata for `VisibilityManager` initialization.
-
-## Occluder Generation
-
-The importer automatically generates `OccluderInstance3D` + `PolygonOccluder3D` nodes for worldspawn wall geometry. To use them at runtime, enable **Project Settings > Rendering > Occlusion Culling > Use Occlusion Culling**.
-
-### Algorithm
-
-1. **Face collection** — worldspawn wall faces are gathered. Sky, water, transparent, and tool textures are excluded.
-2. **Coplanar grouping** — faces are grouped by quantized plane key (normal + distance) to find walls that share a plane.
-3. **Connected components** — within each plane group, union-find on shared vertices identifies contiguous face patches.
-4. **Boundary edge merging** — shared interior edges cancel out, leaving only the true outer boundary of each patch (plus any interior holes from doorways/windows).
-5. **Loop classification**:
-   - **Single loop** → solid wall, one merged occluder.
-   - **Multiple loops, holes BSP-solid** → the "holes" are backed by solid geometry (e.g. recessed detail), so one merged occluder from the outer loop is safe.
-   - **Multiple loops, real openings** → doorways/windows detected via BSP tree traversal. The algorithm re-runs edge cancellation on only the qualifying faces (area ≥ `occluder_min_area`). Adjacent solid panels merge into one occluder; the doorway spaces become the natural exterior boundary rather than interior holes.
-6. **PVS-coverage filtering** — a greedy pass drops candidates whose marginal contribution to covering BSP-visible leaf pairs falls below `occluder_pvs_min_gain`. This removes occluders that add geometry overhead without meaningfully improving culling coverage. Runs before the area sort so the count cap applies to survivors only.
-7. **Importance sorting and capping** — surviving candidates are sorted by polygon area (largest first). If `occluder_max_count` is non-zero, only the top N are kept.
-8. **Polygon cleanup** — duplicate and collinear vertices are removed, and each polygon is pre-validated against Godot's triangulator before being committed as an occluder.
-
-### Debug Mode
-
-Set `debug_occluders = true` on the `GoldSrcBSP` node before calling `build_mesh()` to print a full pipeline report including: face counts, component breakdown by type (solid/solid-holes/real-openings/walk-failures), occluder coverage percentage, overfill checks on merged polygons, and PVS validation (what fraction of BSP-invisible leaf pairs have an occluder plane between them).
+Outputs a `.scn` PackedScene file per map with all geometry, collision, entity nodes, and a `pvs_data` PackedByteArray stored as root node metadata for `VisibilityManager` initialization.
 
 ## PVS Runtime Visibility Culling
 
@@ -260,12 +237,6 @@ for child in bsp.get_children():
 
 # Or get raw entity dictionaries:
 var entities = bsp.get_entities()  # Array of Dictionaries
-
-# Tune occluder generation before calling build_mesh():
-bsp.occluder_min_area = 65535.0   # min face area in GoldSrc units² (~256×256 default)
-bsp.occluder_pvs_min_gain = 500   # greedy PVS-coverage filter; 0 = disabled
-bsp.occluder_max_count = 0        # cap on occluder count after PVS filter; 0 = unlimited
-bsp.debug_occluders = true        # prints PVS validation, overfill checks, pipeline stats
 
 # PVS query API (useful for runtime visibility culling)
 var leaf_count = bsp.get_leaf_count()                  # total BSP leaf count
