@@ -302,6 +302,158 @@ static std::vector<uint8_t> make_anim_mdl(const float value[6], const float scal
     return mb.finish();
 }
 
+// ------------------------------------------------------------
+// BSP geometry fixtures
+//
+// make_minimal_bsp above zeroes every geometry lump, which is why parse_faces never ran:
+// with no faces there is nothing to parse. These build the lumps it actually reads.
+// ------------------------------------------------------------
+
+// Struct-level counterpart to make_minimal_bsp, which lays its bytes out by hand. The
+// on-disk lump structs are pack(1), so this appends them directly and patches the header
+// once every lump offset is known.
+struct BSPBuilder {
+    std::vector<uint8_t> blob;
+    BSPHeader hdr{};
+
+    BSPBuilder() {
+        hdr.version = HLBSP_VERSION;
+        blob.resize(sizeof(BSPHeader), 0); // reserved; filled by finish()
+    }
+
+    int32_t append_bytes(const void *p, size_t n) {
+        int32_t off = (int32_t)blob.size();
+        if (n > 0) {
+            const uint8_t *b = static_cast<const uint8_t *>(p);
+            blob.insert(blob.end(), b, b + n);
+        }
+        return off;
+    }
+
+    void set_lump_bytes(BSPLumpType which, const std::vector<uint8_t> &raw) {
+        if (raw.empty()) return; // leave the lump zeroed — read_lump treats it as absent
+        hdr.lumps[which].fileofs = append_bytes(raw.data(), raw.size());
+        hdr.lumps[which].filelen = (int32_t)raw.size();
+    }
+
+    template <typename T>
+    void set_lump(BSPLumpType which, const std::vector<T> &items) {
+        if (items.empty()) return;
+        hdr.lumps[which].fileofs = append_bytes(items.data(), items.size() * sizeof(T));
+        hdr.lumps[which].filelen = (int32_t)(items.size() * sizeof(T));
+    }
+
+    std::vector<uint8_t> finish() {
+        std::vector<uint8_t> out = blob;
+        memcpy(out.data(), &hdr, sizeof(BSPHeader));
+        return out;
+    }
+};
+
+struct TexSpec {
+    std::string name;
+    uint32_t w, h;
+};
+
+// Builds a BSP texture lump: a count, a directory of offsets, then the miptex headers.
+// offsets[0] stays 0, marking each texture as living in an external WAD rather than
+// embedded — parse_textures' embedded path is exercised separately.
+static std::vector<uint8_t> make_texture_lump(const std::vector<TexSpec> &texs) {
+    int32_t count = (int32_t)texs.size();
+    std::vector<uint8_t> lump(4 + (size_t)count * 4, 0);
+    memcpy(lump.data(), &count, 4);
+
+    for (int i = 0; i < count; i++) {
+        int32_t ofs = (int32_t)lump.size();
+        memcpy(lump.data() + 4 + (size_t)i * 4, &ofs, 4);
+
+        BSPMipTex mt{};
+        set_fixed(mt.name, sizeof(mt.name), texs[i].name);
+        mt.width = texs[i].w;
+        mt.height = texs[i].h;
+        const uint8_t *p = reinterpret_cast<const uint8_t *>(&mt);
+        lump.insert(lump.end(), p, p + sizeof(mt));
+    }
+    return lump;
+}
+
+// The lumps parse_faces reads, held as editable vectors. Tests start from the default
+// quad below, change the one thing they are exercising, and call build().
+struct FaceFixture {
+    std::vector<BSPVertex> vertexes;
+    std::vector<BSPPlane> planes;
+    std::vector<BSPEdge> edges;
+    std::vector<int32_t> surfedges;
+    std::vector<BSPFace> faces;
+    std::vector<BSPTexInfo> texinfos;
+    std::vector<BSPModel> models;
+    std::vector<BSPNode> nodes;
+    std::vector<BSPLeaf> leafs;
+    std::vector<TexSpec> textures;
+
+    std::vector<uint8_t> build() const {
+        BSPBuilder b;
+        b.set_lump(LUMP_VERTEXES, vertexes);
+        b.set_lump(LUMP_PLANES, planes);
+        b.set_lump(LUMP_EDGES, edges);
+        b.set_lump(LUMP_SURFEDGES, surfedges);
+        b.set_lump(LUMP_FACES, faces);
+        b.set_lump(LUMP_TEXINFO, texinfos);
+        b.set_lump(LUMP_MODELS, models);
+        b.set_lump(LUMP_NODES, nodes);
+        b.set_lump(LUMP_LEAFS, leafs);
+        b.set_lump_bytes(LUMP_TEXTURES, make_texture_lump(textures));
+        return b.finish();
+    }
+};
+
+// One 64x64 axis-aligned quad on the z=0 plane, owned by worldspawn, textured with a
+// 64x64 "test" skin whose S/T axes are world X/Y. Chosen so every derived value is a
+// round number: UVs land on 0 and 1, and the lightmap grid divides evenly by 16.
+static FaceFixture make_quad_fixture() {
+    FaceFixture fx;
+
+    fx.vertexes = {{{0, 0, 0}}, {{64, 0, 0}}, {{64, 64, 0}}, {{0, 64, 0}}};
+
+    BSPPlane plane{};
+    plane.normal[2] = 1.0f;
+    plane.dist = 0.0f;
+    plane.type = 2; // PLANE_Z
+    fx.planes = {plane};
+
+    // Edge 0 is left unused on purpose: a surfedge of 0 cannot encode a direction, so
+    // real compilers never reference it. Winding is 0->1->2->3.
+    fx.edges = {{{0, 0}}, {{0, 1}}, {{1, 2}}, {{2, 3}}, {{3, 0}}};
+    fx.surfedges = {1, 2, 3, 4};
+
+    BSPTexInfo ti{};
+    ti.vecs[0][0] = 1.0f; // S = world X
+    ti.vecs[1][1] = 1.0f; // T = world Y
+    ti.miptex = 0;
+    fx.texinfos = {ti};
+
+    BSPFace face{};
+    face.planenum = 0;
+    face.side = 0;
+    face.firstedge = 0;
+    face.numedges = 4;
+    face.texinfo = 0;
+    face.styles[0] = 0;
+    face.styles[1] = 255;
+    face.styles[2] = 255;
+    face.styles[3] = 255;
+    face.lightofs = 0;
+    fx.faces = {face};
+
+    BSPModel model{};
+    model.firstface = 0;
+    model.numfaces = 1;
+    fx.models = {model};
+
+    fx.textures = {{"test", 64, 64}};
+    return fx;
+}
+
 // ============================================================
 // TEST SUITE: decode_palette_pixels
 // ============================================================
@@ -1340,5 +1492,528 @@ TEST_SUITE("MDLParser") {
         REQUIRE(parser.parse(blob.data(), blob.size()));
         REQUIRE(parser.get_data().sequences.size() == 1);
         CHECK(parser.get_data().sequences[0].frames.empty());
+    }
+}
+
+// ============================================================
+// TEST SUITE: BSPParser::parse_faces
+// ============================================================
+
+TEST_SUITE("BSP face parsing") {
+
+    TEST_CASE("parses a quad face's vertices, UVs and normal") {
+        auto blob = make_quad_fixture().build();
+
+        BSPParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        const BSPData &d = parser.get_data();
+
+        REQUIRE(d.faces.size() == 1);
+        const ParsedFace &f = d.faces[0];
+
+        CHECK(f.texture_name == "test");
+        CHECK(f.texture_width == 64);
+        CHECK(f.texture_height == 64);
+        CHECK(f.model_index == 0);
+        CHECK(f.lightmap_offset == 0);
+        CHECK(f.styles[0] == 0);
+        CHECK(f.styles[1] == 255);
+
+        // The face normal comes off the plane, unflipped because side == 0.
+        CHECK(f.normal[2] == doctest::Approx(1.0f));
+        CHECK(f.s_axis[0] == doctest::Approx(1.0f));
+        CHECK(f.t_axis[1] == doctest::Approx(1.0f));
+        CHECK(f.s_offset == doctest::Approx(0.0f));
+
+        REQUIRE(f.vertices.size() == 4);
+        CHECK(f.vertices[0].pos[0] == doctest::Approx(0.0f));
+        CHECK(f.vertices[1].pos[0] == doctest::Approx(64.0f));
+        CHECK(f.vertices[2].pos[1] == doctest::Approx(64.0f));
+
+        // S/T axes are world X/Y and the texture is 64x64, so UVs span exactly 0..1.
+        CHECK(f.vertices[0].uv[0] == doctest::Approx(0.0f));
+        CHECK(f.vertices[0].uv[1] == doctest::Approx(0.0f));
+        CHECK(f.vertices[1].uv[0] == doctest::Approx(1.0f));
+        CHECK(f.vertices[2].uv[0] == doctest::Approx(1.0f));
+        CHECK(f.vertices[2].uv[1] == doctest::Approx(1.0f));
+        CHECK(f.vertices[3].uv[1] == doctest::Approx(1.0f));
+
+        // Every vertex carries the face normal.
+        for (const auto &v : f.vertices)
+            CHECK(v.normal[2] == doctest::Approx(1.0f));
+
+        REQUIRE(d.raw_to_parsed.size() == 1);
+        CHECK(d.raw_to_parsed[0] == 0);
+    }
+
+    TEST_CASE("face side flips the normal") {
+        FaceFixture fx = make_quad_fixture();
+        fx.faces[0].side = 1;
+        auto blob = fx.build();
+
+        BSPParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        REQUIRE(parser.get_data().faces.size() == 1);
+
+        const ParsedFace &f = parser.get_data().faces[0];
+        CHECK(f.normal[2] == doctest::Approx(-1.0f));
+        CHECK(f.vertices[0].normal[2] == doctest::Approx(-1.0f));
+    }
+
+    TEST_CASE("a negative surfedge walks its edge backwards") {
+        FaceFixture fx = make_quad_fixture();
+        // Same loop, opposite direction: negative surfedges take edge.v[1] instead of v[0].
+        fx.surfedges = {-4, -3, -2, -1};
+        auto blob = fx.build();
+
+        BSPParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        const ParsedFace &f = parser.get_data().faces.at(0);
+
+        REQUIRE(f.vertices.size() == 4);
+        CHECK(f.vertices[0].pos[0] == doctest::Approx(0.0f));  // vertex 0
+        CHECK(f.vertices[0].pos[1] == doctest::Approx(0.0f));
+        CHECK(f.vertices[1].pos[1] == doctest::Approx(64.0f)); // vertex 3
+        CHECK(f.vertices[1].pos[0] == doctest::Approx(0.0f));
+        CHECK(f.vertices[3].pos[0] == doctest::Approx(64.0f)); // vertex 1
+        CHECK(f.vertices[3].pos[1] == doctest::Approx(0.0f));
+    }
+
+    TEST_CASE("computes lightmap extents and normalised lightmap UVs") {
+        auto blob = make_quad_fixture().build();
+
+        BSPParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        const ParsedFace &f = parser.get_data().faces.at(0);
+
+        // s and t both span 0..64, so on the 16-unit luxel grid: mins 0, maxs 4,
+        // and the lightmap is (maxs - mins + 1) = 5 luxels on a side.
+        CHECK(f.lm_mins_s == 0);
+        CHECK(f.lm_mins_t == 0);
+        CHECK(f.lightmap_width == 5);
+        CHECK(f.lightmap_height == 5);
+
+        // Luxel centres: (s/16 - mins + 0.5) / width.
+        CHECK(f.vertices[0].lightmap_uv[0] == doctest::Approx(0.1f));
+        CHECK(f.vertices[0].lightmap_uv[1] == doctest::Approx(0.1f));
+        CHECK(f.vertices[2].lightmap_uv[0] == doctest::Approx(0.9f));
+        CHECK(f.vertices[2].lightmap_uv[1] == doctest::Approx(0.9f));
+    }
+
+    TEST_CASE("texinfo offsets shift UVs and the lightmap grid") {
+        FaceFixture fx = make_quad_fixture();
+        fx.texinfos[0].vecs[0][3] = 16.0f; // S offset
+        fx.texinfos[0].vecs[1][3] = -8.0f; // T offset — drives mins negative
+        auto blob = fx.build();
+
+        BSPParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        const ParsedFace &f = parser.get_data().faces.at(0);
+
+        CHECK(f.s_offset == doctest::Approx(16.0f));
+        CHECK(f.t_offset == doctest::Approx(-8.0f));
+
+        CHECK(f.vertices[0].uv[0] == doctest::Approx(16.0f / 64.0f));
+        CHECK(f.vertices[0].uv[1] == doctest::Approx(-8.0f / 64.0f));
+
+        // s spans 16..80 -> mins floor(1)=1, maxs ceil(5)=5, width 5.
+        CHECK(f.lm_mins_s == 1);
+        CHECK(f.lightmap_width == 5);
+        // t spans -8..56 -> mins floor(-0.5) = -1 (floor, not truncation), maxs
+        // ceil(3.5) = 4, height 6. Truncating toward zero here would give 5.
+        CHECK(f.lm_mins_t == -1);
+        CHECK(f.lightmap_height == 6);
+    }
+
+    TEST_CASE("zero texture dimensions fall back to 1") {
+        FaceFixture fx = make_quad_fixture();
+        fx.textures = {{"test", 0, 0}};
+        auto blob = fx.build();
+
+        BSPParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        const ParsedFace &f = parser.get_data().faces.at(0);
+
+        CHECK(f.texture_width == 1);
+        CHECK(f.texture_height == 1);
+        // Dividing by the fallback leaves UVs in raw texel units rather than NaN.
+        CHECK(f.vertices[1].uv[0] == doctest::Approx(64.0f));
+    }
+
+    TEST_CASE("tool textures are dropped on worldspawn but kept on brush entities") {
+        FaceFixture world = make_quad_fixture();
+        world.textures = {{"clip", 64, 64}};
+        auto world_blob = world.build();
+
+        BSPParser world_parser;
+        REQUIRE(world_parser.parse(world_blob.data(), world_blob.size()));
+        CHECK(world_parser.get_data().faces.empty());
+        CHECK(world_parser.get_data().raw_to_parsed.at(0) == -1);
+
+        // The same face owned by model 1 (a brush entity) survives: func_ladder and
+        // friends rely on CLIP-textured faces for collision.
+        FaceFixture ent = make_quad_fixture();
+        ent.textures = {{"clip", 64, 64}};
+        BSPModel worldspawn{};
+        worldspawn.firstface = 0;
+        worldspawn.numfaces = 0;
+        BSPModel brush{};
+        brush.firstface = 0;
+        brush.numfaces = 1;
+        ent.models = {worldspawn, brush};
+        auto ent_blob = ent.build();
+
+        BSPParser ent_parser;
+        REQUIRE(ent_parser.parse(ent_blob.data(), ent_blob.size()));
+        REQUIRE(ent_parser.get_data().faces.size() == 1);
+        CHECK(ent_parser.get_data().faces[0].model_index == 1);
+    }
+
+    TEST_CASE("out-of-range texinfo index skips the face") {
+        FaceFixture fx = make_quad_fixture();
+        fx.faces[0].texinfo = 99;
+        auto blob = fx.build();
+
+        BSPParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        CHECK(parser.get_data().faces.empty());
+        CHECK(parser.get_data().raw_to_parsed.at(0) == -1);
+    }
+
+    TEST_CASE("out-of-range plane index skips the face") {
+        FaceFixture fx = make_quad_fixture();
+        fx.faces[0].planenum = 99;
+        auto blob = fx.build();
+
+        BSPParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        CHECK(parser.get_data().faces.empty());
+    }
+
+    TEST_CASE("out-of-range miptex index skips the face") {
+        FaceFixture fx = make_quad_fixture();
+        fx.texinfos[0].miptex = 99;
+        auto blob = fx.build();
+
+        BSPParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        CHECK(parser.get_data().faces.empty());
+    }
+
+    TEST_CASE("a face running past the surfedge lump is skipped") {
+        FaceFixture fx = make_quad_fixture();
+        fx.faces[0].numedges = 10; // only 4 surfedges exist
+        auto blob = fx.build();
+
+        BSPParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        CHECK(parser.get_data().faces.empty());
+    }
+
+    TEST_CASE("an out-of-range edge index skips the face") {
+        FaceFixture fx = make_quad_fixture();
+        fx.surfedges[0] = 99;
+        auto blob = fx.build();
+
+        BSPParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        CHECK(parser.get_data().faces.empty());
+    }
+
+    TEST_CASE("an out-of-range vertex index skips the face") {
+        FaceFixture fx = make_quad_fixture();
+        fx.edges[1].v[0] = 99;
+        auto blob = fx.build();
+
+        BSPParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        CHECK(parser.get_data().faces.empty());
+    }
+
+    TEST_CASE("raw_to_parsed maps survivors and marks dropped faces -1") {
+        FaceFixture fx = make_quad_fixture();
+        BSPFace bad = fx.faces[0];
+        bad.texinfo = 99; // dropped
+        fx.faces = {bad, fx.faces[0]};
+        fx.models[0].numfaces = 2;
+        auto blob = fx.build();
+
+        BSPParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        const BSPData &d = parser.get_data();
+
+        REQUIRE(d.faces.size() == 1);
+        REQUIRE(d.raw_to_parsed.size() == 2);
+        CHECK(d.raw_to_parsed[0] == -1); // dropped
+        CHECK(d.raw_to_parsed[1] == 0);  // second raw face became parsed face 0
+    }
+
+    // ---------- water culling ----------
+
+    // A one-node tree whose front child is leaf 0 and back child is leaf 1, so probes
+    // either side of the z=0 quad land in a leaf the test controls.
+    auto with_leaf_contents = [](int32_t front, int32_t back) {
+        FaceFixture fx = make_quad_fixture();
+
+        BSPNode node{};
+        node.planenum = 0;
+        node.children[0] = -1; // front -> leaf 0
+        node.children[1] = -2; // back  -> leaf 1
+        fx.nodes = {node};
+
+        BSPLeaf l0{}, l1{};
+        l0.contents = front;
+        l1.contents = back;
+        fx.leafs = {l0, l1};
+
+        fx.models[0].headnode[0] = 0;
+        return fx;
+    };
+
+    TEST_CASE("a worldspawn face with water on both sides is culled") {
+        // Submerged internal faces are invisible in GoldSrc, so the parser drops them.
+        auto blob = with_leaf_contents(CONTENTS_WATER, CONTENTS_WATER).build();
+
+        BSPParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        CHECK(parser.get_data().faces.empty());
+        CHECK(parser.get_data().raw_to_parsed.at(0) == -1);
+    }
+
+    TEST_CASE("a worldspawn face with water on only one side is kept") {
+        // This is the water surface itself — the face a player sees from above.
+        auto blob = with_leaf_contents(CONTENTS_EMPTY, CONTENTS_WATER).build();
+
+        BSPParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        CHECK(parser.get_data().faces.size() == 1);
+    }
+
+    TEST_CASE("a worldspawn face with no water either side is kept") {
+        auto blob = with_leaf_contents(CONTENTS_EMPTY, CONTENTS_SOLID).build();
+
+        BSPParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        CHECK(parser.get_data().faces.size() == 1);
+    }
+
+    TEST_CASE("an internal seam between two water brush entities is culled") {
+        // Two adjacent water entities share a face plane. The face belonging to model 1
+        // sits inside model 2's volume, so it is an invisible internal seam; model 2's
+        // own face is exposed and must survive. A model counts as water purely by its
+        // face textures, which is why both need a "water" skin.
+        FaceFixture fx = make_quad_fixture();
+        fx.textures = {{"water1", 64, 64}};
+        fx.faces = {fx.faces[0], fx.faces[0]};
+
+        BSPModel worldspawn{};
+        worldspawn.firstface = 0;
+        worldspawn.numfaces = 0;
+
+        BSPModel water_a{};
+        water_a.firstface = 0;
+        water_a.numfaces = 1;
+        // headnode -1 makes every probe land in leaf 0 (empty), so model 1's volume
+        // never swallows model 2's face.
+        water_a.headnode[0] = -1;
+
+        BSPModel water_b{};
+        water_b.firstface = 1;
+        water_b.numfaces = 1;
+        water_b.headnode[0] = 0; // walks the node below into leaf 1 (solid)
+
+        fx.models = {worldspawn, water_a, water_b};
+
+        BSPNode node{};
+        node.planenum = 0;
+        node.children[0] = -2; // both sides land in leaf 1
+        node.children[1] = -2;
+        fx.nodes = {node};
+
+        BSPLeaf empty_leaf{}, solid_leaf{};
+        empty_leaf.contents = CONTENTS_EMPTY;
+        solid_leaf.contents = CONTENTS_SOLID;
+        fx.leafs = {empty_leaf, solid_leaf};
+
+        auto blob = fx.build();
+
+        BSPParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        const BSPData &d = parser.get_data();
+
+        REQUIRE(d.faces.size() == 1);
+        CHECK(d.faces[0].model_index == 2); // the exposed face, not the seam
+        REQUIRE(d.raw_to_parsed.size() == 2);
+        CHECK(d.raw_to_parsed[0] == -1);    // seam dropped
+        CHECK(d.raw_to_parsed[1] == 0);
+    }
+}
+
+// ============================================================
+// TEST SUITE: BSP textures and raw lumps
+// ============================================================
+
+TEST_SUITE("BSP textures and raw lumps") {
+
+    // A texture lump whose miptex carries its pixels inline (offsets[0] != 0) rather than
+    // deferring to a WAD. Layout per texture: header, then the four mip levels, then a
+    // 2-byte palette count, then the 256-entry palette.
+    auto embedded_lump = [](const std::string &name, uint32_t w, uint32_t h,
+                            uint8_t fill, const uint8_t palette[256 * 3]) {
+        std::vector<uint8_t> lump(8, 0);
+        int32_t count = 1;
+        memcpy(lump.data(), &count, 4);
+        int32_t ofs = 8;
+        memcpy(lump.data() + 4, &ofs, 4);
+
+        BSPMipTex mt{};
+        set_fixed(mt.name, sizeof(mt.name), name);
+        mt.width = w;
+        mt.height = h;
+        mt.offsets[0] = sizeof(BSPMipTex); // pixels start right after the header
+        const uint8_t *p = reinterpret_cast<const uint8_t *>(&mt);
+        lump.insert(lump.end(), p, p + sizeof(mt));
+
+        uint32_t pixels = w * h;
+        uint32_t datasize = pixels + pixels / 4 + pixels / 16 + pixels / 64;
+        lump.insert(lump.end(), datasize, fill);
+
+        lump.push_back(0); // palette count, low byte
+        lump.push_back(1); // high byte -> 256
+        lump.insert(lump.end(), palette, palette + 256 * 3);
+        return lump;
+    };
+
+    TEST_CASE("decodes an embedded miptex through its palette") {
+        uint8_t palette[256 * 3] = {};
+        palette[5 * 3 + 0] = 11;
+        palette[5 * 3 + 1] = 22;
+        palette[5 * 3 + 2] = 33;
+
+        BSPBuilder b;
+        b.set_lump_bytes(LUMP_TEXTURES, embedded_lump("embedded", 8, 8, 5, palette));
+        auto blob = b.finish();
+
+        BSPParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        const auto &texs = parser.get_data().textures;
+
+        REQUIRE(texs.size() == 1);
+        CHECK(texs[0].name == "embedded");
+        CHECK(texs[0].width == 8);
+        CHECK(texs[0].height == 8);
+        CHECK(texs[0].has_data);
+        REQUIRE(texs[0].data.size() == 8 * 8 * 4);
+        CHECK(texs[0].data[0] == 11);
+        CHECK(texs[0].data[1] == 22);
+        CHECK(texs[0].data[2] == 33);
+        CHECK(texs[0].data[3] == 255);
+    }
+
+    TEST_CASE("a { prefixed texture decodes index 255 as transparent") {
+        // The leading brace is GoldSrc's marker for a chroma-keyed texture; the parser
+        // keys transparency off the name, not off any flag.
+        uint8_t palette[256 * 3] = {};
+        palette[255 * 3 + 0] = 0;
+        palette[255 * 3 + 1] = 0;
+        palette[255 * 3 + 2] = 255; // the classic blue key
+
+        BSPBuilder b;
+        b.set_lump_bytes(LUMP_TEXTURES, embedded_lump("{blue", 8, 8, 255, palette));
+        auto blob = b.finish();
+
+        BSPParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        const auto &texs = parser.get_data().textures;
+
+        REQUIRE(texs.size() == 1);
+        REQUIRE(texs[0].data.size() == 8 * 8 * 4);
+        CHECK(texs[0].data[3] == 0); // fully transparent, not opaque blue
+    }
+
+    TEST_CASE("a texture with no embedded pixels is marked external") {
+        BSPBuilder b;
+        b.set_lump_bytes(LUMP_TEXTURES, make_texture_lump({{"wadtex", 32, 32}}));
+        auto blob = b.finish();
+
+        BSPParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        const auto &texs = parser.get_data().textures;
+
+        REQUIRE(texs.size() == 1);
+        CHECK(texs[0].name == "wadtex");
+        CHECK(texs[0].width == 32);
+        CHECK_FALSE(texs[0].has_data);
+        CHECK(texs[0].data.empty());
+    }
+
+    TEST_CASE("oversized embedded texture dimensions are rejected") {
+        uint8_t palette[256 * 3] = {};
+        // Claim 8192x8192 in the header while supplying an 8x8 body: the dimension cap
+        // must reject it before the size arithmetic is trusted.
+        auto lump = embedded_lump("huge", 8, 8, 0, palette);
+        BSPMipTex mt;
+        memcpy(&mt, lump.data() + 8, sizeof(mt));
+        mt.width = 8192;
+        mt.height = 8192;
+        memcpy(lump.data() + 8, &mt, sizeof(mt));
+
+        BSPBuilder b;
+        b.set_lump_bytes(LUMP_TEXTURES, lump);
+        auto blob = b.finish();
+
+        BSPParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        REQUIRE(parser.get_data().textures.size() == 1);
+        CHECK_FALSE(parser.get_data().textures[0].has_data);
+    }
+
+    TEST_CASE("lighting, visibility and marksurface lumps are copied verbatim") {
+        std::vector<uint8_t> lighting = {1, 2, 3, 4, 5, 6};
+        std::vector<uint8_t> visibility = {0xFF, 0x00, 0x7F};
+        std::vector<uint16_t> marksurfaces = {0, 3, 7};
+
+        BSPBuilder b;
+        b.set_lump_bytes(LUMP_LIGHTING, lighting);
+        b.set_lump_bytes(LUMP_VISIBILITY, visibility);
+        b.set_lump(LUMP_MARKSURFACES, marksurfaces);
+        auto blob = b.finish();
+
+        BSPParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        const BSPData &d = parser.get_data();
+
+        CHECK(d.lighting == lighting);
+        CHECK(d.visibility == visibility);
+        REQUIRE(d.marksurfaces.size() == 3);
+        CHECK(d.marksurfaces[1] == 3);
+        CHECK(d.marksurfaces[2] == 7);
+    }
+
+    TEST_CASE("planes, nodes, leafs and models are exposed on BSPData") {
+        FaceFixture fx = make_quad_fixture();
+        BSPNode node{};
+        node.planenum = 0;
+        node.children[0] = -1;
+        node.children[1] = -2;
+        fx.nodes = {node};
+        BSPLeaf l0{}, l1{};
+        l0.contents = CONTENTS_EMPTY;
+        l1.contents = CONTENTS_SOLID;
+        fx.leafs = {l0, l1};
+        auto blob = fx.build();
+
+        BSPParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        const BSPData &d = parser.get_data();
+
+        REQUIRE(d.planes.size() == 1);
+        CHECK(d.planes[0].normal[2] == doctest::Approx(1.0f));
+        REQUIRE(d.nodes.size() == 1);
+        CHECK(d.nodes[0].children[0] == -1);
+        REQUIRE(d.leafs.size() == 2);
+        CHECK(d.leafs[1].contents == CONTENTS_SOLID);
+        REQUIRE(d.models.size() == 1);
+        CHECK(d.models[0].numfaces == 1);
     }
 }
