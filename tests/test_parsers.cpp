@@ -169,6 +169,79 @@ static std::vector<uint8_t> make_minimal_spr(SPRType type, SPRTextureFormat fmt,
     return b.data;
 }
 
+// Palette where every index maps to a distinct colour, so a decoding error surfaces as a
+// wrong colour rather than a plausible one.
+static void fill_test_palette(uint8_t palette[256 * 3]) {
+    for (int i = 0; i < 256; i++) {
+        palette[i * 3 + 0] = (uint8_t)i;
+        palette[i * 3 + 1] = (uint8_t)(i ^ 0x40);
+        palette[i * 3 + 2] = (uint8_t)(255 - i);
+    }
+}
+
+// Header + palette: the common prefix of every SPR, before any frame data. The palette
+// count and byte length are separately controllable so truncation cases can be built
+// without hand-patching offsets. Tests append frames with the helpers below.
+static BinaryBuilder spr_prefix(SPRTextureFormat fmt, int32_t num_frames,
+                                const uint8_t palette[256 * 3],
+                                uint16_t palette_count = 256,
+                                size_t palette_bytes = 256 * 3) {
+    BinaryBuilder b;
+    b.le32(SPR_MAGIC);
+    b.le32(SPR_VERSION);
+    b.le32((int32_t)SPR_VP_PARALLEL);
+    b.le32((int32_t)fmt);
+    b.f32(10.0f); // bounding_radius
+    b.le32(64);   // max_width
+    b.le32(64);   // max_height
+    b.le32(num_frames);
+    b.f32(0.0f);  // beam_length
+    b.le32(0);    // synch_type
+    b.u16(palette_count);
+    b.bytes(palette, palette_bytes);
+    return b;
+}
+
+// Byte length of the above with a full palette — the anchor for truncation offsets.
+static constexpr size_t kSprPrefixSize = sizeof(SPRHeader) + 2 + 256 * 3;
+
+// pixel_bytes is separate from w*h on purpose, so a frame can declare more pixels than
+// the blob actually carries.
+static void spr_add_single(BinaryBuilder &b, int32_t w, int32_t h,
+                           size_t pixel_bytes, uint8_t fill) {
+    b.le32(0); // frame_type 0 = single frame
+    b.le32(0); // origin_x
+    b.le32(0); // origin_y
+    b.le32(w);
+    b.le32(h);
+    for (size_t i = 0; i < pixel_bytes; i++)
+        b.data.push_back(fill);
+}
+
+struct SprSub {
+    int32_t w, h;
+    size_t pixel_bytes;
+    uint8_t fill;
+};
+
+// A group frame: a non-zero type tag, the sub-frame count, one float interval per
+// sub-frame, then the sub-frames back to back. The intervals are data the parser must
+// skip rather than interpret, which is the part most likely to go wrong.
+static void spr_add_group(BinaryBuilder &b, const std::vector<SprSub> &subs) {
+    b.le32(1); // frame_type != 0 = group
+    b.le32((int32_t)subs.size());
+    for (size_t i = 0; i < subs.size(); i++)
+        b.f32(0.1f); // interval
+    for (const SprSub &s : subs) {
+        b.le32(0); // origin_x
+        b.le32(0); // origin_y
+        b.le32(s.w);
+        b.le32(s.h);
+        for (size_t i = 0; i < s.pixel_bytes; i++)
+            b.data.push_back(s.fill);
+    }
+}
+
 // Writes s into a fixed-width MDL name field, zero-padded. Deliberately not strncpy: MDL
 // name fields are not required to be NUL-terminated, and the parser reads them with
 // strnlen(name, cap), so a test needs to be able to fill the field edge to edge.
@@ -868,6 +941,303 @@ TEST_SUITE("SPRParser") {
         uint8_t tiny[10] = {};
         SPRParser parser;
         CHECK_FALSE(parser.parse(tiny, sizeof(tiny)));
+    }
+
+    // ---------- group sprites ----------
+
+    TEST_CASE("parses a group frame's sub-frames") {
+        // A group packs several frames behind one frame entry, preceded by a float
+        // interval per sub-frame that the parser must skip rather than read as data.
+        uint8_t palette[256 * 3];
+        fill_test_palette(palette);
+
+        BinaryBuilder b = spr_prefix(SPR_NORMAL, 1, palette);
+        spr_add_group(b, {{2, 2, 4, 7}, {2, 2, 4, 9}});
+
+        SPRParser parser;
+        REQUIRE(parser.parse(b.data.data(), b.data.size()));
+        const SPRData &d = parser.get_data();
+
+        REQUIRE(d.frames.size() == 2);
+        CHECK(d.frames[0].width == 2);
+        CHECK(d.frames[0].height == 2);
+        REQUIRE(d.frames[0].data.size() == 2 * 2 * 4);
+
+        // Sub-frame 0 is palette index 7 throughout, sub-frame 1 index 9. Getting the
+        // interval skip wrong would shift the pixel reads and change these.
+        CHECK(d.frames[0].data[0] == 7);
+        CHECK(d.frames[0].data[1] == (uint8_t)(7 ^ 0x40));
+        CHECK(d.frames[0].data[2] == (uint8_t)(255 - 7));
+        CHECK(d.frames[0].data[3] == 255);
+        CHECK(d.frames[1].data[0] == 9);
+        CHECK(d.frames[1].data[2] == (uint8_t)(255 - 9));
+    }
+
+    TEST_CASE("group sub-frames may differ in size") {
+        uint8_t palette[256 * 3];
+        fill_test_palette(palette);
+
+        BinaryBuilder b = spr_prefix(SPR_NORMAL, 1, palette);
+        spr_add_group(b, {{2, 2, 4, 1}, {4, 1, 4, 2}});
+
+        SPRParser parser;
+        REQUIRE(parser.parse(b.data.data(), b.data.size()));
+        const SPRData &d = parser.get_data();
+
+        REQUIRE(d.frames.size() == 2);
+        CHECK(d.frames[0].width == 2);
+        CHECK(d.frames[0].height == 2);
+        CHECK(d.frames[1].width == 4);
+        CHECK(d.frames[1].height == 1);
+    }
+
+    TEST_CASE("group alpha handling follows the sprite's texture format") {
+        uint8_t palette[256 * 3];
+        fill_test_palette(palette);
+
+        BinaryBuilder b = spr_prefix(SPR_ALPHATEST, 1, palette);
+        spr_add_group(b, {{2, 1, 2, 255}}); // index 255 = the transparent key
+
+        SPRParser parser;
+        REQUIRE(parser.parse(b.data.data(), b.data.size()));
+        const SPRData &d = parser.get_data();
+
+        REQUIRE(d.frames.size() == 1);
+        REQUIRE(d.frames[0].data.size() == 2 * 4);
+        CHECK(d.frames[0].data[3] == 0); // transparent, not opaque
+        CHECK(d.frames[0].data[7] == 0);
+    }
+
+    TEST_CASE("a group declaring no sub-frames yields no frames") {
+        uint8_t palette[256 * 3];
+        fill_test_palette(palette);
+
+        BinaryBuilder b = spr_prefix(SPR_NORMAL, 1, palette);
+        spr_add_group(b, {}); // group_count 0 — skipped, leaving nothing parsed
+
+        SPRParser parser;
+        CHECK_FALSE(parser.parse(b.data.data(), b.data.size()));
+    }
+
+    TEST_CASE("a group sub-frame with zero width is rejected") {
+        uint8_t palette[256 * 3];
+        fill_test_palette(palette);
+
+        BinaryBuilder b = spr_prefix(SPR_NORMAL, 1, palette);
+        spr_add_group(b, {{0, 4, 0, 1}});
+
+        SPRParser parser;
+        CHECK_FALSE(parser.parse(b.data.data(), b.data.size()));
+    }
+
+    TEST_CASE("a group sub-frame with implausible dimensions is rejected") {
+        uint8_t palette[256 * 3];
+        fill_test_palette(palette);
+
+        BinaryBuilder b = spr_prefix(SPR_NORMAL, 1, palette);
+        // 8192x1 with all 8192 pixels actually present, so the dimension cap is the only
+        // thing that can reject this. Pairing an over-cap width with a short buffer would
+        // be caught by the pixel-bounds check instead and prove nothing about the cap.
+        spr_add_group(b, {{8192, 1, 8192, 1}});
+
+        SPRParser parser;
+        CHECK_FALSE(parser.parse(b.data.data(), b.data.size()));
+    }
+
+    TEST_CASE("a malformed group is skipped and later frames still parse") {
+        // A negative sub-frame count is corrupt data. The parser skips the group and
+        // carries on, so a following frame is still recovered — the reason the count
+        // guard is a `continue` rather than a fallthrough. Without it the interval
+        // arithmetic wraps and desynchronises the read offset for everything after.
+        uint8_t palette[256 * 3];
+        fill_test_palette(palette);
+
+        BinaryBuilder b = spr_prefix(SPR_NORMAL, 2, palette);
+        b.le32(1);  // frame_type != 0 = group
+        b.le32(-1); // negative sub-frame count
+        spr_add_single(b, 2, 2, 4, 6);
+
+        SPRParser parser;
+        REQUIRE(parser.parse(b.data.data(), b.data.size()));
+        const SPRData &d = parser.get_data();
+
+        REQUIRE(d.frames.size() == 1);
+        CHECK(d.frames[0].width == 2);
+        CHECK(d.frames[0].data[0] == 6);
+    }
+
+    TEST_CASE("a group sub-frame whose pixels run past the buffer is rejected") {
+        uint8_t palette[256 * 3];
+        fill_test_palette(palette);
+
+        BinaryBuilder b = spr_prefix(SPR_NORMAL, 1, palette);
+        spr_add_group(b, {{8, 8, 4, 1}}); // declares 64 pixels, carries 4
+
+        SPRParser parser;
+        CHECK_FALSE(parser.parse(b.data.data(), b.data.size()));
+    }
+
+    TEST_CASE("a group truncated before its count is rejected") {
+        uint8_t palette[256 * 3];
+        fill_test_palette(palette);
+
+        BinaryBuilder b = spr_prefix(SPR_NORMAL, 1, palette);
+        spr_add_group(b, {{2, 2, 4, 1}, {2, 2, 4, 2}});
+        b.data.resize(kSprPrefixSize + 4); // frame_type written, count missing
+
+        SPRParser parser;
+        CHECK_FALSE(parser.parse(b.data.data(), b.data.size()));
+    }
+
+    TEST_CASE("a group truncated mid-intervals is rejected") {
+        uint8_t palette[256 * 3];
+        fill_test_palette(palette);
+
+        BinaryBuilder b = spr_prefix(SPR_NORMAL, 1, palette);
+        spr_add_group(b, {{2, 2, 4, 1}, {2, 2, 4, 2}});
+        // frame_type + count + one of the two intervals
+        b.data.resize(kSprPrefixSize + 4 + 4 + 4);
+
+        SPRParser parser;
+        CHECK_FALSE(parser.parse(b.data.data(), b.data.size()));
+    }
+
+    TEST_CASE("a group truncated inside a sub-frame header is rejected") {
+        uint8_t palette[256 * 3];
+        fill_test_palette(palette);
+
+        BinaryBuilder b = spr_prefix(SPR_NORMAL, 1, palette);
+        spr_add_group(b, {{2, 2, 4, 1}, {2, 2, 4, 2}});
+        // frame_type + count + both intervals + half a sub-frame header
+        b.data.resize(kSprPrefixSize + 4 + 4 + 8 + 8);
+
+        SPRParser parser;
+        CHECK_FALSE(parser.parse(b.data.data(), b.data.size()));
+    }
+
+    // ---------- single-frame and header guards ----------
+
+    TEST_CASE("a single frame with zero width is rejected") {
+        uint8_t palette[256 * 3];
+        fill_test_palette(palette);
+
+        BinaryBuilder b = spr_prefix(SPR_NORMAL, 1, palette);
+        spr_add_single(b, 0, 4, 0, 1);
+
+        SPRParser parser;
+        CHECK_FALSE(parser.parse(b.data.data(), b.data.size()));
+    }
+
+    TEST_CASE("a single frame with implausible dimensions is rejected") {
+        uint8_t palette[256 * 3];
+        fill_test_palette(palette);
+
+        BinaryBuilder b = spr_prefix(SPR_NORMAL, 1, palette);
+        spr_add_single(b, 8, 8192, 64, 1);
+
+        SPRParser parser;
+        CHECK_FALSE(parser.parse(b.data.data(), b.data.size()));
+    }
+
+    TEST_CASE("a single frame whose pixels run past the buffer is rejected") {
+        uint8_t palette[256 * 3];
+        fill_test_palette(palette);
+
+        BinaryBuilder b = spr_prefix(SPR_NORMAL, 1, palette);
+        spr_add_single(b, 8, 8, 4, 1); // declares 64 pixels, carries 4
+
+        SPRParser parser;
+        CHECK_FALSE(parser.parse(b.data.data(), b.data.size()));
+    }
+
+    TEST_CASE("a truncated frame header is rejected") {
+        uint8_t palette[256 * 3];
+        fill_test_palette(palette);
+
+        BinaryBuilder b = spr_prefix(SPR_NORMAL, 1, palette);
+        spr_add_single(b, 4, 4, 16, 1);
+        b.data.resize(kSprPrefixSize + 4 + 8); // type + origin, dimensions missing
+
+        SPRParser parser;
+        CHECK_FALSE(parser.parse(b.data.data(), b.data.size()));
+    }
+
+    TEST_CASE("a frame entry with no type tag is rejected") {
+        uint8_t palette[256 * 3];
+        fill_test_palette(palette);
+
+        BinaryBuilder b = spr_prefix(SPR_NORMAL, 1, palette); // palette, then nothing
+
+        SPRParser parser;
+        CHECK_FALSE(parser.parse(b.data.data(), b.data.size()));
+    }
+
+    TEST_CASE("a sprite declaring zero frames is rejected") {
+        uint8_t palette[256 * 3];
+        fill_test_palette(palette);
+
+        BinaryBuilder b = spr_prefix(SPR_NORMAL, 0, palette);
+
+        SPRParser parser;
+        CHECK_FALSE(parser.parse(b.data.data(), b.data.size()));
+    }
+
+    TEST_CASE("a palette count other than 256 is rejected") {
+        uint8_t palette[256 * 3];
+        fill_test_palette(palette);
+
+        BinaryBuilder b = spr_prefix(SPR_NORMAL, 1, palette, 128);
+        spr_add_single(b, 2, 2, 4, 1);
+
+        SPRParser parser;
+        CHECK_FALSE(parser.parse(b.data.data(), b.data.size()));
+    }
+
+    TEST_CASE("a truncated palette is rejected") {
+        uint8_t palette[256 * 3];
+        fill_test_palette(palette);
+
+        // Claims 256 entries but carries only half of them.
+        BinaryBuilder b = spr_prefix(SPR_NORMAL, 1, palette, 256, 128 * 3);
+
+        SPRParser parser;
+        CHECK_FALSE(parser.parse(b.data.data(), b.data.size()));
+    }
+
+    TEST_CASE("a buffer ending before the palette count is rejected") {
+        BinaryBuilder b;
+        b.le32(SPR_MAGIC);
+        b.le32(SPR_VERSION);
+        b.le32((int32_t)SPR_VP_PARALLEL);
+        b.le32((int32_t)SPR_NORMAL);
+        b.f32(10.0f);
+        b.le32(64);
+        b.le32(64);
+        b.le32(1);
+        b.f32(0.0f);
+        b.le32(0); // header complete, palette count absent
+
+        SPRParser parser;
+        CHECK_FALSE(parser.parse(b.data.data(), b.data.size()));
+    }
+
+    TEST_CASE("sprite type and bounding radius are carried through") {
+        uint8_t palette[256 * 3];
+        fill_test_palette(palette);
+
+        BinaryBuilder b = spr_prefix(SPR_INDEXALPHA, 1, palette);
+        spr_add_single(b, 2, 1, 2, 3);
+
+        SPRParser parser;
+        REQUIRE(parser.parse(b.data.data(), b.data.size()));
+        const SPRData &d = parser.get_data();
+
+        CHECK(d.type == SPR_VP_PARALLEL);
+        CHECK(d.texture_format == SPR_INDEXALPHA);
+        CHECK(d.bounding_radius == doctest::Approx(10.0f));
+        // INDEXALPHA routes the palette index straight to alpha.
+        REQUIRE(d.frames.size() == 1);
+        CHECK(d.frames[0].data[3] == 3);
     }
 }
 
