@@ -84,18 +84,7 @@ private:
 	void build_brush_concave(godot::Node3D *parent, int model_index);
 	void build_brush_convex(godot::Node3D *parent, int model_index,
 		int contents_filter = 0);
-	void build_occluders(godot::Node3D *parent);
 	void rebake_lightstyle(int style_index);
-
-	void set_debug_occluders(bool enabled);
-	bool get_debug_occluders() const;
-
-	void set_occluder_min_area(float area);
-	float get_occluder_min_area() const;
-	void set_occluder_max_count(int count);
-	int get_occluder_max_count() const;
-	void set_occluder_pvs_min_gain(int min_gain);
-	int get_occluder_pvs_min_gain() const;
 
 	void _collect_leaves_in_aabb(int node_idx, const float gs_min[3], const float gs_max[3],
 		godot::PackedInt32Array &result) const;
@@ -122,7 +111,6 @@ private:
 
 	// Shader-based lightstyle members
 	bool shader_lightstyles = true;
-	bool debug_occluders = false;
 	godot::Ref<godot::Image> lightstyle_image;         // 64×1 FORMAT_RF
 	godot::Ref<godot::ImageTexture> lightstyle_texture; // shared across all materials
 
@@ -130,10 +118,5 @@ private:
 	std::vector<godot::Ref<GoldSrcWAD>> wads;
 	mutable std::map<std::string, godot::Ref<godot::ImageTexture>> texture_cache;
 	float scale_factor = 0.025f; // GoldSrc units to Godot units
-	float occluder_min_area = 65535.0f; // minimum face area (GS units²) to qualify as occluder (~256×256)
-	int occluder_max_count = 0; // max occluders to keep after sorting by area; 0 = unlimited
-	// Greedy PVS-coverage filter: drop candidates whose marginal coverage of PVS-visible
-	// leaf pairs is below this threshold. 0 = disabled (current behavior).
-	int occluder_pvs_min_gain = 500;
 	bool mesh_built = false;
 };
