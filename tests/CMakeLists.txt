@@ -6,10 +6,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 include(FetchContent)
+# v2.4.11 declares cmake_minimum_required(VERSION 3.0), which CMake 4.x rejects outright —
+# configuring failed locally while CI kept passing only because its runner still shipped
+# CMake 3.x. v2.5.3 raised its own floor to 3.14, so this needs no policy override.
 FetchContent_Declare(
     doctest
     GIT_REPOSITORY https://github.com/doctest/doctest.git
-    GIT_TAG        v2.4.11
+    GIT_TAG        v2.5.3
 )
 FetchContent_MakeAvailable(doctest)
 

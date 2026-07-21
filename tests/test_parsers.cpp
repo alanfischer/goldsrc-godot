@@ -169,6 +169,139 @@ static std::vector<uint8_t> make_minimal_spr(SPRType type, SPRTextureFormat fmt,
     return b.data;
 }
 
+// Writes s into a fixed-width MDL name field, zero-padded. Deliberately not strncpy: MDL
+// name fields are not required to be NUL-terminated, and the parser reads them with
+// strnlen(name, cap), so a test needs to be able to fill the field edge to edge.
+static void set_fixed(char *dst, size_t cap, const std::string &s) {
+    memset(dst, 0, cap);
+    memcpy(dst, s.data(), std::min(cap, s.size()));
+}
+
+// MDL has far too many header fields to lay out byte-by-byte the way the BSP/WAD/SPR
+// factories above do. The on-disk structs are already #pragma pack(1), so this appends
+// them directly and patches the header in at the end, once every section offset is known.
+struct MDLBuilder {
+    std::vector<uint8_t> blob;
+    MDLHeader hdr{};
+
+    MDLBuilder() {
+        hdr.id = MDL_MAGIC;
+        hdr.version = MDL_VERSION;
+        blob.resize(sizeof(MDLHeader), 0); // reserved; filled by finish()
+    }
+
+    int32_t append_bytes(const void *p, size_t n) {
+        int32_t off = (int32_t)blob.size();
+        if (n > 0) {
+            const uint8_t *b = static_cast<const uint8_t *>(p);
+            blob.insert(blob.end(), b, b + n);
+        }
+        return off;
+    }
+
+    template <typename T>
+    int32_t append(const std::vector<T> &items) {
+        return append_bytes(items.data(), items.size() * sizeof(T));
+    }
+
+    // Lays down a one-bone MDLAnimation table and appends the encoded data for whichever
+    // of the 6 channels are non-empty. MDLAnimation::offset is relative to the start of
+    // that bone's own table entry, which is what makes this fiddly enough to centralise.
+    // Returns the table offset, for MDLSequenceDesc::animindex.
+    int32_t append_anim_1bone(const std::vector<uint8_t> channels[6]) {
+        MDLAnimation anim{};
+        int32_t table = append_bytes(&anim, sizeof(anim));
+        for (int c = 0; c < 6; c++) {
+            if (channels[c].empty()) continue;
+            int32_t off = append_bytes(channels[c].data(), channels[c].size());
+            anim.offset[c] = (uint16_t)(off - table);
+        }
+        memcpy(blob.data() + table, &anim, sizeof(anim));
+        return table;
+    }
+
+    std::vector<uint8_t> finish() {
+        std::vector<uint8_t> out = blob;
+        memcpy(out.data(), &hdr, sizeof(MDLHeader));
+        return out;
+    }
+};
+
+static void push_i16(std::vector<uint8_t> &out, int16_t v) {
+    out.push_back((uint8_t)(v & 0xFF));
+    out.push_back((uint8_t)((v >> 8) & 0xFF));
+}
+
+// One run-length span of an animation channel: `total` frames drawn from `values`, which
+// holds `valid` entries. Frames past `valid` repeat the last value — that clamp is the
+// part of the encoding most likely to be got wrong, so tests drive it directly.
+struct AnimSpan {
+    uint8_t valid;
+    uint8_t total;
+    std::vector<int16_t> values;
+};
+
+static std::vector<uint8_t> encode_anim_channel(const std::vector<AnimSpan> &spans) {
+    std::vector<uint8_t> out;
+    for (const AnimSpan &s : spans) {
+        out.push_back(s.valid);
+        out.push_back(s.total);
+        for (int16_t v : s.values)
+            push_i16(out, v);
+    }
+    return out;
+}
+
+struct TriVertRaw {
+    int16_t vi, ni, s, t;
+};
+
+// Encodes a single triangle command run plus its terminator. Positive cmd = strip,
+// negative = fan; the magnitude is the vertex count.
+static std::vector<uint8_t> encode_tri_cmds(int16_t cmd, const std::vector<TriVertRaw> &verts) {
+    std::vector<uint8_t> out;
+    push_i16(out, cmd);
+    for (const TriVertRaw &v : verts) {
+        push_i16(out, v.vi);
+        push_i16(out, v.ni);
+        push_i16(out, v.s);
+        push_i16(out, v.t);
+    }
+    push_i16(out, 0); // command stream terminator
+    return out;
+}
+
+// Builds a 1-bone model carrying a single sequence, for exercising decode_animation.
+// The caller's spans must cover num_frames.
+static std::vector<uint8_t> make_anim_mdl(const float value[6], const float scale[6],
+                                          int num_frames,
+                                          const std::vector<uint8_t> channels[6]) {
+    MDLBuilder mb;
+
+    MDLBone bone{};
+    set_fixed(bone.name, sizeof(bone.name), "root");
+    bone.parent = -1;
+    for (int i = 0; i < 6; i++) {
+        bone.value[i] = value[i];
+        bone.scale[i] = scale[i];
+    }
+    mb.hdr.numbones = 1;
+    mb.hdr.boneindex = mb.append(std::vector<MDLBone>{bone});
+
+    int32_t animindex = mb.append_anim_1bone(channels);
+
+    MDLSequenceDesc seq{};
+    set_fixed(seq.label, sizeof(seq.label), "idle");
+    seq.fps = 30.0f;
+    seq.numframes = num_frames;
+    seq.animindex = animindex;
+    seq.seqgroup = 0;
+    mb.hdr.numseq = 1;
+    mb.hdr.seqindex = mb.append(std::vector<MDLSequenceDesc>{seq});
+
+    return mb.finish();
+}
+
 // ============================================================
 // TEST SUITE: decode_palette_pixels
 // ============================================================
@@ -615,5 +748,597 @@ TEST_SUITE("MDLParser") {
         b.data[4] = 9; // wrong version (should be 10)
         MDLParser parser;
         CHECK_FALSE(parser.parse(b.data.data(), b.data.size()));
+    }
+
+    // ---------- bones ----------
+
+    TEST_CASE("parses bone names, parents and rest pose") {
+        MDLBuilder mb;
+        std::vector<MDLBone> bones(2);
+        set_fixed(bones[0].name, 32, "root");
+        bones[0].parent = -1;
+        for (int i = 0; i < 6; i++) bones[0].value[i] = (float)(i + 1);
+        set_fixed(bones[1].name, 32, "spine");
+        bones[1].parent = 0;
+        for (int i = 0; i < 6; i++) bones[1].value[i] = (float)(10 * (i + 1));
+
+        mb.hdr.numbones = 2;
+        mb.hdr.boneindex = mb.append(bones);
+        auto blob = mb.finish();
+
+        MDLParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        const MDLData &d = parser.get_data();
+
+        REQUIRE(d.bones.size() == 2);
+        CHECK(d.bones[0].name == "root");
+        CHECK(d.bones[0].parent == -1);
+        // value[0..2] is position, value[3..5] is euler rotation.
+        CHECK(d.bones[0].pos[0] == doctest::Approx(1.0f));
+        CHECK(d.bones[0].pos[2] == doctest::Approx(3.0f));
+        CHECK(d.bones[0].rot[0] == doctest::Approx(4.0f));
+        CHECK(d.bones[0].rot[2] == doctest::Approx(6.0f));
+
+        CHECK(d.bones[1].name == "spine");
+        CHECK(d.bones[1].parent == 0);
+        CHECK(d.bones[1].pos[1] == doctest::Approx(20.0f));
+        CHECK(d.bones[1].rot[1] == doctest::Approx(50.0f));
+    }
+
+    TEST_CASE("bone name filling the whole 32-byte field is not over-read") {
+        MDLBuilder mb;
+        std::vector<MDLBone> bones(1);
+        const std::string full(32, 'a'); // no room for a NUL terminator
+        set_fixed(bones[0].name, 32, full);
+
+        mb.hdr.numbones = 1;
+        mb.hdr.boneindex = mb.append(bones);
+        auto blob = mb.finish();
+
+        MDLParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        REQUIRE(parser.get_data().bones.size() == 1);
+        CHECK(parser.get_data().bones[0].name == full);
+    }
+
+    TEST_CASE("bone array reaching past the buffer is ignored") {
+        MDLBuilder mb;
+        mb.hdr.numbones = 4;
+        mb.hdr.boneindex = (int32_t)mb.blob.size(); // no bone data actually appended
+        auto blob = mb.finish();
+
+        MDLParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        CHECK(parser.get_data().bones.empty());
+    }
+
+    // ---------- hitboxes ----------
+
+    TEST_CASE("parses hitbox bone, group and bounds") {
+        MDLBuilder mb;
+        std::vector<MDLHitbox> boxes(2);
+        boxes[0].bone = 3;
+        boxes[0].group = 1; // head
+        boxes[0].bbmin[0] = -1.0f; boxes[0].bbmin[1] = -2.0f; boxes[0].bbmin[2] = -3.0f;
+        boxes[0].bbmax[0] = 1.0f;  boxes[0].bbmax[1] = 2.0f;  boxes[0].bbmax[2] = 3.0f;
+        boxes[1].bone = 0;
+        boxes[1].group = 0;
+
+        mb.hdr.numhitboxes = 2;
+        mb.hdr.hitboxindex = mb.append(boxes);
+        auto blob = mb.finish();
+
+        MDLParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        const MDLData &d = parser.get_data();
+
+        REQUIRE(d.hitboxes.size() == 2);
+        CHECK(d.hitboxes[0].bone == 3);
+        CHECK(d.hitboxes[0].group == 1);
+        CHECK(d.hitboxes[0].bbmin[2] == doctest::Approx(-3.0f));
+        CHECK(d.hitboxes[0].bbmax[1] == doctest::Approx(2.0f));
+        CHECK(d.hitboxes[1].group == 0);
+    }
+
+    TEST_CASE("hitbox array reaching past the buffer is ignored") {
+        MDLBuilder mb;
+        mb.hdr.numhitboxes = 8;
+        mb.hdr.hitboxindex = (int32_t)mb.blob.size();
+        auto blob = mb.finish();
+
+        MDLParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        CHECK(parser.get_data().hitboxes.empty());
+    }
+
+    // ---------- textures ----------
+
+    TEST_CASE("decodes indexed texture pixels through the palette") {
+        MDLBuilder mb;
+
+        const uint8_t indices[4] = {0, 1, 2, 3};
+        uint8_t palette[256 * 3] = {};
+        for (int i = 0; i < 4; i++) {
+            palette[i * 3 + 0] = (uint8_t)(i * 10);
+            palette[i * 3 + 1] = (uint8_t)(i * 20);
+            palette[i * 3 + 2] = (uint8_t)(i * 30);
+        }
+
+        // Pixels and palette must sit contiguously: the parser reads the palette from
+        // pixel_data + width*height.
+        int32_t pixels_at = mb.append_bytes(indices, sizeof(indices));
+        mb.append_bytes(palette, sizeof(palette));
+
+        std::vector<MDLTexture> texs(1);
+        set_fixed(texs[0].name, 64, "skin.bmp");
+        texs[0].width = 2;
+        texs[0].height = 2;
+        texs[0].flags = 0;
+        texs[0].index = pixels_at;
+
+        mb.hdr.numtextures = 1;
+        mb.hdr.textureindex = mb.append(texs);
+        auto blob = mb.finish();
+
+        MDLParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        const MDLData &d = parser.get_data();
+
+        REQUIRE(d.textures.size() == 1);
+        CHECK(d.textures[0].name == "skin.bmp");
+        CHECK(d.textures[0].width == 2);
+        CHECK(d.textures[0].height == 2);
+        REQUIRE(d.textures[0].data.size() == 4 * 4); // RGBA
+
+        for (int i = 0; i < 4; i++) {
+            CHECK(d.textures[0].data[i * 4 + 0] == (uint8_t)(i * 10));
+            CHECK(d.textures[0].data[i * 4 + 1] == (uint8_t)(i * 20));
+            CHECK(d.textures[0].data[i * 4 + 2] == (uint8_t)(i * 30));
+            CHECK(d.textures[0].data[i * 4 + 3] == 255); // always opaque
+        }
+    }
+
+    TEST_CASE("implausible texture dimensions keep metadata but decode no pixels") {
+        MDLBuilder mb;
+        std::vector<MDLTexture> texs(1);
+        set_fixed(texs[0].name, 64, "huge.bmp");
+        texs[0].width = 8192; // over the 4096 cap
+        texs[0].height = 8192;
+        texs[0].index = 0;
+
+        mb.hdr.numtextures = 1;
+        mb.hdr.textureindex = mb.append(texs);
+        auto blob = mb.finish();
+
+        MDLParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        const MDLData &d = parser.get_data();
+
+        REQUIRE(d.textures.size() == 1);
+        CHECK(d.textures[0].name == "huge.bmp");
+        CHECK(d.textures[0].data.empty());
+    }
+
+    TEST_CASE("texture whose pixel data runs past the buffer decodes no pixels") {
+        MDLBuilder mb;
+        std::vector<MDLTexture> texs(1);
+        set_fixed(texs[0].name, 64, "trunc.bmp");
+        texs[0].width = 64;
+        texs[0].height = 64;
+        texs[0].index = 16; // nowhere near enough room for 4096 px + a 768-byte palette
+
+        mb.hdr.numtextures = 1;
+        mb.hdr.textureindex = mb.append(texs);
+        auto blob = mb.finish();
+
+        MDLParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        REQUIRE(parser.get_data().textures.size() == 1);
+        CHECK(parser.get_data().textures[0].data.empty());
+    }
+
+    // ---------- skins ----------
+
+    TEST_CASE("parses the skin lookup table") {
+        MDLBuilder mb;
+        std::vector<int16_t> table = {0, 1, 2, 3, 4, 5}; // 3 refs x 2 families
+
+        mb.hdr.numskinref = 3;
+        mb.hdr.numskinfamilies = 2;
+        mb.hdr.skinindex = mb.append(table);
+        auto blob = mb.finish();
+
+        MDLParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        const MDLData &d = parser.get_data();
+
+        CHECK(d.num_skin_ref == 3);
+        CHECK(d.num_skin_families == 2);
+        REQUIRE(d.skin_table.size() == 6);
+        CHECK(d.skin_table[0] == 0);
+        CHECK(d.skin_table[5] == 5);
+    }
+
+    TEST_CASE("skin counts are recorded even when the table is absent") {
+        MDLBuilder mb;
+        mb.hdr.numskinref = 0;
+        mb.hdr.numskinfamilies = 0;
+        auto blob = mb.finish();
+
+        MDLParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        CHECK(parser.get_data().num_skin_ref == 0);
+        CHECK(parser.get_data().skin_table.empty());
+    }
+
+    TEST_CASE("oversized skin table is rejected by the sanity cap") {
+        MDLBuilder mb;
+        // 300 * 300 = 90000, past the parser's 65536 element cap.
+        mb.hdr.numskinref = 300;
+        mb.hdr.numskinfamilies = 300;
+        mb.hdr.skinindex = (int32_t)mb.blob.size();
+        auto blob = mb.finish();
+
+        MDLParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        CHECK(parser.get_data().skin_table.empty());
+    }
+
+    // ---------- bodyparts ----------
+
+    TEST_CASE("parses submodel vertices, normals and bone assignments") {
+        MDLBuilder mb;
+
+        std::vector<float> verts = {1, 2, 3, 4, 5, 6};   // 2 vertices
+        std::vector<float> norms = {0, 0, 1, 0, 1, 0};   // 2 normals
+        std::vector<uint8_t> vbone = {0, 1};
+        std::vector<uint8_t> nbone = {1, 0};
+
+        MDLModel model{};
+        set_fixed(model.name, 64, "body");
+        model.numverts = 2;
+        model.vertindex = mb.append(verts);
+        model.numnorms = 2;
+        model.normindex = mb.append(norms);
+        model.vertinfoindex = mb.append(vbone);
+        model.norminfoindex = mb.append(nbone);
+        model.nummesh = 0;
+
+        MDLBodyPart bp{};
+        set_fixed(bp.name, 64, "torso");
+        bp.nummodels = 1;
+        bp.modelindex = mb.append(std::vector<MDLModel>{model});
+
+        mb.hdr.numbodyparts = 1;
+        mb.hdr.bodypartindex = mb.append(std::vector<MDLBodyPart>{bp});
+        auto blob = mb.finish();
+
+        MDLParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        const MDLData &d = parser.get_data();
+
+        REQUIRE(d.bodyparts.size() == 1);
+        CHECK(d.bodyparts[0].name == "torso");
+        REQUIRE(d.bodyparts[0].models.size() == 1);
+
+        const auto &sm = d.bodyparts[0].models[0];
+        CHECK(sm.name == "body");
+        REQUIRE(sm.vertices.size() == 6);
+        CHECK(sm.vertices[3] == doctest::Approx(4.0f));
+        REQUIRE(sm.normals.size() == 6);
+        CHECK(sm.normals[2] == doctest::Approx(1.0f));
+        REQUIRE(sm.vert_bone.size() == 2);
+        CHECK(sm.vert_bone[1] == 1);
+        REQUIRE(sm.norm_bone.size() == 2);
+        CHECK(sm.norm_bone[0] == 1);
+    }
+
+    // Builds a one-mesh model around a caller-supplied triangle command stream, so the
+    // strip/fan cases below differ only in the command they encode.
+    auto build_tri_model = [](const std::vector<uint8_t> &cmds, int16_t skinref,
+                              int tex_w, int tex_h) {
+        MDLBuilder mb;
+
+        if (tex_w > 0) {
+            // A texture is needed for the UV divide; give it real pixels + palette so
+            // parse_textures accepts it.
+            std::vector<uint8_t> px((size_t)tex_w * tex_h, 0);
+            uint8_t palette[256 * 3] = {};
+            int32_t pixels_at = mb.append_bytes(px.data(), px.size());
+            mb.append_bytes(palette, sizeof(palette));
+
+            std::vector<MDLTexture> texs(1);
+            set_fixed(texs[0].name, 64, "skin.bmp");
+            texs[0].width = tex_w;
+            texs[0].height = tex_h;
+            texs[0].index = pixels_at;
+            mb.hdr.numtextures = 1;
+            mb.hdr.textureindex = mb.append(texs);
+        }
+
+        MDLMesh mesh{};
+        mesh.skinref = skinref;
+        mesh.triindex = mb.append_bytes(cmds.data(), cmds.size());
+
+        MDLModel model{};
+        set_fixed(model.name, 64, "body");
+        model.nummesh = 1;
+        model.meshindex = mb.append(std::vector<MDLMesh>{mesh});
+
+        MDLBodyPart bp{};
+        set_fixed(bp.name, 64, "torso");
+        bp.nummodels = 1;
+        bp.modelindex = mb.append(std::vector<MDLModel>{model});
+
+        mb.hdr.numbodyparts = 1;
+        mb.hdr.bodypartindex = mb.append(std::vector<MDLBodyPart>{bp});
+        return mb.finish();
+    };
+
+    TEST_CASE("expands a triangle strip with alternating winding") {
+        // 4 strip vertices -> 2 triangles. GoldSrc flips the first two indices on odd
+        // triangles to keep the winding consistent.
+        std::vector<TriVertRaw> verts = {
+            {10, 100, 0, 0}, {11, 101, 0, 0}, {12, 102, 0, 0}, {13, 103, 0, 0}};
+        auto blob = build_tri_model(encode_tri_cmds(4, verts), 0, 0, 0);
+
+        MDLParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        const auto &meshes = parser.get_data().bodyparts.at(0).models.at(0).meshes;
+        REQUIRE(meshes.size() == 1);
+
+        const auto &tv = meshes[0].triangle_verts;
+        REQUIRE(tv.size() == 6); // 2 triangles
+
+        // v=2 (even): v0, v1, v2
+        CHECK(tv[0].vertex_index == 10);
+        CHECK(tv[1].vertex_index == 11);
+        CHECK(tv[2].vertex_index == 12);
+        // v=3 (odd): v2, v1, v3 — first two swapped
+        CHECK(tv[3].vertex_index == 12);
+        CHECK(tv[4].vertex_index == 11);
+        CHECK(tv[5].vertex_index == 13);
+
+        CHECK(tv[0].normal_index == 100);
+        CHECK(tv[5].normal_index == 103);
+    }
+
+    TEST_CASE("expands a triangle fan") {
+        // Negative command count = fan: every triangle shares vertex 0.
+        std::vector<TriVertRaw> verts = {
+            {20, 200, 0, 0}, {21, 201, 0, 0}, {22, 202, 0, 0}, {23, 203, 0, 0}};
+        auto blob = build_tri_model(encode_tri_cmds(-4, verts), 0, 0, 0);
+
+        MDLParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        const auto &tv = parser.get_data().bodyparts.at(0).models.at(0).meshes.at(0).triangle_verts;
+        REQUIRE(tv.size() == 6);
+
+        CHECK(tv[0].vertex_index == 20);
+        CHECK(tv[1].vertex_index == 21);
+        CHECK(tv[2].vertex_index == 22);
+        // Second triangle fans off the same hub vertex.
+        CHECK(tv[3].vertex_index == 20);
+        CHECK(tv[4].vertex_index == 22);
+        CHECK(tv[5].vertex_index == 23);
+    }
+
+    TEST_CASE("texture coords are divided by the skin texture dimensions") {
+        // Texel coords are stored as integers and normalised against the mesh's skin.
+        // This is why parse_textures has to run before parse_bodyparts.
+        std::vector<TriVertRaw> verts = {
+            {0, 0, 32, 16}, {1, 1, 64, 32}, {2, 2, 0, 0}};
+        auto blob = build_tri_model(encode_tri_cmds(3, verts), 0, 64, 32);
+
+        MDLParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        const auto &tv = parser.get_data().bodyparts.at(0).models.at(0).meshes.at(0).triangle_verts;
+        REQUIRE(tv.size() == 3);
+
+        CHECK(tv[0].s == doctest::Approx(32.0f / 64.0f));
+        CHECK(tv[0].t == doctest::Approx(16.0f / 32.0f));
+        CHECK(tv[1].s == doctest::Approx(1.0f));
+        CHECK(tv[2].s == doctest::Approx(0.0f));
+    }
+
+    TEST_CASE("an empty triangle command stream yields no triangles") {
+        auto blob = build_tri_model(std::vector<uint8_t>{}, 0, 0, 0);
+
+        MDLParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        CHECK(parser.get_data().bodyparts.at(0).models.at(0).meshes.at(0).triangle_verts.empty());
+    }
+
+    // ---------- sequences ----------
+
+    TEST_CASE("parses sequence metadata") {
+        MDLBuilder mb;
+        std::vector<MDLSequenceDesc> seqs(1);
+        set_fixed(seqs[0].label, 32, "walk");
+        seqs[0].fps = 24.0f;
+        seqs[0].numframes = 5;
+        seqs[0].flags = 1; // looping
+        seqs[0].linearmovement[0] = 7.5f;
+        seqs[0].seqgroup = 0;
+        seqs[0].animindex = 0; // no bones, so decode_animation bails immediately
+
+        mb.hdr.numseq = 1;
+        mb.hdr.seqindex = mb.append(seqs);
+        auto blob = mb.finish();
+
+        MDLParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        const MDLData &d = parser.get_data();
+
+        REQUIRE(d.sequences.size() == 1);
+        CHECK(d.sequences[0].name == "walk");
+        CHECK(d.sequences[0].fps == doctest::Approx(24.0f));
+        CHECK(d.sequences[0].num_frames == 5);
+        CHECK(d.sequences[0].flags == 1);
+        CHECK(d.sequences[0].linear_movement[0] == doctest::Approx(7.5f));
+    }
+
+    TEST_CASE("sequences in a non-zero seqgroup carry no decoded frames") {
+        // seqgroup != 0 means the animation lives in an external .mdl sequence file that
+        // this parser never opens, so metadata is kept but frames stay empty.
+        float value[6] = {0, 0, 0, 0, 0, 0};
+        float scale[6] = {1, 1, 1, 1, 1, 1};
+        std::vector<uint8_t> channels[6];
+        channels[0] = encode_anim_channel({{1, 2, {5}}});
+
+        MDLBuilder mb;
+        MDLBone bone{};
+        set_fixed(bone.name, 32, "root");
+        bone.parent = -1;
+        for (int i = 0; i < 6; i++) { bone.value[i] = value[i]; bone.scale[i] = scale[i]; }
+        mb.hdr.numbones = 1;
+        mb.hdr.boneindex = mb.append(std::vector<MDLBone>{bone});
+
+        int32_t animindex = mb.append_anim_1bone(channels);
+
+        std::vector<MDLSequenceDesc> seqs(1);
+        set_fixed(seqs[0].label, 32, "external");
+        seqs[0].numframes = 2;
+        seqs[0].animindex = animindex;
+        seqs[0].seqgroup = 1; // external
+        mb.hdr.numseq = 1;
+        mb.hdr.seqindex = mb.append(seqs);
+        auto blob = mb.finish();
+
+        MDLParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        REQUIRE(parser.get_data().sequences.size() == 1);
+        CHECK(parser.get_data().sequences[0].name == "external");
+        CHECK(parser.get_data().sequences[0].frames.empty());
+    }
+
+    // ---------- decode_animation ----------
+
+    TEST_CASE("channels with no animation data hold the bone's rest pose") {
+        float value[6] = {10, 20, 30, 0.1f, 0.2f, 0.3f};
+        float scale[6] = {1, 1, 1, 1, 1, 1};
+        std::vector<uint8_t> channels[6]; // all absent -> offset 0 for every channel
+
+        auto blob = make_anim_mdl(value, scale, 2, channels);
+        MDLParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+
+        const auto &frames = parser.get_data().sequences.at(0).frames;
+        REQUIRE(frames.size() == 2);
+        for (const auto &f : frames) {
+            REQUIRE(f.bone_pos.size() == 3);
+            CHECK(f.bone_pos[0] == doctest::Approx(10.0f));
+            CHECK(f.bone_pos[1] == doctest::Approx(20.0f));
+            CHECK(f.bone_pos[2] == doctest::Approx(30.0f));
+            CHECK(f.bone_rot[0] == doctest::Approx(0.1f));
+            CHECK(f.bone_rot[2] == doctest::Approx(0.3f));
+        }
+    }
+
+    TEST_CASE("applies the bone's per-channel scale to animation deltas") {
+        float value[6] = {10, 20, 30, 0.1f, 0.2f, 0.3f};
+        float scale[6] = {0.5f, 1, 1, 0.01f, 1, 1};
+
+        std::vector<uint8_t> channels[6];
+        channels[0] = encode_anim_channel({{3, 3, {2, 4, 6}}});       // pos x
+        channels[3] = encode_anim_channel({{3, 3, {100, 200, 300}}}); // rot x
+
+        auto blob = make_anim_mdl(value, scale, 3, channels);
+        MDLParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+
+        const auto &frames = parser.get_data().sequences.at(0).frames;
+        REQUIRE(frames.size() == 3);
+
+        // value = base + delta * scale
+        CHECK(frames[0].bone_pos[0] == doctest::Approx(11.0f));
+        CHECK(frames[1].bone_pos[0] == doctest::Approx(12.0f));
+        CHECK(frames[2].bone_pos[0] == doctest::Approx(13.0f));
+
+        CHECK(frames[0].bone_rot[0] == doctest::Approx(1.1f));
+        CHECK(frames[1].bone_rot[0] == doctest::Approx(2.1f));
+        CHECK(frames[2].bone_rot[0] == doctest::Approx(3.1f));
+
+        // Untouched channels still sit at the rest pose.
+        CHECK(frames[1].bone_pos[1] == doctest::Approx(20.0f));
+        CHECK(frames[1].bone_rot[2] == doctest::Approx(0.3f));
+    }
+
+    TEST_CASE("frames past the valid count repeat the last value") {
+        float value[6] = {10, 0, 0, 0, 0, 0};
+        float scale[6] = {0.5f, 1, 1, 1, 1, 1};
+
+        // 4 frames but only 2 stored values: frames 2 and 3 clamp to the second one.
+        std::vector<uint8_t> channels[6];
+        channels[0] = encode_anim_channel({{2, 4, {2, 4}}});
+
+        auto blob = make_anim_mdl(value, scale, 4, channels);
+        MDLParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+
+        const auto &frames = parser.get_data().sequences.at(0).frames;
+        REQUIRE(frames.size() == 4);
+        CHECK(frames[0].bone_pos[0] == doctest::Approx(11.0f));
+        CHECK(frames[1].bone_pos[0] == doctest::Approx(12.0f));
+        CHECK(frames[2].bone_pos[0] == doctest::Approx(12.0f));
+        CHECK(frames[3].bone_pos[0] == doctest::Approx(12.0f));
+    }
+
+    TEST_CASE("a span with zero valid entries yields the rest pose") {
+        float value[6] = {10, 0, 0, 0, 0, 0};
+        float scale[6] = {0.5f, 1, 1, 1, 1, 1};
+
+        std::vector<uint8_t> channels[6];
+        channels[0] = encode_anim_channel({{0, 3, {}}}); // no stored values at all
+
+        auto blob = make_anim_mdl(value, scale, 3, channels);
+        MDLParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+
+        const auto &frames = parser.get_data().sequences.at(0).frames;
+        REQUIRE(frames.size() == 3);
+        for (const auto &f : frames)
+            CHECK(f.bone_pos[0] == doctest::Approx(10.0f));
+    }
+
+    TEST_CASE("consecutive spans cover successive frames") {
+        float value[6] = {10, 0, 0, 0, 0, 0};
+        float scale[6] = {0.5f, 1, 1, 1, 1, 1};
+
+        // Span 1: 2 frames from a single value (clamped). Span 2: 2 distinct frames.
+        std::vector<uint8_t> channels[6];
+        channels[0] = encode_anim_channel({{1, 2, {2}}, {2, 2, {6, 8}}});
+
+        auto blob = make_anim_mdl(value, scale, 4, channels);
+        MDLParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+
+        const auto &frames = parser.get_data().sequences.at(0).frames;
+        REQUIRE(frames.size() == 4);
+        CHECK(frames[0].bone_pos[0] == doctest::Approx(11.0f));
+        CHECK(frames[1].bone_pos[0] == doctest::Approx(11.0f));
+        CHECK(frames[2].bone_pos[0] == doctest::Approx(13.0f));
+        CHECK(frames[3].bone_pos[0] == doctest::Approx(14.0f));
+    }
+
+    TEST_CASE("animation table reaching past the buffer leaves frames empty") {
+        MDLBuilder mb;
+        MDLBone bone{};
+        set_fixed(bone.name, 32, "root");
+        mb.hdr.numbones = 1;
+        mb.hdr.boneindex = mb.append(std::vector<MDLBone>{bone});
+
+        std::vector<MDLSequenceDesc> seqs(1);
+        set_fixed(seqs[0].label, 32, "bad");
+        seqs[0].numframes = 4;
+        seqs[0].animindex = 0x7000000; // way past the end
+        mb.hdr.numseq = 1;
+        mb.hdr.seqindex = mb.append(seqs);
+        auto blob = mb.finish();
+
+        MDLParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        REQUIRE(parser.get_data().sequences.size() == 1);
+        CHECK(parser.get_data().sequences[0].frames.empty());
     }
 }
