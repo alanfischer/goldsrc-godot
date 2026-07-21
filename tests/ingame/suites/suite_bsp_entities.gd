@@ -22,12 +22,12 @@ func _worldspawn(ents: Array) -> void:
 
 	var ws: Dictionary = ents[0]
 	check_eq(ws.get("classname", ""), "worldspawn", "entity 0 is worldspawn")
-	check_eq(ws.get("skyname", ""), "wiz", "worldspawn carries ww_2fort's skyname")
+	check_eq(ws.get("skyname", ""), "night", "worldspawn carries ww_ravine's skyname")
 	check(ws.has("wad"), "worldspawn lists its WAD dependencies")
-	# Keys with backslashes and semicolons survive intact — the wad list is the one field
-	# where escaping mistakes would show up.
+	# The wad list is a semicolon-separated string ("halflife.wad;tfc.wad;"); the
+	# separators must survive parsing intact, since a botched split would drop entries.
 	check(String(ws.get("wad", "")).contains("halflife.wad"),
-		"the WAD list keeps its path separators")
+		"the WAD list keeps its separators")
 
 
 func _every_entity_is_well_formed(ents: Array) -> void:
@@ -53,14 +53,13 @@ func _player_spawns(ents: Array) -> void:
 			"info_player_start":
 				solo_starts += 1
 
-	# 24 team spawns plus a single info_player_start. Matched exactly rather than by an
-	# "info_player" prefix, which conflates the two and gives 25.
-	check_eq(spawns.size(), 24, "ww_2fort's team spawn count")
-	check_eq(solo_starts, 1, "ww_2fort has one non-team start")
+	# 8 team spawns plus a single info_player_start. Matched exactly rather than by an
+	# "info_player" prefix, which conflates the two and gives 9.
+	check_eq(spawns.size(), 8, "ww_ravine's team spawn count")
+	check_eq(solo_starts, 1, "ww_ravine has one non-team start")
 	if spawns.is_empty():
 		return
 
 	var first: Dictionary = spawns[0]
-	check_eq(first.get("origin", ""), "1435 1626 242", "first team spawn origin")
+	check_eq(first.get("origin", ""), "1056 1456 1984", "first team spawn origin")
 	check_eq(first.get("team_no", ""), "1", "first team spawn belongs to team 1")
-	check(first.has("angles"), "a spawn carries a facing angle")

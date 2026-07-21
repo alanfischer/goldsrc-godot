@@ -15,7 +15,7 @@ extends RefCounted
 
 ## The one real map in the repo. Every geometry assertion is anchored to this file, so
 ## replacing it means re-deriving the numbers that reference it.
-const MAP_PATH := "res://maps/ww_2fort.bsp"
+const MAP_PATH := "res://maps/ww_ravine.bsp"
 const SPRITE_PATH := "res://sprites/fire.spr"
 
 ## GoldSrc leaf contents. Not exported to GDScript by the extension, so they are restated
