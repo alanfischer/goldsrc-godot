@@ -66,32 +66,6 @@ If the asset is not found, a small placeholder `BoxMesh` (0.3 m³) is placed at 
 2. Godot auto-imports all `.mdl` and `.spr` files.
 3. Import your `.bsp` — entities with models/sprites appear in the scene automatically.
 
-### Headless Batch Conversion
-
-Convert BSP maps from the command line without opening the editor:
-
-```bash
-godot --path <project-dir> --script res://tools/batch_convert_bsp.gd -- \
-  --bsp map1.bsp --bsp map2.bsp \
-  --wad-dir /path/to/wads \
-  --output-dir /path/to/output \
-  --scale 0.025 \
-  --shader-lightstyles \
-  --overbright 2.0 \
-  --rotate
-```
-
-Options:
-- `--bsp` — input BSP file (repeat for multiple maps)
-- `--wad-dir` — directory containing `.wad` files for texture lookup
-- `--output-dir` — where to write `.scn` files
-- `--scale` — coordinate scale factor (default: `0.025`)
-- `--shader-lightstyles` — use shader-based lightstyle animation
-- `--overbright` — lightmap brightness multiplier (default: `1.0`)
-- `--rotate` — rotate 180 degrees around Y to match alternate coordinate conventions
-
-Outputs a `.scn` PackedScene file per map with all geometry, collision, entity nodes, and a `pvs_data` PackedByteArray stored as root node metadata for `VisibilityManager` initialization.
-
 ## PVS Runtime Visibility Culling
 
 ### Concept
