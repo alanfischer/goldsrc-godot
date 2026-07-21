@@ -1,0 +1,17 @@
+[remap]
+
+importer="goldsrc.bsp"
+type="PackedScene"
+uid="uid://rw8pa31wjn4r"
+path="res://.godot/imported/ww_ravine.bsp-d55c9c2634fe61e517b2f226983f7b05.scn"
+
+[deps]
+
+source_file="res://maps/ww_ravine.bsp"
+dest_files=["res://.godot/imported/ww_ravine.bsp-d55c9c2634fe61e517b2f226983f7b05.scn"]
+
+[params]
+
+wad_directory=""
+scale_factor=0.025
+model_directory=""

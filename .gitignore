@@ -18,6 +18,10 @@ demo/.godot/
 *.wad
 *.mdl
 *.spr
+# ...except the map and sprite the in-engine tests are anchored to, so the suites run
+# from a clean checkout with no dependency on the parent WizardWars tree.
+!maps/ww_ravine.bsp
+!sprites/fire.spr
 
 # IDE
 .vscode/

@@ -2,7 +2,7 @@ extends "res://tests/ingame/suite.gd"
 ## GoldSrcBSP loading: the two entry points, what an unloaded node reports, and what each
 ## rejection path returns.
 ##
-## The counts below are anchored to the shipped maps/ww_2fort.bsp. They are exact on
+## The counts below are anchored to the shipped maps/ww_ravine.bsp. They are exact on
 ## purpose — a parser change that quietly alters how many faces or leafs a real map yields
 ## is precisely the regression the standalone C++ tests, built on synthetic fixtures,
 ## cannot see.
@@ -35,8 +35,8 @@ func _loads_the_shipped_map() -> void:
 	if bsp == null:
 		return
 
-	check_eq(bsp.get_leaf_count(), 3488, "ww_2fort leaf count")
-	check_eq(bsp.get_entities().size(), 643, "ww_2fort entity count")
+	check_eq(bsp.get_leaf_count(), 2174, "ww_ravine leaf count")
+	check_eq(bsp.get_entities().size(), 75, "ww_ravine entity count")
 	check(bsp.get_pvs_blob().size() > 0, "a loaded map exposes a PVS blob")
 
 

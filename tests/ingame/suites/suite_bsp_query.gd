@@ -3,11 +3,11 @@ extends "res://tests/ingame/suite.gd"
 ## AABB leaf gathering. A regression here is a live bug — players falling through floors or
 ## geometry vanishing — rather than something that fails loudly at load time.
 
-## The first info_player_teamspawn in ww_2fort, at GoldSrc (1435 1626 242), converted with
-## the extension's own mapping: godot = (-x*s, z*s, y*s) at the default scale of 0.025.
+## The first info_player_teamspawn in ww_ravine, at GoldSrc (1056 1456 1984), converted
+## with the extension's own mapping: godot = (-x*s, z*s, y*s) at the default scale of 0.025.
 ## Hardcoded rather than read from the entity list so a failure here means a query bug, not
 ## an entity-parsing bug — that is asserted separately in suite_bsp_entities.
-const SPAWN := Vector3(-35.875, 6.05, 40.65)
+const SPAWN := Vector3(-26.4, 49.6, 36.4)
 
 
 func run() -> void:
@@ -27,7 +27,9 @@ func run() -> void:
 func _contents_around_a_spawn(bsp: GoldSrcBSP) -> void:
 	check_eq(bsp.point_contents(SPAWN), CONTENTS_EMPTY,
 		"a player spawn stands in empty space")
-	check_eq(bsp.point_contents(SPAWN - Vector3(0, 5, 0)), CONTENTS_SOLID,
+	# This spawn overlooks its floor from a height, so the solid does not begin until
+	# ~12 units down; sample at 15 to land clearly inside it.
+	check_eq(bsp.point_contents(SPAWN - Vector3(0, 15, 0)), CONTENTS_SOLID,
 		"there is solid floor beneath a player spawn")
 
 	# Far outside the map is the void. Whatever it reports, it must be a real contents
@@ -42,8 +44,10 @@ func _contents_around_a_spawn(bsp: GoldSrcBSP) -> void:
 ## dropped axis all move these counts, where a pair of hand-picked points can easily land
 ## on neighbours that happen to agree.
 ##
-## The totals are anchored to the shipped ww_2fort.bsp. If they change, either the map
+## The totals are anchored to the shipped ww_ravine.bsp. If they change, either the map
 ## changed or the BSP walk did — both worth a human look rather than a silent re-baseline.
+## The grid is centred on SPAWN so it brackets the map's playable space rather than the
+## world origin, which for this map sits partly in the void.
 func _contents_over_a_grid(bsp: GoldSrcBSP) -> void:
 	var solid := 0
 	var empty := 0
@@ -52,15 +56,18 @@ func _contents_over_a_grid(bsp: GoldSrcBSP) -> void:
 	for ix in range(12):
 		for iy in range(6):
 			for iz in range(12):
-				var p := Vector3(-60.0 + ix * 10.0, 2.0 + iy * 6.0, -60.0 + iz * 10.0)
+				var p := Vector3(
+					SPAWN.x - 60.0 + ix * 10.0,
+					SPAWN.y + 2.0 + iy * 6.0,
+					SPAWN.z - 60.0 + iz * 10.0)
 				match bsp.point_contents(p):
 					CONTENTS_SOLID: solid += 1
 					CONTENTS_EMPTY: empty += 1
 					_: other += 1
 
 	check_eq(solid + empty + other, 864, "the grid samples every point")
-	check_eq(solid, 756, "solid sample count across ww_2fort")
-	check_eq(empty, 108, "open-space sample count across ww_2fort")
+	check_eq(solid, 834, "solid sample count across ww_ravine")
+	check_eq(empty, 30, "open-space sample count across ww_ravine")
 
 
 func _point_to_leaf(bsp: GoldSrcBSP) -> void:

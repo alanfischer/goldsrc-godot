@@ -31,7 +31,7 @@ func _builds_a_scene_tree() -> void:
 	bsp.build_mesh()
 
 	# One child per entity: worldspawn plus every brush entity.
-	check_eq(bsp.get_child_count(), 643, "build_mesh emits a node per entity")
+	check_eq(bsp.get_child_count(), 75, "build_mesh emits a node per entity")
 
 	var worldspawn := bsp.get_node_or_null("worldspawn")
 	check(worldspawn != null, "worldspawn is present by name")
@@ -67,7 +67,7 @@ func _face_axes() -> void:
 	if bsp == null:
 		return
 
-	var axes: Array = bsp.get_face_axes(Vector3(-35.875, 6.05, 40.65), Vector3(0, 1, 0))
+	var axes: Array = bsp.get_face_axes(Vector3(-26.4, 49.6, 36.4), Vector3(0, 1, 0))
 	check_eq(axes.size(), 2, "face axes come back as an S/T pair")
 	if axes.size() == 2:
 		check(axes[0] is Vector3 and axes[1] is Vector3, "both axes are Vector3")
