@@ -12,6 +12,7 @@ func run() -> void:
 	_unloaded_node_is_inert()
 	_loads_the_shipped_map()
 	_rejection_paths()
+	_accepts_quake_version()
 	_both_entry_points_agree()
 
 
@@ -56,6 +57,27 @@ func _rejection_paths() -> void:
 
 	# A failed load must not leave half-parsed state behind.
 	check_eq(bsp.get_leaf_count(), 0, "after a failed load the node is still empty")
+
+
+## Quake maps (BSP version 29) share Half-Life's lump layout and geometry structs, so the parser
+## accepts them alongside v30 — this is what lets a Quake-format map (e.g. ww_castlerush) load at
+## all. Guards the version gate; the Quake-specific texture/lightmap decode is exercised end-to-end
+## by loading a real v29 map, not reachable from a synthetic header here.
+func _accepts_quake_version() -> void:
+	var bsp := GoldSrcBSP.new()
+	track(bsp)
+
+	# A header-sized, otherwise-empty buffer is valid enough to reach — and pass — the version gate.
+	var v29 := PackedByteArray()
+	v29.resize(256)
+	v29.encode_u32(0, 29)
+	check_eq(bsp.load_bsp_from_data(v29), OK, "a version-29 (Quake) header is accepted")
+
+	# Neighbouring versions are still rejected, so acceptance is deliberate, not an "any version" hole.
+	var v31 := PackedByteArray()
+	v31.resize(256)
+	v31.encode_u32(0, 31)
+	check_eq(bsp.load_bsp_from_data(v31), ERR_PARSE_ERROR, "an unsupported BSP version is rejected")
 
 
 ## load_bsp is load_bsp_from_data plus a file read, so the two must agree on the same

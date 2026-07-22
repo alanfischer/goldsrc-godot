@@ -463,9 +463,12 @@ struct FaceFixture {
     std::vector<BSPNode> nodes;
     std::vector<BSPLeaf> leafs;
     std::vector<TexSpec> textures;
+    int32_t version = HLBSP_VERSION;   // set to QBSP_VERSION to exercise the Quake path
+    std::vector<uint8_t> lighting;     // raw LUMP_LIGHTING bytes (grayscale for a Quake fixture)
 
     std::vector<uint8_t> build() const {
         BSPBuilder b;
+        b.hdr.version = version;
         b.set_lump(LUMP_VERTEXES, vertexes);
         b.set_lump(LUMP_PLANES, planes);
         b.set_lump(LUMP_EDGES, edges);
@@ -475,6 +478,7 @@ struct FaceFixture {
         b.set_lump(LUMP_MODELS, models);
         b.set_lump(LUMP_NODES, nodes);
         b.set_lump(LUMP_LEAFS, leafs);
+        b.set_lump_bytes(LUMP_LIGHTING, lighting);
         b.set_lump_bytes(LUMP_TEXTURES, make_texture_lump(textures));
         return b.finish();
     }
@@ -776,15 +780,27 @@ TEST_SUITE("BSP entity parsing") {
         CHECK(parser.get_data().entities.empty());
     }
 
-    TEST_CASE("wrong BSP version returns false") {
+    TEST_CASE("unsupported BSP version returns false") {
         BinaryBuilder b;
-        b.le32(29); // wrong version
+        b.le32(31); // neither Quake (29) nor Half-Life (30)
         for (int i = 0; i < 15; i++) {
             b.le32(0);
             b.le32(0);
         }
         BSPParser parser;
         CHECK_FALSE(parser.parse(b.data.data(), b.data.size()));
+    }
+
+    TEST_CASE("Quake BSP version (29) is accepted") {
+        // Quake shares Half-Life's lump layout, so a v29 header parses (to an empty map here).
+        BinaryBuilder b;
+        b.le32(29);
+        for (int i = 0; i < 15; i++) {
+            b.le32(0);
+            b.le32(0);
+        }
+        BSPParser parser;
+        CHECK(parser.parse(b.data.data(), b.data.size()));
     }
 
     TEST_CASE("buffer too small to hold header returns false") {
@@ -1871,6 +1887,41 @@ TEST_SUITE("MDLParser") {
 
 TEST_SUITE("BSP face parsing") {
 
+    TEST_CASE("Quake grayscale lighting is expanded to RGB and lightofs tripled") {
+        FaceFixture fx = make_quad_fixture();
+        fx.version = QBSP_VERSION;
+        fx.lighting = {10, 20, 30, 40};  // grayscale luxels, 1 byte each
+        fx.faces[0].lightofs = 1;         // byte offset into the grayscale lump
+
+        BSPParser parser;
+        auto blob = fx.build();
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        const BSPData &d = parser.get_data();
+
+        // Each grayscale byte becomes an r=g=b triple, so the lump triples in size.
+        REQUIRE(d.lighting.size() == 12);
+        CHECK(d.lighting[0] == 10); CHECK(d.lighting[1] == 10); CHECK(d.lighting[2] == 10);
+        CHECK(d.lighting[3] == 20); CHECK(d.lighting[4] == 20); CHECK(d.lighting[5] == 20);
+        // The face's byte offset is scaled to index the tripled RGB layout.
+        REQUIRE(d.faces.size() == 1);
+        CHECK(d.faces[0].lightmap_offset == 3);  // 1 * 3
+    }
+
+    TEST_CASE("Half-Life RGB lighting is left untouched") {
+        FaceFixture fx = make_quad_fixture();  // version 30 by default
+        fx.lighting = {10, 20, 30, 40, 50, 60};
+        fx.faces[0].lightofs = 3;
+
+        BSPParser parser;
+        auto blob = fx.build();
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        const BSPData &d = parser.get_data();
+
+        CHECK(d.lighting.size() == 6);            // unchanged
+        REQUIRE(d.faces.size() == 1);
+        CHECK(d.faces[0].lightmap_offset == 3);   // unchanged
+    }
+
     TEST_CASE("parses a quad face's vertices, UVs and normal") {
         auto blob = make_quad_fixture().build();
 
@@ -2254,6 +2305,29 @@ TEST_SUITE("BSP textures and raw lumps") {
         return lump;
     };
 
+    // The Quake (v29) counterpart: same inline pixels, but no trailing palette — v29 indices
+    // resolve against the global Quake palette instead of a per-miptex one.
+    auto embedded_lump_quake = [](const std::string &name, uint32_t w, uint32_t h, uint8_t fill) {
+        std::vector<uint8_t> lump(8, 0);
+        int32_t count = 1;
+        memcpy(lump.data(), &count, 4);
+        int32_t ofs = 8;
+        memcpy(lump.data() + 4, &ofs, 4);
+
+        BSPMipTex mt{};
+        set_fixed(mt.name, sizeof(mt.name), name);
+        mt.width = w;
+        mt.height = h;
+        mt.offsets[0] = sizeof(BSPMipTex);
+        const uint8_t *p = reinterpret_cast<const uint8_t *>(&mt);
+        lump.insert(lump.end(), p, p + sizeof(mt));
+
+        uint32_t pixels = w * h;
+        uint32_t datasize = pixels + pixels / 4 + pixels / 16 + pixels / 64;
+        lump.insert(lump.end(), datasize, fill);
+        return lump;
+    };
+
     TEST_CASE("decodes an embedded miptex through its palette") {
         uint8_t palette[256 * 3] = {};
         palette[5 * 3 + 0] = 11;
@@ -2299,6 +2373,28 @@ TEST_SUITE("BSP textures and raw lumps") {
         REQUIRE(texs.size() == 1);
         REQUIRE(texs[0].data.size() == 8 * 8 * 4);
         CHECK(texs[0].data[3] == 0); // fully transparent, not opaque blue
+    }
+
+    TEST_CASE("Quake embedded miptex decodes through the global Quake palette") {
+        // A v29 miptex carries no palette. Index 5 must resolve to the global Quake palette's
+        // grayscale-ramp entry (75,75,75) — proving the parser used the built-in palette, not
+        // the bytes that would sit where an HL palette otherwise would.
+        BSPBuilder b;
+        b.hdr.version = QBSP_VERSION;
+        b.set_lump_bytes(LUMP_TEXTURES, embedded_lump_quake("qtex", 8, 8, 5));
+        auto blob = b.finish();
+
+        BSPParser parser;
+        REQUIRE(parser.parse(blob.data(), blob.size()));
+        const auto &texs = parser.get_data().textures;
+
+        REQUIRE(texs.size() == 1);
+        CHECK(texs[0].has_data);
+        REQUIRE(texs[0].data.size() == 8 * 8 * 4);
+        CHECK(texs[0].data[0] == 75);
+        CHECK(texs[0].data[1] == 75);
+        CHECK(texs[0].data[2] == 75);
+        CHECK(texs[0].data[3] == 255);
     }
 
     TEST_CASE("a texture with no embedded pixels is marked external") {
