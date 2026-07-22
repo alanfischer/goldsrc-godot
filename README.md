@@ -7,7 +7,7 @@ A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
 ## Features
 
 ### BSP Maps
-- Full BSP30 format with face-based mesh generation
+- BSP30 (Half-Life / GoldSrc) and BSP29 (Quake) formats with face-based mesh generation — Quake v29 maps have their global-palette textures and grayscale lightmaps normalized to the v30 representation
 - Atlas-packed lightmaps with 64 lightstyle channels and runtime rebaking
 - Embedded and WAD-referenced textures with transparency (`{` prefix alpha-scissor)
 - Animated textures (`+0name` … `+9name` / `+aname` … `+jname` alternates) — frames collected at import and stored as `tex_anim_frames` metadata on each `MeshInstance3D`; driven at 10 FPS by `TextureAnimator` at runtime with no C++ dependency
