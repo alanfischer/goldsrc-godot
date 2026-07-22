@@ -7,7 +7,10 @@
 
 namespace goldsrc {
 
-inline constexpr int HLBSP_VERSION = 30;
+inline constexpr int HLBSP_VERSION = 30;  // Half-Life / GoldSrc
+inline constexpr int QBSP_VERSION = 29;   // Quake — same lump layout; textures use the global
+                                          // Quake palette (no embedded palette) and lightmaps are
+                                          // grayscale (1 byte/luxel) instead of HL's RGB.
 
 enum BSPLumpType {
 	LUMP_ENTITIES = 0,
@@ -215,6 +218,7 @@ private:
 	void parse_entities(const uint8_t *data, size_t size);
 
 	BSPHeader header;
+	bool is_quake = false;  // version 29: global-palette textures + grayscale lightmaps
 	std::vector<BSPVertex> vertexes;
 	std::vector<BSPPlane> planes;
 	std::vector<BSPEdge> edges;
