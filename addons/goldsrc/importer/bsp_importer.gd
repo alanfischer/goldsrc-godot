@@ -84,7 +84,12 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 	var bsp := GoldSrcBSP.new()
 	bsp.set_scale_factor(scale_factor)
 
-	# Load WAD files if a directory is specified
+	bsp.load_bsp(source_file)
+
+	# Resolve WAD files. If an explicit directory is given, scan it; otherwise
+	# read the WADs the BSP itself declares in worldspawn's "wad" key and look
+	# them up next to the .bsp and at the project root — so a stock project
+	# textures correctly with no per-file import config.
 	if wad_directory != "":
 		var dir := DirAccess.open(wad_directory)
 		if dir:
@@ -100,8 +105,9 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 			dir.list_dir_end()
 		else:
 			push_warning("BSP Importer: Could not open WAD directory '%s'" % wad_directory)
+	else:
+		_load_declared_wads(bsp, source_file)
 
-	bsp.load_bsp(source_file)
 	bsp.build_mesh()
 
 	# Reparent children to a plain Node3D so the saved scene is GDExtension-independent
@@ -134,6 +140,33 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 
 	var save_err := ResourceSaver.save(scene, save_path + "." + _get_save_extension())
 	return save_err
+
+
+# Load the WADs a BSP declares in worldspawn's "wad" key (a ';'-separated list
+# of GoldSrc paths). Only the basename is used; each is searched for beside the
+# .bsp first, then at the project root. This mirrors the runtime WAD lookup so
+# the editor and the game texture maps identically without any import options.
+func _load_declared_wads(bsp: GoldSrcBSP, source_file: String) -> void:
+	var wad_string := ""
+	for ent in bsp.get_entities():
+		if ent.get("classname", "") == "worldspawn":
+			wad_string = ent.get("wad", "")
+			break
+
+	var search_dirs := [source_file.get_base_dir(), "res://"]
+	var seen := {}
+	for wad_path in wad_string.split(";", false):
+		var wad_name := wad_path.get_file().to_lower()
+		if wad_name.is_empty() or seen.has(wad_name):
+			continue
+		seen[wad_name] = true
+		for base in search_dirs:
+			var full_path: String = base.path_join(wad_name)
+			if FileAccess.file_exists(full_path):
+				var wad := GoldSrcWAD.new()
+				if wad.load_wad(full_path) == OK:
+					bsp.add_wad(wad)
+				break
 
 
 func _set_owner_recursive(node: Node, owner: Node) -> void:
