@@ -252,20 +252,25 @@ void fragment() {
 
 // Water surface shader: turbulent UV warp to simulate GoldSrc liquid surfaces.
 // Applied to faces whose texture name starts with '!' or '*'.
+// GoldSrc water is translucent and visible from both sides (you see the surface from
+// above and, when submerged, from below), so the material writes ALPHA and disables
+// backface culling. cull_back would hide the inner faces and leave opaque water slabs.
 static const char *WATER_SHADER_CODE = R"(
 shader_type spatial;
-render_mode unshaded, shadows_disabled, ambient_light_disabled, depth_draw_opaque, cull_back;
+render_mode unshaded, shadows_disabled, ambient_light_disabled, cull_disabled;
 
 uniform sampler2D albedo_texture : source_color;
 uniform float wave_amplitude : hint_range(0.0, 0.1) = 0.025;
 uniform float wave_frequency : hint_range(1.0, 20.0) = 8.0;
 uniform float wave_speed : hint_range(0.1, 5.0) = 1.6;
+uniform float water_alpha : hint_range(0.0, 1.0) = 0.6;
 
 void fragment() {
 	vec2 uv = UV;
 	uv.x += sin(uv.y * wave_frequency + TIME * wave_speed) * wave_amplitude;
 	uv.y += sin(uv.x * wave_frequency + TIME * wave_speed) * wave_amplitude;
 	ALBEDO = texture(albedo_texture, uv).rgb;
+	ALPHA = water_alpha;
 	ROUGHNESS = 1.0;
 }
 )";
@@ -1393,11 +1398,26 @@ void GoldSrcBSP::build_mesh() {
 			PackedInt32Array indices;
 			int vert_offset = 0;
 
+			bool is_water_group = !tex_name.empty() && (tex_name[0] == '!' || tex_name[0] == '*');
+
 			for (size_t fi = 0; fi < face_refs.size(); fi++) {
 				const auto *face = face_refs[fi].face;
 				const auto &fp = face_packs[fi];
 				int nv = (int)face->vertices.size();
 				if (nv < 3) continue;
+
+				// Liquid z-fight vs the floor it sits on (visible once translucent): drop the
+				// coincident BOTTOM face (you see through the surface anyway) and nudge the TOP
+				// surface up a hair so it draws just above the floor. SIDES stay — '!'/'*' liquid
+				// is used vertically for lava falls (ww_volcano/countryside). Z is up; normal is
+				// side-adjusted outward.
+				float water_nudge = 0.0f;
+				if (is_water_group) {
+					if (face->normal[2] < -0.7f)  // bottom: drop it
+						continue;
+					if (face->normal[2] > 0.7f)   // top surface: lift ~2 units
+						water_nudge = 2.0f;
+				}
 
 				// Compute style color for this face (same for all vertices)
 				Color style_color(0, 0, 0, 0);
@@ -1421,7 +1441,7 @@ void GoldSrcBSP::build_mesh() {
 					for (int t = 0; t < 3; t++) {
 						const auto &v = face->vertices[tri_indices[t]];
 
-						vertices.push_back(goldsrc_to_godot(v.pos[0], v.pos[1], v.pos[2]));
+						vertices.push_back(goldsrc_to_godot(v.pos[0], v.pos[1], v.pos[2] + water_nudge));
 
 						normals.push_back(Vector3(
 							-v.normal[0], v.normal[2], v.normal[1]));
