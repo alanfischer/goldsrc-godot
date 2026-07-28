@@ -1034,6 +1034,44 @@ void GoldSrcBSP::build_mesh() {
 		model_faces[bsp_data.faces[i].model_index].push_back({&bsp_data.faces[i], i});
 	}
 
+	// World-face plane index for liquid coincidence culling. A brush-entity liquid volume
+	// (func_water) keeps every brush face, including the ones flush against the pool's world
+	// walls/floor/ceiling — a translucent liquid face sitting exactly on a coincident world
+	// face speckles (z-fight) because two coplanar faces from different nodes never agree on
+	// depth. GoldSrc's engine draws only the leaf-boundary faces, so those coincident pairs
+	// don't exist for it. We replicate that: skip a liquid face when a WORLD (model 0) face
+	// lies on the same geometric plane AND overlaps it in space — the opaque world face is
+	// already drawn there, so nothing is lost, and the water/air surface (no world face above
+	// it) is kept. Plane key is sign-independent: coincident world/liquid faces face opposite
+	// ways (solid points into the cavity, liquid points out), so we fold ±normal together.
+	struct FaceAABB { float mn[3]; float mx[3]; };
+	auto plane_key = [](const goldsrc::ParsedFace *fc) -> std::tuple<int,int,int,int> {
+		float n[3] = { fc->normal[0], fc->normal[1], fc->normal[2] };
+		float d = n[0]*fc->vertices[0].pos[0] + n[1]*fc->vertices[0].pos[1] + n[2]*fc->vertices[0].pos[2];
+		float sign = 1.0f;                       // canonicalize: first significant comp positive
+		for (int c = 0; c < 3; c++) { if (fabsf(n[c]) > 1e-4f) { sign = (n[c] < 0) ? -1.0f : 1.0f; break; } }
+		return std::make_tuple((int)lroundf(n[0]*sign*100.0f), (int)lroundf(n[1]*sign*100.0f),
+		                       (int)lroundf(n[2]*sign*100.0f), (int)lroundf(d*sign*2.0f));
+	};
+	auto face_aabb = [](const goldsrc::ParsedFace *fc) -> FaceAABB {
+		FaceAABB b; for (int k = 0; k < 3; k++) { b.mn[k] = 1e30f; b.mx[k] = -1e30f; }
+		for (const auto &v : fc->vertices)
+			for (int k = 0; k < 3; k++) { b.mn[k] = std::min(b.mn[k], v.pos[k]); b.mx[k] = std::max(b.mx[k], v.pos[k]); }
+		return b;
+	};
+	// Only OPAQUE worldspawn faces go in the map: liquid/sky world faces must not be a cull
+	// target (worldspawn water is already compiler-deduped and is the real water surface — an
+	// entity liquid must never be culled against it, nor a worldspawn liquid face against
+	// itself, which would erase maps whose water is a plain worldspawn brush, e.g. ww_hunt).
+	map<std::tuple<int,int,int,int>, vector<FaceAABB>> world_plane_aabbs;
+	for (const auto &fc : bsp_data.faces) {
+		if (fc.model_index != 0 || fc.vertices.empty()) continue;
+		const std::string &tn = fc.texture_name;
+		bool liquid_or_sky = (!tn.empty() && (tn[0] == '!' || tn[0] == '*')) || goldsrc::is_sky_texture(tn);
+		if (liquid_or_sky) continue;
+		world_plane_aabbs[plane_key(&fc)].push_back(face_aabb(&fc));
+	}
+
 	int num_models = (int)bsp_data.models.size();
 	bool has_anim = false;
 
@@ -1406,17 +1444,27 @@ void GoldSrcBSP::build_mesh() {
 				int nv = (int)face->vertices.size();
 				if (nv < 3) continue;
 
-				// Liquid z-fight vs the floor it sits on (visible once translucent): drop the
-				// coincident BOTTOM face (you see through the surface anyway) and nudge the TOP
-				// surface up a hair so it draws just above the floor. SIDES stay — '!'/'*' liquid
-				// is used vertically for lava falls (ww_volcano/countryside). Z is up; normal is
-				// side-adjusted outward.
-				float water_nudge = 0.0f;
-				if (is_water_group) {
-					if (face->normal[2] < -0.7f)  // bottom: drop it
-						continue;
-					if (face->normal[2] > 0.7f)   // top surface: lift ~2 units
-						water_nudge = 2.0f;
+				// Liquid coincidence cull (see world_plane_aabbs above): a liquid face that lies
+				// on the same geometric plane as a world face AND overlaps it is skipped — the
+				// opaque world wall/floor is already drawn there, and rendering the coincident
+				// translucent liquid face on top of it is exactly what z-fights. Faces with no
+				// coincident world face (the water/air surface, liquid exposed to open space such
+				// as lava/water falls) are kept untouched, so nothing is moved and no seam appears.
+				// Only brush ENTITIES (m>0) get coincidence-culled; worldspawn liquid (m==0) is
+				// already the compiler-deduped surface and must render as-is.
+				if (m > 0 && is_water_group) {
+					const auto &wa = world_plane_aabbs.find(plane_key(face));
+					if (wa != world_plane_aabbs.end()) {
+						FaceAABB fb = face_aabb(face);
+						const float EPS = 0.5f;
+						bool coincident = false;
+						for (const auto &wb : wa->second) {
+							if (fb.mn[0] <= wb.mx[0]+EPS && fb.mx[0] >= wb.mn[0]-EPS &&
+							    fb.mn[1] <= wb.mx[1]+EPS && fb.mx[1] >= wb.mn[1]-EPS &&
+							    fb.mn[2] <= wb.mx[2]+EPS && fb.mx[2] >= wb.mn[2]-EPS) { coincident = true; break; }
+						}
+						if (coincident) continue;
+					}
 				}
 
 				// Compute style color for this face (same for all vertices)
@@ -1441,7 +1489,7 @@ void GoldSrcBSP::build_mesh() {
 					for (int t = 0; t < 3; t++) {
 						const auto &v = face->vertices[tri_indices[t]];
 
-						vertices.push_back(goldsrc_to_godot(v.pos[0], v.pos[1], v.pos[2] + water_nudge));
+						vertices.push_back(goldsrc_to_godot(v.pos[0], v.pos[1], v.pos[2]));
 
 						normals.push_back(Vector3(
 							-v.normal[0], v.normal[2], v.normal[1]));
@@ -1465,6 +1513,12 @@ void GoldSrcBSP::build_mesh() {
 					}
 				}
 			}
+
+			// Every face in this texture group may have been culled (e.g. a liquid volume whose
+			// faces are all coincident with world geometry). An empty surface is invalid, so skip
+			// the group entirely rather than feeding zero-length arrays to the RenderingServer.
+			if (vertices.is_empty())
+				continue;
 
 			Ref<ArrayMesh> arr_mesh;
 			arr_mesh.instantiate();
