@@ -28,10 +28,14 @@ public:
 	godot::Error load_bsp(const godot::String &path);
 	godot::Error load_bsp_from_data(const godot::PackedByteArray &data);
 
-	// Returns a stripped BSP30 blob containing only the lumps needed for PVS
-	// queries (PLANES, VISIBILITY, NODES, LEAFS, MODELS). Suitable for storing
-	// as scene metadata so VisibilityManager can run without the original .bsp.
-	godot::PackedByteArray get_pvs_blob() const;
+	// Returns a stripped BSP30 blob — a real BSP file header and lump directory
+	// carrying only PLANES, VISIBILITY, NODES, CLIPNODES, LEAFS and MODELS, with
+	// everything else zeroed. Serves both PVS queries (VisibilityManager) and hull
+	// collision (hop's HopBspTraceable) so one piece of scene metadata covers both
+	// and neither needs the original .bsp at runtime.
+	godot::PackedByteArray get_bsp_blob() const;
+	// Deprecated alias — the blob has carried CLIPNODES since hull collision landed.
+	godot::PackedByteArray get_pvs_blob() const { return get_bsp_blob(); }
 
 	void set_wad(const godot::Ref<GoldSrcWAD> &wad);
 	void add_wad(const godot::Ref<GoldSrcWAD> &wad);
@@ -74,6 +78,10 @@ public:
 private:
 	godot::Ref<godot::ImageTexture> find_texture(const std::string &name) const;
 	godot::Vector3 goldsrc_to_godot(float x, float y, float z) const;
+	// Tags a collision body with the BSP model + scale a hull-tracing physics
+	// engine needs, alongside the shapes it already carries. blocking_contents is
+	// a mask over -CONTENTS_* (0 = the default, CONTENTS_SOLID only).
+	void mark_bsp_carrier(godot::Node3D *body, int model_index, int blocking_contents = 0);
 	void build_hull_collision(godot::Node3D *parent, int model_index,
 		int hull_index, const godot::String &body_name,
 		uint32_t collision_layer);

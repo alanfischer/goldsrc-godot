@@ -481,6 +481,7 @@ GoldSrcBSP::GoldSrcBSP() {
 void GoldSrcBSP::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("load_bsp", "path"), &GoldSrcBSP::load_bsp);
 	ClassDB::bind_method(D_METHOD("load_bsp_from_data", "data"), &GoldSrcBSP::load_bsp_from_data);
+	ClassDB::bind_method(D_METHOD("get_bsp_blob"), &GoldSrcBSP::get_bsp_blob);
 	ClassDB::bind_method(D_METHOD("get_pvs_blob"), &GoldSrcBSP::get_pvs_blob);
 	ClassDB::bind_method(D_METHOD("set_wad", "wad"), &GoldSrcBSP::set_wad);
 	ClassDB::bind_method(D_METHOD("add_wad", "wad"), &GoldSrcBSP::add_wad);
@@ -542,7 +543,7 @@ Error GoldSrcBSP::load_bsp_from_data(const PackedByteArray &data) {
 	return OK;
 }
 
-PackedByteArray GoldSrcBSP::get_pvs_blob() const {
+PackedByteArray GoldSrcBSP::get_bsp_blob() const {
 	if (!parser) return PackedByteArray();
 	const auto &d = parser->get_data();
 	if (d.nodes.empty() || d.leafs.empty()) return PackedByteArray();
@@ -550,10 +551,11 @@ PackedByteArray GoldSrcBSP::get_pvs_blob() const {
 	size_t planes_sz = d.planes.size()     * sizeof(goldsrc::BSPPlane);
 	size_t vis_sz    = d.visibility.size();
 	size_t nodes_sz  = d.nodes.size()      * sizeof(goldsrc::BSPNode);
+	size_t clips_sz  = d.clipnodes.size()  * sizeof(goldsrc::BSPClipNode);
 	size_t leafs_sz  = d.leafs.size()      * sizeof(goldsrc::BSPLeaf);
 	size_t models_sz = d.models.size()     * sizeof(goldsrc::BSPModel);
 	size_t hdr_sz    = sizeof(goldsrc::BSPHeader);
-	size_t total     = hdr_sz + planes_sz + vis_sz + nodes_sz + leafs_sz + models_sz;
+	size_t total     = hdr_sz + planes_sz + vis_sz + nodes_sz + clips_sz + leafs_sz + models_sz;
 
 	PackedByteArray out;
 	out.resize((int64_t)total);
@@ -575,6 +577,7 @@ PackedByteArray GoldSrcBSP::get_pvs_blob() const {
 	write_lump(goldsrc::LUMP_PLANES,     d.planes.data(),     planes_sz);
 	write_lump(goldsrc::LUMP_VISIBILITY, d.visibility.data(), vis_sz);
 	write_lump(goldsrc::LUMP_NODES,      d.nodes.data(),      nodes_sz);
+	write_lump(goldsrc::LUMP_CLIPNODES,  d.clipnodes.data(),  clips_sz);
 	write_lump(goldsrc::LUMP_LEAFS,      d.leafs.data(),      leafs_sz);
 	write_lump(goldsrc::LUMP_MODELS,     d.models.data(),     models_sz);
 
@@ -961,6 +964,12 @@ void GoldSrcBSP::build_mesh() {
 	if (!parser) return;
 	if (mesh_built) return;
 	mesh_built = true;
+
+	// The stripped BSP rides on the tree root, once, for both the PVS reader and
+	// the hull trace. Bodies carry only a model index (see mark_bsp_carrier); a
+	// consumer walks up from a body to find this. Set before the model loop so
+	// nothing has to remember to do it afterwards.
+	set_meta("bsp_data", get_bsp_blob());
 
 	const auto &bsp_data = parser->get_data();
 	uint64_t t0 = Time::get_singleton()->get_ticks_msec();
@@ -1691,6 +1700,9 @@ void GoldSrcBSP::build_mesh() {
 			// Sky collision body — shapes were added directly from rendering ArrayMesh
 			// objects above; no separate face iteration needed.
 			if (sky_body && sky_body->get_child_count() > 0) {
+				// Sky is passable in hull 0 (that's why projectiles fly through it),
+				// so this body's hull view has to block on CONTENTS_SKY instead.
+				mark_bsp_carrier(sky_body, m, 1 << (-goldsrc::CONTENTS_SKY));
 				model_node->add_child(sky_body);
 				UtilityFunctions::print("[GoldSrc] Sky collision: ",
 					(int64_t)sky_body->get_child_count(), " shape(s) (reused from rendering mesh)");
@@ -1717,6 +1729,7 @@ void GoldSrcBSP::build_mesh() {
 			// Brush entity collision: convex shapes from BSP leaf decomposition.
 			// To revert to triangle-soup collision: change to build_brush_concave.
 			build_brush_convex(body_node, m);
+			if (body_node->get_child_count() > 0) mark_bsp_carrier(body_node, m);
 			// Volume Area3D shares the same shape resources for containment detection.
 			if (body_node->get_child_count() > 0) {
 				Area3D *vol = memnew(Area3D);
@@ -1808,6 +1821,21 @@ void GoldSrcBSP::build_mesh() {
 	}
 }
 
+// Tag a collision body with the BSP model its shapes stand for, so a physics
+// engine that can trace the real hulls (hop's HopBspTraceable) knows which tree
+// to descend and swaps the shapes out for it. Additive: the shapes are still
+// there, and an engine that ignores the metadata — default Godot physics —
+// collides against exactly what it always did.
+//
+// The hull blob itself is NOT copied per body (a big map's is megabytes, and
+// there are hundreds of brush entities); it rides once on the scene root under
+// "bsp_data", and the consumer walks up to find it.
+void GoldSrcBSP::mark_bsp_carrier(Node3D *body, int model_index, int blocking_contents) {
+	body->set_meta("bsp_model", model_index);
+	body->set_meta("bsp_scale", scale_factor);
+	if (blocking_contents != 0) body->set_meta("bsp_blocking", blocking_contents);
+}
+
 void GoldSrcBSP::build_hull_collision(Node3D *parent, int model_index,
 	int hull_index, const String &body_name, uint32_t collision_layer) {
 	const auto &bsp_data = parser->get_data();
@@ -1845,6 +1873,7 @@ void GoldSrcBSP::build_hull_collision(Node3D *parent, int model_index,
 	StaticBody3D *body = memnew(StaticBody3D);
 	body->set_name(body_name);
 	body->set_collision_layer(collision_layer);
+	mark_bsp_carrier(body, model_index);
 
 	Ref<ConcavePolygonShape3D> shape;
 	shape.instantiate();
