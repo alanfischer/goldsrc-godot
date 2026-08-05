@@ -127,8 +127,10 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 	# Bake the stripped BSP (PLANES/NODES/CLIPNODES/LEAFS/VISIBILITY/MODELS) so
 	# VisibilityManager (PVS) and hull collision can both initialise from the .scn
 	# without the original .bsp. Collision bodies carry only a "bsp_model" index
-	# and walk up the tree to find this.
-	var bsp_blob: PackedByteArray = bsp.get_bsp_blob()
+	# and walk up the tree to find this. build_mesh() already parked it on the BSP
+	# node, so read it back rather than rebuilding the whole payload —
+	# PackedByteArray is copy-on-write, so this is a refcount.
+	var bsp_blob: PackedByteArray = bsp.get_meta("bsp_data", PackedByteArray())
 	if not bsp_blob.is_empty():
 		root.set_meta("bsp_data", bsp_blob)
 
