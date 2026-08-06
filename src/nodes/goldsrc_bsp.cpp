@@ -1249,6 +1249,168 @@ void GoldSrcBSP::build_mesh() {
 			body_node->set_collision_layer(sky_brush ? (1u << 8) : 1u);
 		}
 
+		// --- Lightmap atlas pages for the whole model ---
+		// The atlas is what a material's lm_layer* uniforms bind, so the granularity of the
+		// atlas IS the granularity of the materials. Packing one atlas per (spatial group,
+		// texture) — as this used to — meant the same wall texture in two groups got two
+		// materials with identical shaders and identical uniforms but different atlas
+		// textures, so nothing could share state and every draw rebound its own lightmap
+		// (ww_2fort: 410 meshes, 384 materials, 76 tris per draw call).
+		//
+		// Packing per model instead lets every face that shares a texture share one material.
+		// Pages exist only because ShelfPacker caps a sheet at 4096²; a map whose lighting
+		// overflows that gets a second page and splits materials at that seam, which is still
+		// far coarser than splitting per group. Typical maps use one page.
+		struct FacePack {
+			int page = -1;
+			int atlas_x = 0, atlas_y = 0;
+			bool has_lightmap = false;
+			int n_styles = 0;
+		};
+		struct AtlasPage {
+			ShelfPacker packer;
+			Ref<ImageTexture> layer_textures[4];  // shader path: one atlas per lightstyle layer
+			Ref<ImageTexture> blended;            // legacy path: single pre-blended atlas
+			vector<int> face_indices;             // global indices packed into this page
+			int w = 0, h = 0;
+			int max_styles = 0;
+			bool has_lightmap = false;
+		};
+		std::map<int, FacePack> face_pack_by_index;
+		vector<AtlasPage> pages;
+		pages.push_back(AtlasPage());
+
+		for (const auto &fr : faces_for_model) {
+			const auto *face = fr.face;
+			if (goldsrc::is_tool_texture(face->texture_name)) continue;
+			if (face->vertices.size() < 3) continue;
+
+			FacePack fp;
+			if (face->lightmap_offset >= 0 && face->lightmap_width > 0 &&
+				face->lightmap_height > 0 && !bsp_data.lighting.empty()) {
+
+				// Count active styles
+				for (int s = 0; s < 4; s++) {
+					if (face->styles[s] == 255) break;
+					fp.n_styles++;
+				}
+
+				size_t lm_size = (size_t)face->lightmap_width * face->lightmap_height * 3;
+				size_t total_data = (size_t)fp.n_styles * lm_size;
+
+				if (fp.n_styles > 0 &&
+					(size_t)face->lightmap_offset + total_data <= bsp_data.lighting.size()) {
+					// Try the open page, then one fresh page. A face only fails the open page
+					// once that page has grown to the 4096² cap, so the retry lands unless the
+					// face's own lightmap is larger than a whole sheet (then it stays unlit,
+					// exactly as it would have before).
+					for (int attempt = 0; attempt < 2; attempt++) {
+						AtlasPage &pg = pages.back();
+						if (pg.packer.pack(face->lightmap_width, face->lightmap_height,
+							fp.atlas_x, fp.atlas_y)) {
+							fp.page = (int)pages.size() - 1;
+							fp.has_lightmap = true;
+							pg.has_lightmap = true;
+							pg.face_indices.push_back(fr.global_index);
+							if (fp.n_styles > pg.max_styles) pg.max_styles = fp.n_styles;
+							lit_face_count++;
+							break;
+						}
+						if (attempt == 0) pages.push_back(AtlasPage());
+					}
+
+					// Record placement for the legacy runtime-rebake path (shader path
+					// re-blends on the GPU from the per-style layers instead).
+					if (fp.has_lightmap && !shader_lightstyles) {
+						auto &info = face_lm_info[fr.global_index];
+						info.atlas_x = fp.atlas_x;
+						info.atlas_y = fp.atlas_y;
+						info.lm_width = face->lightmap_width;
+						info.lm_height = face->lightmap_height;
+						memcpy(info.styles, face->styles, 4);
+						info.lightmap_offset = face->lightmap_offset;
+					}
+				}
+			}
+
+			face_pack_by_index[fr.global_index] = fp;
+		}
+
+		// Bake each page's atlas image(s)
+		for (size_t pi = 0; pi < pages.size(); pi++) {
+			AtlasPage &pg = pages[pi];
+			if (!pg.has_lightmap) continue;
+			pg.w = pg.packer.width;
+			pg.h = pg.packer.used_height();
+			if (pg.h < 1) pg.h = 1;
+
+			if (shader_lightstyles) {
+				// Shader path: one atlas per style layer, blended live by the shader
+				PackedByteArray layer_pixels[4];
+				for (int l = 0; l < pg.max_styles; l++) {
+					layer_pixels[l].resize(pg.w * pg.h * 3);
+					memset(layer_pixels[l].ptrw(), 0, layer_pixels[l].size());
+				}
+
+				for (int gi : pg.face_indices) {
+					const FacePack &fp = face_pack_by_index[gi];
+					const auto *face = &bsp_data.faces[gi];
+					for (int l = 0; l < fp.n_styles; l++) {
+						write_layer_pixels(l, face->styles,
+							face->lightmap_offset,
+							face->lightmap_width, face->lightmap_height,
+							fp.atlas_x, fp.atlas_y, pg.w, pg.h,
+							layer_pixels[l].ptrw(), bsp_data.lighting);
+					}
+				}
+
+				for (int l = 0; l < pg.max_styles; l++) {
+					Ref<Image> img = Image::create_from_data(
+						pg.w, pg.h, false, Image::FORMAT_RGB8, layer_pixels[l]);
+					pg.layer_textures[l] = ImageTexture::create_from_image(img);
+				}
+				// Unused layers stay null — they get black_1x1 at material build
+			} else {
+				// Legacy path: single blended atlas, re-baked on the CPU when a lightstyle moves
+				PackedByteArray atlas_pixels;
+				atlas_pixels.resize(pg.w * pg.h * 3);
+				memset(atlas_pixels.ptrw(), 255, atlas_pixels.size());
+
+				uint8_t *atlas_ptr = atlas_pixels.ptrw();
+				for (int gi : pg.face_indices) {
+					const FacePack &fp = face_pack_by_index[gi];
+					const auto *face = &bsp_data.faces[gi];
+					bake_lightmap_pixels(face->styles, face->lightmap_offset,
+						face->lightmap_width, face->lightmap_height,
+						fp.atlas_x, fp.atlas_y, pg.w, pg.h,
+						atlas_ptr, bsp_data.lighting, lightstyle_values);
+				}
+
+				Ref<Image> atlas_img = Image::create_from_data(
+					pg.w, pg.h, false, Image::FORMAT_RGB8, atlas_pixels);
+				pg.blended = ImageTexture::create_from_image(atlas_img);
+
+				int atlas_idx = (int)lm_atlases.size();
+				LightmapAtlasState state;
+				state.image = atlas_img;
+				state.texture = pg.blended;
+				state.width = pg.w;
+				state.height = pg.h;
+				lm_atlases.push_back(state);
+
+				for (int gi : pg.face_indices) {
+					face_lm_info[gi].atlas_index = atlas_idx;
+				}
+			}
+		}
+
+		// One material per (texture, atlas page) for the whole model. Every uniform a BSP
+		// material carries is a pure function of those two, so this is a dedup, not a
+		// behaviour change — and the runtime writers (skybox cubemap, light grid, overbright,
+		// lightstyle texture) all push map-global values, while per-entity render modes go
+		// through set_surface_override_material and never touch the shared base.
+		std::map<std::pair<string, int>, Ref<Material>> material_cache;
+
 		for (size_t sg_idx = 0; sg_idx < spatial_groups.size(); sg_idx++) {
 			const auto &sg = spatial_groups[sg_idx];
 
@@ -1274,14 +1436,36 @@ void GoldSrcBSP::build_mesh() {
 				}
 			}
 
-			// Group this spatial group's faces by texture
-			map<string, vector<FaceRef>> tex_groups;
+			// Group this spatial group's faces by (texture, atlas page). With a single page —
+			// the normal case — this is just "by texture", and every face of a texture in this
+			// group lands in one mesh sharing one material.
+			//
+			// A face with no lightmap has no page of its own, so it inherits the page of the
+			// first lit face sharing its texture here (and -1, meaning black_1x1, when the
+			// whole texture group is unlit). That reproduces exactly what the per-group atlas
+			// did: an unlit face rendered against its group's atlas at UV2 (0,0), and a wholly
+			// unlit group rendered against black_1x1.
+			map<string, int> tex_page;
 			for (const auto &fr : sg.face_refs) {
-				tex_groups[fr.face->texture_name].push_back(fr);
+				const FacePack &fp = face_pack_by_index[fr.global_index];
+				if (!fp.has_lightmap) continue;
+				auto it = tex_page.find(fr.face->texture_name);
+				if (it == tex_page.end()) tex_page[fr.face->texture_name] = fp.page;
+			}
+			map<std::pair<string, int>, vector<FaceRef>> tex_groups;
+			for (const auto &fr : sg.face_refs) {
+				const FacePack &fp = face_pack_by_index[fr.global_index];
+				int page = fp.has_lightmap ? fp.page : -1;
+				if (page < 0) {
+					auto it = tex_page.find(fr.face->texture_name);
+					if (it != tex_page.end()) page = it->second;
+				}
+				tex_groups[std::make_pair(fr.face->texture_name, page)].push_back(fr);
 			}
 
 		for (const auto &group : tex_groups) {
-			const string &tex_name = group.first;
+			const string &tex_name = group.first.first;
+			const int page_idx = group.first.second;
 			const auto &face_refs = group.second;
 
 			// Skip tool textures that should never be rendered
@@ -1295,146 +1479,11 @@ void GoldSrcBSP::build_mesh() {
 			}
 			if (total_tris == 0) continue;
 
-			// --- Build lightmap atlas for this texture group ---
-			ShelfPacker packer;
-			bool has_any_lightmap = false;
-
-			// First pass: pack all face lightmaps and record placement
-			struct FacePack {
-				int global_idx;
-				int atlas_x, atlas_y;
-				bool has_lightmap;
-				int n_styles;
-			};
-			vector<FacePack> face_packs;
-			face_packs.reserve(face_refs.size());
-
-			for (const auto &fr : face_refs) {
-				const auto *face = fr.face;
-				FacePack fp;
-				fp.global_idx = fr.global_index;
-				fp.has_lightmap = false;
-				fp.n_styles = 0;
-
-				if (face->lightmap_offset >= 0 && face->lightmap_width > 0 &&
-					face->lightmap_height > 0 && !bsp_data.lighting.empty()) {
-
-					// Count active styles
-					for (int s = 0; s < 4; s++) {
-						if (face->styles[s] == 255) break;
-						fp.n_styles++;
-					}
-
-					size_t lm_size = (size_t)face->lightmap_width * face->lightmap_height * 3;
-					size_t total_data = (size_t)fp.n_styles * lm_size;
-
-					if (fp.n_styles > 0 &&
-						(size_t)face->lightmap_offset + total_data <= bsp_data.lighting.size()) {
-						if (packer.pack(face->lightmap_width, face->lightmap_height,
-							fp.atlas_x, fp.atlas_y)) {
-							fp.has_lightmap = true;
-							has_any_lightmap = true;
-							lit_face_count++;
-
-							// Record in face_lm_info for legacy rebaking path
-							if (!shader_lightstyles) {
-								auto &info = face_lm_info[fr.global_index];
-								info.atlas_index = (int)lm_atlases.size();
-								info.atlas_x = fp.atlas_x;
-								info.atlas_y = fp.atlas_y;
-								info.lm_width = face->lightmap_width;
-								info.lm_height = face->lightmap_height;
-								memcpy(info.styles, face->styles, 4);
-								info.lightmap_offset = face->lightmap_offset;
-							}
-						}
-					}
-				}
-
-				face_packs.push_back(fp);
-			}
-
-			// Create atlas images and bake lightmaps
-			Ref<ImageTexture> atlas_texture;   // legacy: single blended atlas
-			Ref<ImageTexture> layer_textures[4]; // shader: per-layer atlases
-			int atlas_w = 0, atlas_h = 0;
-
-			if (has_any_lightmap) {
-				atlas_w = packer.width;
-				atlas_h = packer.used_height();
-				if (atlas_h < 1) atlas_h = 1;
-
-				if (shader_lightstyles) {
-					// Shader path: only create full atlas for layers that have data
-					int max_styles = 0;
-					for (const auto &fp : face_packs) {
-						if (fp.has_lightmap && fp.n_styles > max_styles)
-							max_styles = fp.n_styles;
-					}
-
-					PackedByteArray layer_pixels[4];
-					for (int l = 0; l < max_styles; l++) {
-						layer_pixels[l].resize(atlas_w * atlas_h * 3);
-						memset(layer_pixels[l].ptrw(), 0, layer_pixels[l].size());
-					}
-
-					for (size_t fi = 0; fi < face_packs.size(); fi++) {
-						const auto &fp = face_packs[fi];
-						if (!fp.has_lightmap) continue;
-						const auto *face = face_refs[fi].face;
-
-						for (int l = 0; l < fp.n_styles; l++) {
-							write_layer_pixels(l, face->styles,
-								face->lightmap_offset,
-								face->lightmap_width, face->lightmap_height,
-								fp.atlas_x, fp.atlas_y, atlas_w, atlas_h,
-								layer_pixels[l].ptrw(), bsp_data.lighting);
-						}
-					}
-
-					for (int l = 0; l < max_styles; l++) {
-						Ref<Image> img = Image::create_from_data(
-							atlas_w, atlas_h, false, Image::FORMAT_RGB8, layer_pixels[l]);
-						layer_textures[l] = ImageTexture::create_from_image(img);
-					}
-					// Unused layers stay null — will get black_1x1 below
-				} else {
-					// Legacy path: single blended atlas
-					PackedByteArray atlas_pixels;
-					atlas_pixels.resize(atlas_w * atlas_h * 3);
-					memset(atlas_pixels.ptrw(), 255, atlas_pixels.size());
-
-					uint8_t *atlas_ptr = atlas_pixels.ptrw();
-					for (size_t fi = 0; fi < face_packs.size(); fi++) {
-						const auto &fp = face_packs[fi];
-						if (!fp.has_lightmap) continue;
-
-						const auto *face = face_refs[fi].face;
-						bake_lightmap_pixels(face->styles, face->lightmap_offset,
-							face->lightmap_width, face->lightmap_height,
-							fp.atlas_x, fp.atlas_y, atlas_w, atlas_h,
-							atlas_ptr, bsp_data.lighting, lightstyle_values);
-					}
-
-					Ref<Image> atlas_img = Image::create_from_data(
-						atlas_w, atlas_h, false, Image::FORMAT_RGB8, atlas_pixels);
-					atlas_texture = ImageTexture::create_from_image(atlas_img);
-
-					int atlas_idx = (int)lm_atlases.size();
-					LightmapAtlasState state;
-					state.image = atlas_img;
-					state.texture = atlas_texture;
-					state.width = atlas_w;
-					state.height = atlas_h;
-					lm_atlases.push_back(state);
-
-					for (const auto &fp : face_packs) {
-						if (fp.has_lightmap) {
-							face_lm_info[fp.global_idx].atlas_index = atlas_idx;
-						}
-					}
-				}
-			}
+			// Resolve this group's atlas page (see the model-wide packing above).
+			const AtlasPage *page = (page_idx >= 0) ? &pages[page_idx] : nullptr;
+			const bool has_any_lightmap = page != nullptr && page->has_lightmap;
+			const int atlas_w = has_any_lightmap ? page->w : 0;
+			const int atlas_h = has_any_lightmap ? page->h : 0;
 
 			// --- Build mesh arrays with UV2 (and COLOR for shader path) ---
 			PackedVector3Array vertices;
@@ -1449,7 +1498,7 @@ void GoldSrcBSP::build_mesh() {
 
 			for (size_t fi = 0; fi < face_refs.size(); fi++) {
 				const auto *face = face_refs[fi].face;
-				const auto &fp = face_packs[fi];
+				const FacePack &fp = face_pack_by_index[face_refs[fi].global_index];
 				int nv = (int)face->vertices.size();
 				if (nv < 3) continue;
 
@@ -1550,7 +1599,13 @@ void GoldSrcBSP::build_mesh() {
 			bool is_water = !is_sky_surface && !tex_name.empty() && (tex_name[0] == '!' || tex_name[0] == '*');
 			bool is_alpha_scissor = !is_sky_surface && !is_water && !tex_name.empty() && tex_name[0] == '{';
 
-			if (is_sky_surface) {
+			// Build the material once per (texture, page) and hand the same one to every mesh
+			// that needs it — the whole point of packing the atlas per model above.
+			auto cache_key = std::make_pair(tex_name, page_idx);
+			auto cached = material_cache.find(cache_key);
+			if (cached != material_cache.end()) {
+				arr_mesh->surface_set_material(0, cached->second);
+			} else if (is_sky_surface) {
 				// Sky surface: samples sky cubemap by view direction; sky_cubemap
 				// uniform is set at runtime by GDScript (systems/skybox.gd).
 				Ref<ShaderMaterial> material;
@@ -1558,15 +1613,7 @@ void GoldSrcBSP::build_mesh() {
 				material->set_shader(sky_shader);
 				material->set_render_priority(-1); // draw before BSP so it's a true background
 				arr_mesh->surface_set_material(0, material);
-				// Reuse the already-built ArrayMesh directly for player sky collision.
-				if (sky_body) {
-					Ref<ConcavePolygonShape3D> sky_shape = arr_mesh->create_trimesh_shape();
-					if (sky_shape.is_valid()) {
-						CollisionShape3D *sky_col = memnew(CollisionShape3D);
-						sky_col->set_shape(sky_shape);
-						sky_body->add_child(sky_col);
-					}
-				}
+				material_cache[cache_key] = material;
 			} else if (is_water) {
 				// Water/liquid surface: turbulent UV warp, no lightmap.
 				Ref<ShaderMaterial> material;
@@ -1576,6 +1623,7 @@ void GoldSrcBSP::build_mesh() {
 					material->set_shader_parameter("albedo_texture", texture);
 				}
 				arr_mesh->surface_set_material(0, material);
+				material_cache[cache_key] = material;
 			} else if (shader_lightstyles) {
 				// Shader path: ShaderMaterial with 4-layer lightmap blending
 				Ref<ShaderMaterial> material;
@@ -1589,8 +1637,8 @@ void GoldSrcBSP::build_mesh() {
 				// Assign layer textures (use black_1x1 for layers without data)
 				for (int l = 0; l < 4; l++) {
 					String param = String("lm_layer") + String::num_int64(l);
-					if (has_any_lightmap && layer_textures[l].is_valid()) {
-						material->set_shader_parameter(param, layer_textures[l]);
+					if (has_any_lightmap && page->layer_textures[l].is_valid()) {
+						material->set_shader_parameter(param, page->layer_textures[l]);
 					} else {
 						material->set_shader_parameter(param, black_1x1);
 					}
@@ -1600,6 +1648,7 @@ void GoldSrcBSP::build_mesh() {
 				material->set_shader_parameter("overbright", 2.0f);
 
 				arr_mesh->surface_set_material(0, material);
+				material_cache[cache_key] = material;
 			} else {
 				// Legacy path: StandardMaterial3D with detail texture multiply
 				Ref<StandardMaterial3D> material;
@@ -1617,14 +1666,26 @@ void GoldSrcBSP::build_mesh() {
 					material->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA_SCISSOR);
 				}
 
-				if (has_any_lightmap && atlas_texture.is_valid()) {
+				if (has_any_lightmap && page->blended.is_valid()) {
 					material->set_feature(BaseMaterial3D::FEATURE_DETAIL, true);
-					material->set_texture(BaseMaterial3D::TEXTURE_DETAIL_ALBEDO, atlas_texture);
+					material->set_texture(BaseMaterial3D::TEXTURE_DETAIL_ALBEDO, page->blended);
 					material->set_detail_blend_mode(BaseMaterial3D::BLEND_MODE_MUL);
 					material->set_detail_uv(BaseMaterial3D::DETAIL_UV_2);
 				}
 
 				arr_mesh->surface_set_material(0, material);
+				material_cache[cache_key] = material;
+			}
+
+			// Sky collision rides the rendering mesh, so it is per-MESH, not per-material —
+			// it must still happen on a cache hit, unlike the material construction above.
+			if (is_sky_surface && sky_body) {
+				Ref<ConcavePolygonShape3D> sky_shape = arr_mesh->create_trimesh_shape();
+				if (sky_shape.is_valid()) {
+					CollisionShape3D *sky_col = memnew(CollisionShape3D);
+					sky_col->set_shape(sky_shape);
+					sky_body->add_child(sky_col);
+				}
 			}
 
 			MeshInstance3D *mesh_instance = memnew(MeshInstance3D);
@@ -1686,9 +1747,13 @@ void GoldSrcBSP::build_mesh() {
 		} // end spatial groups loop
 
 		if (m == 0 && spatial_groups.size() > 1) {
+			// Page count is the thing to watch: >1 means the map's lighting overflowed a
+			// 4096² sheet and its materials are split at that seam. Expect 1.
 			UtilityFunctions::print("[GoldSrc] Worldspawn: ",
 				(int64_t)total_mesh_instances, " MeshInstance3D nodes across ",
-				(int64_t)spatial_groups.size(), " spatial groups");
+				(int64_t)spatial_groups.size(), " spatial groups, ",
+				(int64_t)material_cache.size(), " materials, ",
+				(int64_t)pages.size(), " lightmap page(s)");
 		}
 
 		// Build collision for this model
