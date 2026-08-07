@@ -255,9 +255,17 @@ void fragment() {
 // GoldSrc water is translucent and visible from both sides (you see the surface from
 // above and, when submerged, from below), so the material writes ALPHA and disables
 // backface culling. cull_back would hide the inner faces and leave opaque water slabs.
+//
+// Writing ALPHA also puts the material in the transparent queue, which Godot sorts per
+// MeshInstance3D by AABB-center distance and does not sort within a surface at all. Water is
+// batched per (texture, atlas page), so a whole map's liquid is often ONE instance with a
+// map-spanning AABB: far faces then blend over near ones and a pool reads inside-out. That
+// is what WATER_DEPTH_SHADER_CODE below fixes — see it for the mechanism. This half only has
+// to stay out of the way: depth_draw_never, so the color pass tests against the prepass's
+// depth without stamping its own on top of it.
 static const char *WATER_SHADER_CODE = R"(
 shader_type spatial;
-render_mode unshaded, shadows_disabled, ambient_light_disabled, cull_disabled;
+render_mode unshaded, shadows_disabled, ambient_light_disabled, cull_disabled, depth_draw_never;
 
 uniform sampler2D albedo_texture : source_color;
 uniform float wave_amplitude : hint_range(0.0, 0.1) = 0.025;
@@ -272,6 +280,43 @@ void fragment() {
 	ALBEDO = texture(albedo_texture, uv).rgb;
 	ALPHA = water_alpha;
 	ROUGHNESS = 1.0;
+}
+)";
+
+// Depth-only companion pass for water, drawn from a twin MeshInstance3D over the same mesh
+// (see build_mesh). Together the two passes are a hand-rolled depth prepass, which is what
+// makes water immune to draw order: this pass stamps liquid depth into the buffer first
+// (render_priority -1), so the color pass above only survives where it is the NEAREST liquid
+// fragment. Everything behind another water face is depth-rejected and never blends.
+//
+// Godot has a render mode for this — depth_prepass_alpha — but the Compatibility renderer
+// (rendering_method.pc, and what this game ships on PC) parses it and then ignores it, so it
+// buys nothing. Hence doing it by hand.
+//
+// Two details make it work:
+//   ALPHA = 0.0    keeps the pass depth-only. It is still a transparent-queue draw, but
+//                  src*0 + dst*1 leaves the color buffer exactly as it found it, while
+//                  depth_draw_always writes depth regardless of alpha.
+//   POSITION       pushes the stamped depth 0.2% FARTHER from the camera. The Compatibility
+//                  renderer's depth func is GL_LESS, not LEQUAL, so a prepass at the exact
+//                  surface depth would reject the color pass and water would vanish outright.
+//                  Scaling the whole view-space position scales along the ray from the eye,
+//                  so the silhouette projects identically — only depth moves. The bias is
+//                  relative to view distance, so it holds at any scale; the only faces it
+//                  fails to separate are ones within 0.2% of each other in depth, i.e. the
+//                  near-coincident case, where either order looks the same anyway.
+static const char *WATER_DEPTH_SHADER_CODE = R"(
+shader_type spatial;
+render_mode unshaded, shadows_disabled, ambient_light_disabled, cull_disabled, depth_draw_always;
+
+void vertex() {
+	vec4 view_pos = MODELVIEW_MATRIX * vec4(VERTEX, 1.0);
+	view_pos.xyz *= 1.002;
+	POSITION = PROJECTION_MATRIX * view_pos;
+}
+
+void fragment() {
+	ALPHA = 0.0;
 }
 )";
 
@@ -1001,6 +1046,19 @@ void GoldSrcBSP::build_mesh() {
 	Ref<Shader> water_shader;
 	water_shader.instantiate();
 	water_shader->set_code(WATER_SHADER_CODE);
+
+	// Water's depth-only prepass. Carries no per-texture state, so one material is shared by
+	// every water twin in the model; render_priority -1 is what puts it ahead of the color
+	// pass in the transparent queue, which is the whole point of it.
+	Ref<ShaderMaterial> water_depth_material;
+	{
+		Ref<Shader> water_depth_shader;
+		water_depth_shader.instantiate();
+		water_depth_shader->set_code(WATER_DEPTH_SHADER_CODE);
+		water_depth_material.instantiate();
+		water_depth_material->set_shader(water_depth_shader);
+		water_depth_material->set_render_priority(-1);
+	}
 
 	// Create shared lightstyle brightness texture for shader path
 	Ref<Shader> opaque_shader;
@@ -1743,6 +1801,20 @@ void GoldSrcBSP::build_mesh() {
 
 			group_parent->add_child(mesh_instance);
 			total_mesh_instances++;
+
+			// Water's depth prepass twin: same mesh, depth-only material, drawn first. See
+			// WATER_DEPTH_SHADER_CODE for why water needs it. The mesh resource is shared, so
+			// this costs a draw call and a node, not geometry.
+			if (is_water) {
+				MeshInstance3D *depth_instance = memnew(MeshInstance3D);
+				depth_instance->set_name(mesh_instance->get_name() + String("_depth"));
+				depth_instance->set_mesh(arr_mesh);
+				depth_instance->set_material_override(water_depth_material);
+				depth_instance->set_layer_mask(2);
+				depth_instance->set_cast_shadows_setting(GeometryInstance3D::SHADOW_CASTING_SETTING_OFF);
+				group_parent->add_child(depth_instance);
+				total_mesh_instances++;
+			}
 		}
 		} // end spatial groups loop
 
