@@ -1,0 +1,26 @@
+# Normalize line endings: the repository stores text files with LF, and they
+# are checked out with LF on every platform. Keeps diffs clean and avoids the
+# mixed CRLF/LF state a repo drifts into once one file is committed from a
+# Windows editor — from then on any tool that rewrites it shows a whole-file diff.
+* text=auto eol=lf
+
+# Binary assets — never normalize or diff as text.
+*.bsp binary
+*.spr binary
+*.mdl binary
+*.wad binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.bmp binary
+*.tga binary
+*.pcx binary
+*.ico binary
+*.wav binary
+*.ttf binary
+*.so binary
+*.dll binary
+*.dylib binary
+*.pdb binary
+*.a binary
+*.lib binary
