@@ -13,8 +13,9 @@ A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
 - Animated textures (`+0name` … `+9name` / `+aname` … `+jname` alternates) — frames collected at import and stored as `tex_anim_frames` metadata on each `MeshInstance3D`; driven at 10 FPS by `TextureAnimator` at runtime with no C++ dependency
 - Water/liquid textures (`!` and `*` prefix) rendered with a turbulent UV-warp shader (sine-wave distortion animated via `TIME`)
 - Hull 0 collision (StaticBody3D for worldspawn, AnimatableBody3D for brush entities)
+- Clip hull export for exact GoldSrc collision — the compiler's CLIPNODES ride in the baked `bsp_data` blob and every collision body is tagged with the BSP model it stands for, so a physics engine that can trace the hulls (see [GoldSrc Hull Collision](#goldsrc-hull-collision)) does; anything else keeps colliding against the mesh shapes as before
 - Water volume extraction as Area3D with ConvexPolygonShape3D
-- PVS (Potentially Visible Set) data parsing with RLE decompression — exposed for runtime visibility culling via `VisibilityManager`; a stripped PVS blob (PLANES, VISIBILITY, NODES, LEAFS, MODELS only) is baked into each `.scn` as `pvs_data` metadata so `VisibilityManager` can initialize without the original `.bsp`
+- PVS (Potentially Visible Set) data parsing with RLE decompression — exposed for runtime visibility culling via `VisibilityManager`; a stripped BSP blob (PLANES, VISIBILITY, NODES, CLIPNODES, LEAFS, MODELS only) is baked into each `.scn` as `bsp_data` metadata so `VisibilityManager` can initialize without the original `.bsp`. The blob is still a valid BSP30 file, and one copy serves both the PVS reader and hull collision
 - Worldspawn spatial splitting — walks the BSP tree to group faces into spatial clusters, producing separate MeshInstance3D nodes per group for better frustum culling; each group node has `pvs_leaves` metadata (PackedInt32Array) for use with `VisibilityManager.register_leaf_set()`
 - Brush entity root nodes are AnimatableBody3D instances — meshes and collision shapes are direct children
 - Point entity root nodes are plain Node3D instances
@@ -81,19 +82,19 @@ BSP maps are divided into convex regions called *leaves*. During map compilation
 
 ```
 .bsp import
-    └─ BSP importer strips PVS-relevant lumps (PLANES, VISIBILITY, NODES, LEAFS, MODELS)
-       and bakes them into .scn as pvs_data metadata on the root node
-           └─ runtime: setup_from_data(pvs_data, scale_factor)
+    └─ BSP importer strips the tree lumps (PLANES, VISIBILITY, NODES, CLIPNODES, LEAFS,
+       MODELS) and bakes them into .scn as bsp_data metadata on the root node
+           └─ runtime: setup_from_data(bsp_data, scale_factor)
                   └─ VisibilityManager ready — no .bsp file needed at runtime
 ```
 
-The `pvs_data` blob is written by both the editor importer and the headless batch converter. Retrieve it from the instantiated map scene:
+The `bsp_data` blob is written by both the editor importer and the headless batch converter. Retrieve it from the instantiated map scene:
 
 ```gdscript
-var pvs_blob: PackedByteArray = map_root.get_meta("pvs_data", PackedByteArray())
+var pvs_blob: PackedByteArray = map_root.get_meta("bsp_data", PackedByteArray())
 var leaf_count = vm.setup_from_data(pvs_blob, 0.025)
 if leaf_count == 0:
-    push_error("PVS setup failed — pvs_data missing or corrupt")
+    push_error("PVS setup failed — bsp_data missing or corrupt")
 ```
 
 ### Use Case 1: Rendering Culling
@@ -109,7 +110,7 @@ func _ready() -> void:
     vm = VisibilityManager.new()
     add_child(vm)
 
-    var pvs_blob = map_root.get_meta("pvs_data", PackedByteArray())
+    var pvs_blob = map_root.get_meta("bsp_data", PackedByteArray())
     if vm.setup_from_data(pvs_blob, 0.025) == 0:
         return
 
@@ -139,7 +140,7 @@ var entity_handles: Dictionary # node -> entity handle
 func _ready() -> void:
     vm = VisibilityManager.new()
     add_child(vm)
-    var pvs_blob = map_root.get_meta("pvs_data", PackedByteArray())
+    var pvs_blob = map_root.get_meta("bsp_data", PackedByteArray())
     vm.setup_from_data(pvs_blob, 0.025)
 
 func on_peer_connected(peer_id: int, initial_pos: Vector3) -> void:
@@ -172,6 +173,56 @@ func send_updates_to_peer(peer_id: int) -> void:
 All handles are stable integers until the matching `remove_observer` / `unregister_entity` / `unregister_leaf_set` call. Handles from removed entries are recycled internally — do not use a handle after removal.
 
 Call `teardown()` (or free the node) when unloading a map. All registered observers, entities, and leaf sets are released automatically.
+
+## GoldSrc Hull Collision
+
+### Concept
+
+The mesh collision this importer builds (trimesh for worldspawn, convex shapes for brush
+entities) approximates the map. GoldSrc itself never collided against the faces: the map
+compiler expanded every brush by each of four fixed box sizes and wrote the results as
+separate BSP trees — the *clip hulls* — so a trace is a plane-by-plane tree descent with
+exact normals. That is where Half-Life's 18-unit step-up, its wall sliding, and its
+"am I stuck?" answers come from, and it is what a mesh collider cannot reproduce.
+
+Those trees are in the file, so the importer ships them. Two pieces:
+
+- The **CLIPNODES lump** rides in the stripped `bsp_data` blob on the scene root, next
+  to the PVS lumps. One blob serves both readers, and it stays a valid BSP30 file.
+- Each **collision body is tagged** with the BSP model it stands for, so a consumer knows
+  which tree to descend.
+
+This is purely additive. The mesh shapes are still built and still there; a physics engine
+that ignores the metadata — including stock Godot Physics — collides against exactly what
+it always did.
+
+### Metadata Contract
+
+| Where | Key | Type | Meaning |
+|---|---|---|---|
+| Scene root | `bsp_data` | `PackedByteArray` | The stripped BSP tree. Written once per map: it is ~800 KB on a mid-size map and a map has hundreds of brush entities, so it is never copied per body — a consumer walks up the tree from a body to find it. |
+| Collision body | `bsp_model` | `int` | BSP model index whose hulls this body's shapes stand for (0 = worldspawn, 1+ = brush entities). |
+| Collision body | `bsp_scale` | `float` | Godot units per GoldSrc unit, i.e. the importer's `scale_factor`. Always written — a consumer needs it to convert queries back into map units. |
+| Collision body | `bsp_blocking` | `int` | Optional. Bitmask over `-contents` (`CONTENTS_SOLID = -2` → bit 2) of what should stop a trace. Omitted means solid-only. Only the sky body sets it, to `1 << -CONTENTS_SKY`: the compiler writes sky as solid in the clip hulls, so sky blocks players there while staying passable in hull 0 — the same split as the mesh path's separate sky collision layer. |
+
+### Enabling it
+
+Nothing to enable on this side — importing (or reconverting) a `.bsp` writes the blob and
+the tags. **Maps imported before this feature must be reimported**; without `bsp_data` a
+consumer silently falls back to the mesh shapes.
+
+The consumer side is [hop-godot](https://github.com/alanfischer/hop-godot), which traces
+the hulls whenever it finds this metadata:
+
+1. Build and install the `hop-physics` addon, then select **Hop Physics** under
+   **Project Settings > Physics > 3D > Physics Engine** and restart.
+2. Load a reimported map. Hull tracing is on by default; hop prints
+   `[Hop] BSP hull collision active for <map>` once per map when it picks the blob up.
+3. To turn it off — to A/B it against the mesh colliders, or on a build with no hull
+   support — either set `HOP_NO_BSP_HULLS=1` in the environment (boot default only) or
+   call `PhysicsServer3D.set_bsp_hulls_enabled(false)` at runtime.
+
+See hop-godot's README for hull selection, the runtime toggle, and its own fallback rules.
 
 ## Building
 
@@ -218,12 +269,18 @@ var leaf = bsp.point_to_leaf(Vector3(0, 0, 0))         # leaf index for a world 
 var visible_leaves = bsp.get_leaf_pvs(leaf)            # PackedInt32Array of PVS-visible leaf indices
 var aabb_leaves = bsp.get_leaves_in_aabb(my_aabb)      # PackedInt32Array of leaves touching an AABB
 
-# Export a stripped PVS blob (PLANES, VISIBILITY, NODES, LEAFS, MODELS only).
-# Embed this in .scn metadata so VisibilityManager can initialize without the .bsp.
-var pvs_blob: PackedByteArray = bsp.get_pvs_blob()
+# Export a stripped BSP blob (PLANES, VISIBILITY, NODES, CLIPNODES, LEAFS, MODELS only).
+# Still a valid BSP30 file. Embed it in .scn metadata as "bsp_data" so VisibilityManager
+# (PVS) and hull collision can both initialize without the .bsp.
+var bsp_blob: PackedByteArray = bsp.get_bsp_blob()
+# get_pvs_blob() is a deprecated alias for the same call.
 
-# Load a stripped PVS blob for PVS-only queries (no WADs or build_mesh needed)
-bsp.load_bsp_from_data(pvs_blob)
+# build_mesh() already parks this blob on the node, so prefer reading it back —
+# PackedByteArray is copy-on-write, so this is a refcount rather than a second copy.
+var same_blob: PackedByteArray = bsp.get_meta("bsp_data", PackedByteArray())
+
+# Load a stripped blob for PVS/hull queries (no WADs or build_mesh needed)
+bsp.load_bsp_from_data(bsp_blob)
 
 # Bake ambient cube light grid (call after build_mesh)
 var grid = bsp.bake_light_grid(32.0)  # cell size in GoldSrc units
@@ -244,9 +301,9 @@ BSP PVS-based runtime visibility culling. See [PVS Runtime Visibility Culling](#
 var vm = VisibilityManager.new()
 add_child(vm)
 
-# Preferred: initialize from pvs_data metadata baked into the .scn at import time.
+# Preferred: initialize from bsp_data metadata baked into the .scn at import time.
 # No .bsp file required at runtime.
-var pvs_blob: PackedByteArray = map_root.get_meta("pvs_data", PackedByteArray())
+var pvs_blob: PackedByteArray = map_root.get_meta("bsp_data", PackedByteArray())
 var leaf_count = vm.setup_from_data(pvs_blob, 0.025)  # returns leaf count; 0 = failure
 
 # Alternative: load directly from a .bsp file (no WADs or mesh build needed)
