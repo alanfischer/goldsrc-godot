@@ -165,6 +165,19 @@ uniform sampler2D lm_layer2 : filter_linear;
 uniform sampler2D lm_layer3 : filter_linear;
 uniform sampler2D lightstyle_tex : filter_nearest;
 uniform float overbright = 2.0;
+// GoldSrc composited texture x lightmap on 8-bit gamma values. The RD renderers
+// (forward+/mobile) shade in linear space and encode on output, gl_compatibility
+// shades in sRGB and does not, so the same expression lands in a different space
+// on each. Do the multiply in gamma space either way and convert once at the end.
+uniform bool linear_output = false;
+
+vec3 gs_to_srgb(vec3 c) {
+	return mix(c * 12.92, 1.055 * pow(max(c, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
+}
+
+vec3 gs_to_linear(vec3 c) {
+	return mix(c / 12.92, pow((max(c, vec3(0.0)) + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+}
 
 varying vec4 style_coords;
 
@@ -185,8 +198,13 @@ void fragment() {
 	         + texture(lm_layer2, UV2).rgb * b2
 	         + texture(lm_layer3, UV2).rgb * b3;
 
+	// ALBEDO stays in the renderer's native space so real-time lights stay correct;
+	// only the lightmap term needs the gamma-space treatment. min() before the
+	// conversion reproduces GoldSrc's clamp, which clips differently in linear.
+	vec3 base_srgb = linear_output ? gs_to_srgb(albedo.rgb) : albedo.rgb;
+	vec3 lit_srgb = min(base_srgb * lm * overbright, vec3(1.0));
 	ALBEDO = albedo.rgb;
-	EMISSION = albedo.rgb * lm * overbright;
+	EMISSION = linear_output ? gs_to_linear(lit_srgb) : lit_srgb;
 	ROUGHNESS = 1.0;
 }
 )";
@@ -203,6 +221,19 @@ uniform sampler2D lm_layer2 : filter_linear;
 uniform sampler2D lm_layer3 : filter_linear;
 uniform sampler2D lightstyle_tex : filter_nearest;
 uniform float overbright = 2.0;
+// GoldSrc composited texture x lightmap on 8-bit gamma values. The RD renderers
+// (forward+/mobile) shade in linear space and encode on output, gl_compatibility
+// shades in sRGB and does not, so the same expression lands in a different space
+// on each. Do the multiply in gamma space either way and convert once at the end.
+uniform bool linear_output = false;
+
+vec3 gs_to_srgb(vec3 c) {
+	return mix(c * 12.92, 1.055 * pow(max(c, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
+}
+
+vec3 gs_to_linear(vec3 c) {
+	return mix(c / 12.92, pow((max(c, vec3(0.0)) + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+}
 uniform float alpha_scissor_threshold : hint_range(0, 1) = 0.5;
 
 varying vec4 style_coords;
@@ -224,8 +255,13 @@ void fragment() {
 	         + texture(lm_layer2, UV2).rgb * b2
 	         + texture(lm_layer3, UV2).rgb * b3;
 
+	// ALBEDO stays in the renderer's native space so real-time lights stay correct;
+	// only the lightmap term needs the gamma-space treatment. min() before the
+	// conversion reproduces GoldSrc's clamp, which clips differently in linear.
+	vec3 base_srgb = linear_output ? gs_to_srgb(albedo.rgb) : albedo.rgb;
+	vec3 lit_srgb = min(base_srgb * lm * overbright, vec3(1.0));
 	ALBEDO = albedo.rgb;
-	EMISSION = albedo.rgb * lm * overbright;
+	EMISSION = linear_output ? gs_to_linear(lit_srgb) : lit_srgb;
 	ROUGHNESS = 1.0;
 	ALPHA = albedo.a;
 	ALPHA_SCISSOR_THRESHOLD = alpha_scissor_threshold;
