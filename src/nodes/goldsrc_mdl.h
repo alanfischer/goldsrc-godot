@@ -52,7 +52,14 @@ private:
 	godot::Skeleton3D *skeleton = nullptr;
 	std::vector<godot::Transform3D> rest_bone_world; // cached rest-pose world transforms
 	std::vector<godot::Ref<godot::StandardMaterial3D>> stored_materials;
-	std::vector<std::pair<godot::MeshInstance3D*, int>> mesh_skin_refs; // mesh instance + skin_ref
+	// One entry per surface: the instance holding it, which surface it is, and the GoldSrc
+	// mesh's skin_ref — what set_skin() looks a family's texture up by.
+	struct MeshSkinRef {
+		godot::MeshInstance3D *mesh_inst;
+		int surface;
+		int skin_ref;
+	};
+	std::vector<MeshSkinRef> mesh_skin_refs;
 	float scale_factor = 0.025f;
 	bool model_built = false;
 };
