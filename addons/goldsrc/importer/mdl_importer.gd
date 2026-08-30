@@ -30,6 +30,12 @@ func _get_preset_name(preset_index: int) -> String:
 	return "Default"
 
 
+## Bump when the built scene's shape changes, so every .mdl reimports rather than loading a
+## cached scene from the old importer. 1: meshes merged into one MeshInstance3D per bodypart.
+func _get_format_version() -> int:
+	return 1
+
+
 func _get_priority() -> float:
 	return 1.0
 

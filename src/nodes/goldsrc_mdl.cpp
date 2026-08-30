@@ -120,15 +120,15 @@ void GoldSrcMDL::set_skin(int family) {
 	const auto &mdl = parser->get_data();
 	if (family < 0 || family >= mdl.num_skin_families) return;
 
-	for (auto &[mesh_inst, skin_ref] : mesh_skin_refs) {
-		if (!mesh_inst) continue;
-		int tex_idx = skin_ref;
-		int table_idx = family * mdl.num_skin_ref + skin_ref;
+	for (const auto &ref : mesh_skin_refs) {
+		if (!ref.mesh_inst) continue;
+		int tex_idx = ref.skin_ref;
+		int table_idx = family * mdl.num_skin_ref + ref.skin_ref;
 		if (table_idx >= 0 && table_idx < (int)mdl.skin_table.size()) {
 			tex_idx = mdl.skin_table[table_idx];
 		}
 		if (tex_idx >= 0 && tex_idx < (int)stored_materials.size()) {
-			mesh_inst->set_surface_override_material(0, stored_materials[tex_idx]);
+			ref.mesh_inst->set_surface_override_material(ref.surface, stored_materials[tex_idx]);
 		}
 	}
 }
@@ -414,12 +414,18 @@ void GoldSrcMDL::build_meshes() {
 	}
 	stored_materials = materials;
 
-	// Build mesh for each bodypart (first model only for now)
+	// One MeshInstance3D per bodypart (first model only for now), carrying each of the
+	// submodel's meshes as its own surface. A GoldSrc mesh is a texture batch, which is what a
+	// Godot surface is; the bodypart is the swappable unit, which is what a node is for.
 	for (int bp = 0; bp < (int)mdl.bodyparts.size(); bp++) {
 		const auto &bodypart = mdl.bodyparts[bp];
 		if (bodypart.models.empty()) continue;
 
 		const auto &submodel = bodypart.models[0]; // Default model
+
+		Ref<ArrayMesh> arr_mesh;
+		arr_mesh.instantiate();
+		vector<pair<int, int>> surface_skin_refs; // surface -> skin_ref, until the instance exists
 
 		for (int mi = 0; mi < (int)submodel.meshes.size(); mi++) {
 			const auto &mesh = submodel.meshes[mi];
@@ -495,9 +501,6 @@ void GoldSrcMDL::build_meshes() {
 				indices.push_back(t);
 			}
 
-			Ref<ArrayMesh> arr_mesh;
-			arr_mesh.instantiate();
-
 			Array arrays;
 			arrays.resize(ArrayMesh::ARRAY_MAX);
 			arrays[ArrayMesh::ARRAY_VERTEX] = vertices;
@@ -510,6 +513,7 @@ void GoldSrcMDL::build_meshes() {
 				arrays[ArrayMesh::ARRAY_WEIGHTS] = bone_weights;
 			}
 
+			int surface = arr_mesh->get_surface_count();
 			arr_mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
 
 			int skin_ref = mesh.skin_ref;
@@ -518,22 +522,28 @@ void GoldSrcMDL::build_meshes() {
 				tex_idx = mdl.skin_table[tex_idx];
 			}
 			if (tex_idx >= 0 && tex_idx < (int)materials.size()) {
-				arr_mesh->surface_set_material(0, materials[tex_idx]);
+				arr_mesh->surface_set_material(surface, materials[tex_idx]);
 			}
+			surface_skin_refs.push_back({surface, skin_ref});
+		}
 
-			MeshInstance3D *mesh_instance = memnew(MeshInstance3D);
-			String mesh_name = String(bodypart.name.c_str()) + "_mesh" + String::num_int64(mi);
-			mesh_instance->set_name(mesh_name);
-			mesh_instance->set_mesh(arr_mesh);
+		if (arr_mesh->get_surface_count() == 0) continue;
 
-			if (skeleton) {
-				skeleton->add_child(mesh_instance);
-				mesh_instance->set_skeleton_path(NodePath(".."));
-			} else {
-				add_child(mesh_instance);
-			}
+		MeshInstance3D *mesh_instance = memnew(MeshInstance3D);
+		String mesh_name = String(bodypart.name.c_str()).validate_node_name();
+		mesh_instance->set_name(mesh_name.is_empty()
+			? "bodypart" + String::num_int64(bp) : mesh_name);
+		mesh_instance->set_mesh(arr_mesh);
 
-			mesh_skin_refs.push_back({mesh_instance, skin_ref});
+		if (skeleton) {
+			skeleton->add_child(mesh_instance);
+			mesh_instance->set_skeleton_path(NodePath(".."));
+		} else {
+			add_child(mesh_instance);
+		}
+
+		for (const auto &[surface, skin_ref] : surface_skin_refs) {
+			mesh_skin_refs.push_back({mesh_instance, surface, skin_ref});
 		}
 	}
 }
