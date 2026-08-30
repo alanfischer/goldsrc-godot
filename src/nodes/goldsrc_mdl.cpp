@@ -18,6 +18,8 @@
 
 #include <cmath>
 #include <cstring>
+#include <map>
+#include <tuple>
 
 using namespace godot;
 using namespace std;
@@ -438,14 +440,19 @@ void GoldSrcMDL::build_meshes() {
 			PackedFloat32Array bone_weights;
 			PackedInt32Array indices;
 
-			for (int t = 0; t < (int)mesh.triangle_verts.size(); t++) {
-				const auto &tv = mesh.triangle_verts[t];
+			// A GoldSrc mesh indexes the submodel's shared vertex pool, and the strip/fan
+			// expansion hands us one entry per triangle corner — so writing a vertex per
+			// corner stores the model several times over (raisedead: 2343 for a 449-vertex
+			// model). Corners agreeing on position, normal and UV are one vertex; the rest
+			// split, as they must at a UV seam or a smoothing break.
+			map<tuple<int, int, float, float>, int> welded;
 
+			auto weld_corner = [&](const goldsrc::ParsedTriVertex &tv) -> int {
 				int vi = tv.vertex_index;
 				int ni = tv.normal_index;
-
-				if (vi * 3 + 2 >= (int)submodel.vertices.size()) continue;
-				if (ni * 3 + 2 >= (int)submodel.normals.size()) continue;
+				auto key = make_tuple(vi, ni, tv.s, tv.t);
+				auto found = welded.find(key);
+				if (found != welded.end()) return found->second;
 
 				float vx = submodel.vertices[vi * 3 + 0];
 				float vy = submodel.vertices[vi * 3 + 1];
@@ -498,7 +505,24 @@ void GoldSrcMDL::build_meshes() {
 				bone_weights.push_back(0.0f);
 				bone_weights.push_back(0.0f);
 
-				indices.push_back(t);
+				int index = (int)vertices.size() - 1;
+				welded[key] = index;
+				return index;
+			};
+
+			// Whole triangles: a corner pointing outside the pool takes its triangle with it,
+			// rather than leaving the two beside it to join the next one.
+			for (int t = 0; t + 2 < (int)mesh.triangle_verts.size(); t += 3) {
+				bool corners_valid = true;
+				for (int c = 0; c < 3 && corners_valid; c++) {
+					const auto &tv = mesh.triangle_verts[t + c];
+					corners_valid = tv.vertex_index * 3 + 2 < (int)submodel.vertices.size()
+						&& tv.normal_index * 3 + 2 < (int)submodel.normals.size();
+				}
+				if (!corners_valid) continue;
+				for (int c = 0; c < 3; c++) {
+					indices.push_back(weld_corner(mesh.triangle_verts[t + c]));
+				}
 			}
 
 			Array arrays;

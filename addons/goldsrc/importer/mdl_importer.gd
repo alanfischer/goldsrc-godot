@@ -30,10 +30,15 @@ func _get_preset_name(preset_index: int) -> String:
 	return "Default"
 
 
-## Bump when the built scene's shape changes, so every .mdl reimports rather than loading a
-## cached scene from the old importer. 1: meshes merged into one MeshInstance3D per bodypart.
+## What shape of scene this importer builds. 1: meshes merged into one MeshInstance3D per
+## bodypart. 2: triangle corners welded back into shared vertices.
+##
+## Godot records it in each .import file but does not act on a bump — neither --import nor an
+## editor session reimports on its own (checked on 4.7). Changing the built scene means clearing
+## .godot/imported/*.mdl-* by hand; the number is here so it is visible which build a cache came
+## from.
 func _get_format_version() -> int:
-	return 1
+	return 2
 
 
 func _get_priority() -> float:
