@@ -158,7 +158,7 @@ static const char *LIGHTSTYLE_SHADER_CODE = R"(
 shader_type spatial;
 render_mode ambient_light_disabled, specular_disabled;
 
-uniform sampler2D albedo_texture : source_color;
+uniform sampler2D albedo_texture : source_color, filter_linear_mipmap_anisotropic;
 uniform sampler2D lm_layer0 : filter_linear;
 uniform sampler2D lm_layer1 : filter_linear;
 uniform sampler2D lm_layer2 : filter_linear;
@@ -214,7 +214,7 @@ static const char *LIGHTSTYLE_SHADER_ALPHA_CODE = R"(
 shader_type spatial;
 render_mode ambient_light_disabled, specular_disabled;
 
-uniform sampler2D albedo_texture : source_color;
+uniform sampler2D albedo_texture : source_color, filter_linear_mipmap_anisotropic;
 uniform sampler2D lm_layer0 : filter_linear;
 uniform sampler2D lm_layer1 : filter_linear;
 uniform sampler2D lm_layer2 : filter_linear;
@@ -303,7 +303,7 @@ static const char *WATER_SHADER_CODE = R"(
 shader_type spatial;
 render_mode unshaded, shadows_disabled, ambient_light_disabled, cull_disabled, depth_draw_never;
 
-uniform sampler2D albedo_texture : source_color;
+uniform sampler2D albedo_texture : source_color, filter_linear_mipmap_anisotropic;
 uniform float wave_amplitude : hint_range(0.0, 0.1) = 0.025;
 uniform float wave_frequency : hint_range(1.0, 20.0) = 8.0;
 uniform float wave_speed : hint_range(0.1, 5.0) = 1.6;

@@ -394,6 +394,10 @@ void GoldSrcMDL::build_meshes() {
 
 		Ref<Image> img = Image::create_from_data(tex.width, tex.height,
 			false, Image::FORMAT_RGBA8, pixels);
+		// Skin pixels are always fully opaque (mdl_parser writes alpha 255), so a mip chain
+		// cannot bleed transparent-black in — and without one a player across the map is a
+		// crawling mess of aliased texels.
+		img->generate_mipmaps();
 		Ref<ImageTexture> gtex = ImageTexture::create_from_image(img);
 		godot_textures.push_back(gtex);
 
