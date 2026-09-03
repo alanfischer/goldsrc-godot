@@ -286,8 +286,30 @@ void fragment() {
 }
 )";
 
+// Which liquid a surface LOOKS like. Gameplay (swim physics, damage) reads the entity's
+// "skin" key instead; this is only motion. Derived from the texture name rather than skin
+// because the name is the signal that always exists and is always right: ww_golem's lava
+// brush is skin -3 (water contents) with a lava texture, and worldspawn liquid carries no
+// entity to have a skin at all. Keying on the name also makes this a pure function of the
+// material cache key, so two liquids can never land in one cache slot.
+//
+// "icy" and not "ice": ww_osaka's rice-paddy texture is !osaka_rice, and a substring test
+// for "ice" freezes it.
+enum LiquidKind { LIQUID_WATER = 0, LIQUID_SLIME = 1, LIQUID_LAVA = 2, LIQUID_ICE = 3 };
+
+static LiquidKind liquid_kind_for_texture(const std::string &tex_name) {
+	std::string n;
+	n.reserve(tex_name.size());
+	for (char c : tex_name) n += (char)tolower((unsigned char)c);
+	if (n.find("lava") != std::string::npos || n.find("magma") != std::string::npos) return LIQUID_LAVA;
+	if (n.find("slime") != std::string::npos) return LIQUID_SLIME;
+	if (n.find("icy") != std::string::npos || n.find("frozen") != std::string::npos) return LIQUID_ICE;
+	return LIQUID_WATER;
+}
+
 // Water surface shader: turbulent UV warp to simulate GoldSrc liquid surfaces.
-// Applied to faces whose texture name starts with '!' or '*'.
+// Applied to faces whose texture name starts with '!' or '*', and to every face of a
+// func_water brush whatever its texture is called (see ent_is_liquid in build_mesh).
 // GoldSrc water is translucent and visible from both sides (you see the surface from
 // above and, when submerged, from below), so the material writes ALPHA and disables
 // backface culling. cull_back would hide the inner faces and leave opaque water slabs.
@@ -308,11 +330,22 @@ uniform float wave_amplitude : hint_range(0.0, 0.1) = 0.025;
 uniform float wave_frequency : hint_range(1.0, 20.0) = 8.0;
 uniform float wave_speed : hint_range(0.1, 5.0) = 1.6;
 uniform float water_alpha : hint_range(0.0, 1.0) = 0.6;
+// 0 water, 1 slime, 2 lava, 3 ice — see liquid_kind_for_texture. Water is left at 1.0/1.0
+// so every map that already had liquid keeps exactly the surface it had.
+uniform int liquid_type : hint_range(0, 3) = 0;
 
 void fragment() {
+	float speed_mul = 1.0;
+	float amp_mul = 1.0;
+	if (liquid_type == 1) { speed_mul = 0.6; amp_mul = 1.2; }        // slime: thicker, slower
+	else if (liquid_type == 2) { speed_mul = 0.25; amp_mul = 1.6; }  // lava: slow, wide roll
+	else if (liquid_type == 3) { speed_mul = 0.06; amp_mul = 0.2; }  // ice: all but still
+
 	vec2 uv = UV;
-	uv.x += sin(uv.y * wave_frequency + TIME * wave_speed) * wave_amplitude;
-	uv.y += sin(uv.x * wave_frequency + TIME * wave_speed) * wave_amplitude;
+	float phase = TIME * wave_speed * speed_mul;
+	float amp = wave_amplitude * amp_mul;
+	uv.x += sin(uv.y * wave_frequency + phase) * amp;
+	uv.y += sin(uv.x * wave_frequency + phase) * amp;
 	ALBEDO = texture(albedo_texture, uv).rgb;
 	ALPHA = water_alpha;
 	ROUGHNESS = 1.0;
@@ -1199,6 +1232,12 @@ void GoldSrcBSP::build_mesh() {
 			}
 		}
 
+		// A func_water brush is liquid whatever its texture is called. Half the game's water
+		// is on unprefixed names the '!'/'*' test below cannot see — water4b (ww_2fort,
+		// ww_countryside, ww_ravine2), scrollwater1/2 (ww_osaka, ww_ravine2) — and those maps
+		// rendered their pools as ordinary opaque brushwork with an alpha slapped on top.
+		const bool ent_is_liquid = (classname == "func_water");
+
 		// Create a node for this model. Worldspawn is a plain container; brush
 		// entities are AnimatableBody3D roots so their entity transform is the
 		// physical/rendered brush transform.
@@ -1588,7 +1627,8 @@ void GoldSrcBSP::build_mesh() {
 			PackedInt32Array indices;
 			int vert_offset = 0;
 
-			bool is_water_group = !tex_name.empty() && (tex_name[0] == '!' || tex_name[0] == '*');
+			bool is_water_group = ent_is_liquid
+					|| (!tex_name.empty() && (tex_name[0] == '!' || tex_name[0] == '*'));
 
 			for (size_t fi = 0; fi < face_refs.size(); fi++) {
 				const auto *face = face_refs[fi].face;
@@ -1690,7 +1730,8 @@ void GoldSrcBSP::build_mesh() {
 
 			Ref<ImageTexture> texture = find_texture(tex_name);
 			bool is_sky_surface = goldsrc::is_sky_texture(tex_name);
-			bool is_water = !is_sky_surface && !tex_name.empty() && (tex_name[0] == '!' || tex_name[0] == '*');
+			bool is_water = !is_sky_surface && (ent_is_liquid
+					|| (!tex_name.empty() && (tex_name[0] == '!' || tex_name[0] == '*')));
 			bool is_alpha_scissor = !is_sky_surface && !is_water && !tex_name.empty() && tex_name[0] == '{';
 
 			// Build the material once per (texture, page) and hand the same one to every mesh
@@ -1713,6 +1754,7 @@ void GoldSrcBSP::build_mesh() {
 				Ref<ShaderMaterial> material;
 				material.instantiate();
 				material->set_shader(water_shader);
+				material->set_shader_parameter("liquid_type", (int)liquid_kind_for_texture(tex_name));
 				if (texture.is_valid()) {
 					material->set_shader_parameter("albedo_texture", texture);
 				}
