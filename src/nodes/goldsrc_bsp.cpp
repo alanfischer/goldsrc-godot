@@ -286,25 +286,23 @@ void fragment() {
 }
 )";
 
-// Which liquid a surface LOOKS like. Gameplay (swim physics, damage) reads the entity's
-// "skin" key instead; this is only motion. Derived from the texture name rather than skin
-// because the name is the signal that always exists and is always right: ww_golem's lava
-// brush is skin -3 (water contents) with a lava texture, and worldspawn liquid carries no
-// entity to have a skin at all. Keying on the name also makes this a pure function of the
-// material cache key, so two liquids can never land in one cache slot.
+// Which liquid a surface is, as the shader's liquid_type. GoldSrc kept this in one place per
+// kind of brush and never in the texture name: a brush entity carries it in its "skin" key
+// (CFuncDoor::KeyValue stores it straight into pev->skin), and a worldspawn surface takes it
+// from the leaf it borders, which the compiler had already resolved from the name at build
+// time. Both are the same CONTENTS_* value, so both come through here.
 //
-// "icy" and not "ice": ww_osaka's rice-paddy texture is !osaka_rice, and a substring test
-// for "ice" freezes it.
-enum LiquidKind { LIQUID_WATER = 0, LIQUID_SLIME = 1, LIQUID_LAVA = 2, LIQUID_ICE = 3 };
+// Reading the name instead would be re-deriving what the compiler already decided, and it gets
+// it wrong: ww_golem's lava-textured brush is deliberately skin -3, plain water that does not
+// burn, and any texture whose name merely contains "lava" or "rice" would be miscalled.
+enum LiquidKind { LIQUID_WATER = 0, LIQUID_SLIME = 1, LIQUID_LAVA = 2 };
 
-static LiquidKind liquid_kind_for_texture(const std::string &tex_name) {
-	std::string n;
-	n.reserve(tex_name.size());
-	for (char c : tex_name) n += (char)tolower((unsigned char)c);
-	if (n.find("lava") != std::string::npos || n.find("magma") != std::string::npos) return LIQUID_LAVA;
-	if (n.find("slime") != std::string::npos) return LIQUID_SLIME;
-	if (n.find("icy") != std::string::npos || n.find("frozen") != std::string::npos) return LIQUID_ICE;
-	return LIQUID_WATER;
+static LiquidKind liquid_kind_for_contents(int contents) {
+	switch (contents) {
+		case goldsrc::CONTENTS_SLIME: return LIQUID_SLIME;
+		case goldsrc::CONTENTS_LAVA: return LIQUID_LAVA;
+		default: return LIQUID_WATER;
+	}
 }
 
 // Water surface shader: turbulent UV warp to simulate GoldSrc liquid surfaces.
@@ -330,16 +328,19 @@ uniform float wave_amplitude : hint_range(0.0, 0.1) = 0.025;
 uniform float wave_frequency : hint_range(1.0, 20.0) = 8.0;
 uniform float wave_speed : hint_range(0.1, 5.0) = 1.6;
 uniform float water_alpha : hint_range(0.0, 1.0) = 0.6;
-// 0 water, 1 slime, 2 lava, 3 ice — see liquid_kind_for_texture. Water is left at 1.0/1.0
-// so every map that already had liquid keeps exactly the surface it had.
-uniform int liquid_type : hint_range(0, 3) = 0;
+// 0 water, 1 slime, 2 lava — the brush's CONTENTS_*, see liquid_kind_for_contents. Water is
+// left at 1.0/1.0 so every map that already had liquid keeps exactly the surface it had.
+//
+// GoldSrc ran one warp for all three; separating them is ours. It stops at what the map cannot
+// say for itself: how still a surface is belongs to WaveHeight, which the mapper sets per brush
+// (ww_matrox has an ice brush at 5 and another at 0), so nothing here may override it.
+uniform int liquid_type : hint_range(0, 2) = 0;
 
 void fragment() {
 	float speed_mul = 1.0;
 	float amp_mul = 1.0;
 	if (liquid_type == 1) { speed_mul = 0.6; amp_mul = 1.2; }        // slime: thicker, slower
 	else if (liquid_type == 2) { speed_mul = 0.25; amp_mul = 1.6; }  // lava: slow, wide roll
-	else if (liquid_type == 3) { speed_mul = 0.06; amp_mul = 0.2; }  // ice: all but still
 
 	vec2 uv = UV;
 	float phase = TIME * wave_speed * speed_mul;
@@ -1237,6 +1238,16 @@ void GoldSrcBSP::build_mesh() {
 		// ww_countryside, ww_ravine2), scrollwater1/2 (ww_osaka, ww_ravine2) — and those maps
 		// rendered their pools as ordinary opaque brushwork with an alpha slapped on top.
 		const bool ent_is_liquid = (classname == "func_water");
+		// A brush entity names its liquid in "skin"; worldspawn liquid has no entity and is
+		// read per face from the leaf it borders (ParsedFace::liquid_contents).
+		int ent_skin = goldsrc::CONTENTS_WATER;
+		if (m > 0) {
+			auto ent_it = model_entities.find(model_key);
+			if (ent_it != model_entities.end()) {
+				auto sk = ent_it->second->properties.find("skin");
+				if (sk != ent_it->second->properties.end()) ent_skin = atoi(sk->second.c_str());
+			}
+		}
 
 		// Create a node for this model. Worldspawn is a plain container; brush
 		// entities are AnimatableBody3D roots so their entity transform is the
@@ -1754,7 +1765,20 @@ void GoldSrcBSP::build_mesh() {
 				Ref<ShaderMaterial> material;
 				material.instantiate();
 				material->set_shader(water_shader);
-				material->set_shader_parameter("liquid_type", (int)liquid_kind_for_texture(tex_name));
+				int liquid_contents = ent_skin;
+				if (m == 0) {
+					// Worldspawn: take the first face in the group that borders a liquid. A
+					// texture group is one surface of one pool, so they agree.
+					liquid_contents = goldsrc::CONTENTS_WATER;
+					for (const auto &fr : face_refs) {
+						if (fr.face->liquid_contents != 0) {
+							liquid_contents = fr.face->liquid_contents;
+							break;
+						}
+					}
+				}
+				material->set_shader_parameter("liquid_type",
+						(int)liquid_kind_for_contents(liquid_contents));
 				if (texture.is_valid()) {
 					material->set_shader_parameter("albedo_texture", texture);
 				}

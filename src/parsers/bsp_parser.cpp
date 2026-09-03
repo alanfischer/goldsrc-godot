@@ -266,6 +266,7 @@ void BSPParser::parse_faces(const uint8_t *data, size_t size) {
 		// Cull internal water faces. In GoldSrc, water brush entities only show
 		// their top surface — side and bottom faces are hidden behind pool
 		// geometry. For worldspawn water, check both sides against the BSP tree.
+		int face_liquid_contents = 0; // CONTENTS_WATER/SLIME/LAVA for a worldspawn liquid face
 		if (face.planenum >= 0 && (size_t)face.planenum < planes.size()) {
 			const auto &pl = planes[face.planenum];
 			float nx = pl.normal[0], ny = pl.normal[1], nz = pl.normal[2];
@@ -351,7 +352,7 @@ void BSPParser::parse_faces(const uint8_t *data, size_t size) {
 				if (nv_center > 0) {
 					cx /= nv_center; cy /= nv_center; cz /= nv_center;
 					int root_node = bsp_data.models[0].headnode[0];
-					bool both_water = true;
+					int side_contents[2] = {0, 0};
 					for (int s = 0; s < 2; s++) {
 						float sign = s == 0 ? 1.0f : -1.0f;
 						float probe[3] = {
@@ -369,13 +370,25 @@ void BSPParser::parse_faces(const uint8_t *data, size_t size) {
 							ni = d >= 0 ? nd.children[0] : nd.children[1];
 						}
 						int li = -(ni + 1);
-						if (li < 0 || (size_t)li >= leafs.size() ||
-						    leafs[li].contents != CONTENTS_WATER) {
-							both_water = false;
-							break;
-						}
+						side_contents[s] = (li >= 0 && (size_t)li < leafs.size())
+								? leafs[li].contents : 0;
 					}
-					if (both_water) { water_faces_culled++; continue; }
+
+					// Which liquid this surface belongs to. The compiler resolved the texture
+					// name into leaf contents when it built the map and GoldSrc read the leaf,
+					// so this is its answer rather than a second guess at the name. Lava and
+					// slime win over water: a face between two liquids is the more specific one.
+					for (int s = 0; s < 2; s++) {
+						int c = side_contents[s];
+						if (c == CONTENTS_LAVA || c == CONTENTS_SLIME ||
+						    (c == CONTENTS_WATER && face_liquid_contents == 0))
+							face_liquid_contents = c;
+					}
+
+					if (side_contents[0] == CONTENTS_WATER && side_contents[1] == CONTENTS_WATER) {
+						water_faces_culled++;
+						continue;
+					}
 				}
 			}
 		}
@@ -393,6 +406,7 @@ void BSPParser::parse_faces(const uint8_t *data, size_t size) {
 
 		ParsedFace pface;
 		pface.model_index = face_to_model[f];
+		pface.liquid_contents = face_liquid_contents;
 		pface.texture_name = tex.name;
 		pface.texture_width = tex.width > 0 ? tex.width : 1;
 		pface.texture_height = tex.height > 0 ? tex.height : 1;
