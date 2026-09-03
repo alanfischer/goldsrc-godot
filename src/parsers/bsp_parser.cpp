@@ -215,6 +215,37 @@ void BSPParser::parse_faces(const uint8_t *data, size_t size) {
 			water_model_set.insert(mi);
 	}
 
+	// Is `p` inside `model_index`'s solid? Walks hull 0 (exact brush geometry) rather than
+	// hull 1 (clipnodes), which is expanded by the player bbox and would false-positive on
+	// nearby but non-overlapping brushes — a waterfall beside a pool, say.
+	auto point_in_model = [&](int model_index, const float p[3]) -> bool {
+		int ni = raw_models[model_index].headnode[0];
+		while (ni >= 0 && (size_t)ni < nodes.size()) {
+			const auto &nd = nodes[ni];
+			if (nd.planenum < 0 || (size_t)nd.planenum >= planes.size()) break;
+			const auto &np = planes[nd.planenum];
+			float d = np.normal[0] * p[0] + np.normal[1] * p[1] + np.normal[2] * p[2] - np.dist;
+			ni = d >= 0 ? nd.children[0] : nd.children[1];
+		}
+		int li = -(ni + 1); // negative ni = leaf index: -(ni+1)
+		return li >= 0 && (size_t)li < leafs.size() && leafs[li].contents == CONTENTS_SOLID;
+	};
+
+	// A water brush something can trigger is a water brush that can MOVE: func_water is
+	// CFuncDoor in the HL SDK, which is how ww_volcano's *75 ("volc", speed 25, lip 160) is a
+	// rising lava flood. This cull is baked into the converted scene, so a face dropped as
+	// "buried" stays dropped once the brush has moved off it and leaves a hole. So cull only
+	// against geometry that cannot move — a movable water brush is neither culled itself nor
+	// used as a reason to cull anything else.
+	set<int> movable_water_models;
+	for (const auto &ent : bsp_data.entities) {
+		auto mit = ent.properties.find("model");
+		if (mit == ent.properties.end() || mit->second.empty() || mit->second[0] != '*') continue;
+		if (ent.properties.find("targetname") == ent.properties.end()) continue;
+		int mi = atoi(mit->second.c_str() + 1);
+		if (water_model_set.count(mi)) movable_water_models.insert(mi);
+	}
+
 	int water_faces_culled = 0;
 	for (size_t f = 0; f < raw_faces.size(); f++) {
 		const BSPFace &face = raw_faces[f];
@@ -243,7 +274,8 @@ void BSPParser::parse_faces(const uint8_t *data, size_t size) {
 			// For water brush entity faces: cull if the outside of this face
 			// is inside another water model's BSP volume (internal seam between
 			// adjacent water volumes). Keep exposed faces (e.g. waterfalls).
-			if (water_model_set.count(face_to_model[f])) {
+			if (water_model_set.count(face_to_model[f]) &&
+			    !movable_water_models.count(face_to_model[f])) {
 				// Compute face center
 				float wcx = 0, wcy = 0, wcz = 0;
 				int wnv = 0;
@@ -262,14 +294,18 @@ void BSPParser::parse_faces(const uint8_t *data, size_t size) {
 				}
 				if (wnv > 0) {
 					wcx /= wnv; wcy /= wnv; wcz /= wnv;
-					// Probe both sides of the face. For each direction, walk
-					// hull 0 (exact BSP geometry) of every OTHER water model.
-					// If the probe lands inside another water entity, this
-					// face is an internal seam between adjacent water entities.
-					// Note: hull 0 uses the exact brush geometry (nodes/leafs),
-					// NOT hull 1 (clipnodes) which is expanded by player bbox
-					// and would false-positive on nearby but non-overlapping
-					// brushes (e.g. waterfall next to a pool).
+					// Probe both sides of the face; the one that lies OUTSIDE this
+					// brush is the one that can see a seam. If it lands inside another
+					// water entity, this face is buried between two adjacent water
+					// volumes and is never visible.
+					//
+					// Skipping the probe that lands inside THIS brush is what keeps a
+					// coincident twin from deleting the map's water: ww_osaka builds
+					// every river as a func_water and a func_conveyor over the same
+					// brush, so each one's INWARD probe sits inside the other. Culling
+					// on that erased all 9 of its water brushes — 319 of 322 faces —
+					// and the rivers never rendered at all. It is the only map in the
+					// game that does this, and no other map's cull count moves.
 					bool inside_other = false;
 					for (int ps = 0; ps < 2 && !inside_other; ps++) {
 						float sign = ps == 0 ? 1.0f : -1.0f;
@@ -278,22 +314,11 @@ void BSPParser::parse_faces(const uint8_t *data, size_t size) {
 							wcy + ny * sign * 2.0f,
 							wcz + nz * sign * 2.0f
 						};
+						if (point_in_model(face_to_model[f], probe)) continue;
 						for (int wmi : water_model_set) {
 							if (wmi == face_to_model[f]) continue;
-							// Walk hull 0 (nodes/leafs) of the other water model
-							int ni = raw_models[wmi].headnode[0];
-							while (ni >= 0 && (size_t)ni < nodes.size()) {
-								const auto &nd = nodes[ni];
-								if (nd.planenum < 0 || (size_t)nd.planenum >= planes.size()) break;
-								const auto &np = planes[nd.planenum];
-								float d = np.normal[0] * probe[0] + np.normal[1] * probe[1]
-								        + np.normal[2] * probe[2] - np.dist;
-								ni = d >= 0 ? nd.children[0] : nd.children[1];
-							}
-							// Negative ni = leaf index: -(ni+1)
-							int li = -(ni + 1);
-							if (li >= 0 && (size_t)li < leafs.size() &&
-							    leafs[li].contents == CONTENTS_SOLID) {
+							if (movable_water_models.count(wmi)) continue;
+							if (point_in_model(wmi, probe)) {
 								inside_other = true;
 								break;
 							}
