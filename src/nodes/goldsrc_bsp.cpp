@@ -305,6 +305,80 @@ static LiquidKind liquid_kind_for_contents(int contents) {
 	}
 }
 
+// Vertical wave displacement, shared verbatim by the water surface and its depth-prepass twin.
+// The two MUST move together: the prepass exists to stamp liquid depth ahead of the colour pass,
+// and a silhouette that no longer matches is a surface that rejects itself.
+//
+// The phase is a function of WORLD position, never of UV or model space, so that two brushes
+// meeting at an edge agree on where the crest is. Subdivision follows world-aligned planes for
+// the same reason (see subdivide_water_polygon): shared vertices land on the same grid and
+// therefore displace identically, which is what keeps the seams closed.
+#define GOLDSRC_WATER_WAVE_GLSL \
+"uniform float wave_height = 0.0;  // Godot units of crest, 0 = flat (worldspawn liquid)\n" \
+"const float WAVE_FREQ = 0.49;     // radians per unit — a ~12.8 unit (512 GoldSrc) swell\n" \
+"const float WAVE_SPEED = 1.1;\n" \
+"vec3 goldsrc_water_wave(vec3 vertex, mat4 model) {\n" \
+"	if (wave_height <= 0.0) { return vertex; }\n" \
+"	vec3 w = (model * vec4(vertex, 1.0)).xyz;\n" \
+"	float phase = TIME * WAVE_SPEED;\n" \
+"	vertex.y += wave_height * sin(w.x * WAVE_FREQ + phase) * cos(w.z * WAVE_FREQ + phase);\n" \
+"	return vertex;\n" \
+"}\n"
+
+// Quarter of the wave period (512 GoldSrc units), in GoldSrc units. Larger reads as folds;
+// smaller buys nothing a sine can use. Only brushes that actually wave are cut this fine.
+static const float WATER_SUBDIVIDE = 128.0f;
+
+// GoldSrc's water waves need geometry to bend, and a BSP face is one flat polygon. Split it on
+// world-aligned planes at multiples of `size`, exactly as Quake's GL_SubdivideSurface does, and
+// for its reason: two faces that share an edge are cut by the same planes at the same places, so
+// their vertices coincide and the wave cannot tear them apart. Splitting by longest-edge instead
+// would be simpler and would leave T-junctions that crack open the moment anything moves.
+static void subdivide_water_polygon(const std::vector<goldsrc::ParsedVertex> &poly, float size,
+		std::vector<std::vector<goldsrc::ParsedVertex>> &out, int depth = 0) {
+	if (poly.size() < 3) return;
+	if (depth > 12) { out.push_back(poly); return; }  // pathological face; stop splitting
+
+	for (int axis = 0; axis < 3; axis++) {
+		float mn = 1e30f, mx = -1e30f;
+		for (const auto &v : poly) { mn = std::min(mn, v.pos[axis]); mx = std::max(mx, v.pos[axis]); }
+		if (mx - mn <= size) continue;
+
+		// Cut on the grid line nearest the middle, so the pieces stay aligned map-wide.
+		float mid = floorf(((mn + mx) * 0.5f) / size + 0.5f) * size;
+		if (mid <= mn + 0.1f || mid >= mx - 0.1f) continue;  // nothing useful to cut
+
+		std::vector<goldsrc::ParsedVertex> front, back;
+		for (size_t i = 0; i < poly.size(); i++) {
+			const auto &a = poly[i];
+			const auto &b = poly[(i + 1) % poly.size()];
+			float da = a.pos[axis] - mid;
+			float db = b.pos[axis] - mid;
+			if (da >= 0) front.push_back(a);
+			if (da <= 0) back.push_back(a);
+			if ((da > 0) == (db > 0) || da == 0 || db == 0) continue;
+
+			goldsrc::ParsedVertex cut;
+			float f = da / (da - db);
+			for (int k = 0; k < 3; k++) {
+				cut.pos[k] = a.pos[k] + f * (b.pos[k] - a.pos[k]);
+				cut.normal[k] = a.normal[k];
+			}
+			for (int k = 0; k < 2; k++) {
+				cut.uv[k] = a.uv[k] + f * (b.uv[k] - a.uv[k]);
+				cut.lightmap_uv[k] = a.lightmap_uv[k] + f * (b.lightmap_uv[k] - a.lightmap_uv[k]);
+			}
+			cut.pos[axis] = mid;  // exact, so both sides share the vertex to the bit
+			front.push_back(cut);
+			back.push_back(cut);
+		}
+		subdivide_water_polygon(front, size, out, depth + 1);
+		subdivide_water_polygon(back, size, out, depth + 1);
+		return;
+	}
+	out.push_back(poly);
+}
+
 // Water surface shader: turbulent UV warp to simulate GoldSrc liquid surfaces.
 // Applied to faces whose texture name starts with '!' or '*', and to every face of a
 // func_water brush whatever its texture is called (see ent_is_liquid in build_mesh).
@@ -335,6 +409,10 @@ uniform float water_alpha : hint_range(0.0, 1.0) = 0.6;
 // say for itself: how still a surface is belongs to WaveHeight, which the mapper sets per brush
 // (ww_matrox has an ice brush at 5 and another at 0), so nothing here may override it.
 uniform int liquid_type : hint_range(0, 2) = 0;
+)" GOLDSRC_WATER_WAVE_GLSL R"(
+void vertex() {
+	VERTEX = goldsrc_water_wave(VERTEX, MODEL_MATRIX);
+}
 
 void fragment() {
 	float speed_mul = 1.0;
@@ -378,8 +456,9 @@ void fragment() {
 static const char *WATER_DEPTH_SHADER_CODE = R"(
 shader_type spatial;
 render_mode unshaded, shadows_disabled, ambient_light_disabled, cull_disabled, depth_draw_always;
-
+)" GOLDSRC_WATER_WAVE_GLSL R"(
 void vertex() {
+	VERTEX = goldsrc_water_wave(VERTEX, MODEL_MATRIX);
 	vec4 view_pos = MODELVIEW_MATRIX * vec4(VERTEX, 1.0);
 	view_pos.xyz *= 1.002;
 	POSITION = PROJECTION_MATRIX * view_pos;
@@ -1241,13 +1320,23 @@ void GoldSrcBSP::build_mesh() {
 		// A brush entity names its liquid in "skin"; worldspawn liquid has no entity and is
 		// read per face from the leaf it borders (ParsedFace::liquid_contents).
 		int ent_skin = goldsrc::CONTENTS_WATER;
+		// Crest height in GoldSrc units. Waves are an ENTITY feature — CFuncDoor::KeyValue puts
+		// WaveHeight into pev->scale and the engine bends only that brush — so worldspawn liquid
+		// stays flat and, more to the point, stays untessellated: ww_leyline's 655 faces and
+		// ww_golem's 568 pay nothing for a feature their maps never asked for.
+		float ent_wave = 0.0f;
 		if (m > 0) {
 			auto ent_it = model_entities.find(model_key);
 			if (ent_it != model_entities.end()) {
 				auto sk = ent_it->second->properties.find("skin");
 				if (sk != ent_it->second->properties.end()) ent_skin = atoi(sk->second.c_str());
+				auto wh = ent_it->second->properties.find("WaveHeight");
+				if (wh != ent_it->second->properties.end()) ent_wave = (float)atof(wh->second.c_str());
 			}
 		}
+		// A mapper's declared 0 means flat and must survive: ww_matrox has an ice brush at
+		// WaveHeight 5 and another at 0, and ww_countryside freezes its ice the same way.
+		const bool waves = ent_is_liquid && ent_wave > 0.0f;
 
 		// Create a node for this model. Worldspawn is a plain container; brush
 		// entities are AnimatableBody3D roots so their entity transform is the
@@ -1686,11 +1775,23 @@ void GoldSrcBSP::build_mesh() {
 					}
 				}
 
-				for (int i = 2; i < nv; i++) {
+				// A flat polygon cannot bend, so a waving face is cut into a world-aligned grid
+				// first. WATER_SUBDIVIDE is a quarter of the wave's own 512-unit period, which
+				// is what a sine needs to read as a curve rather than a fold.
+				std::vector<std::vector<goldsrc::ParsedVertex>> pieces;
+				if (waves) {
+					subdivide_water_polygon(face->vertices, WATER_SUBDIVIDE, pieces);
+				} else {
+					pieces.push_back(face->vertices);
+				}
+
+				for (const auto &piece : pieces) {
+				const int pnv = (int)piece.size();
+				for (int i = 2; i < pnv; i++) {
 					const int tri_indices[3] = {0, i - 1, i};
 
 					for (int t = 0; t < 3; t++) {
-						const auto &v = face->vertices[tri_indices[t]];
+						const auto &v = piece[tri_indices[t]];
 
 						vertices.push_back(goldsrc_to_godot(v.pos[0], v.pos[1], v.pos[2]));
 
@@ -1714,6 +1815,7 @@ void GoldSrcBSP::build_mesh() {
 
 						indices.push_back(vert_offset++);
 					}
+				}
 				}
 			}
 
@@ -1779,6 +1881,7 @@ void GoldSrcBSP::build_mesh() {
 				}
 				material->set_shader_parameter("liquid_type",
 						(int)liquid_kind_for_contents(liquid_contents));
+				material->set_shader_parameter("wave_height", ent_wave * scale_factor);
 				if (texture.is_valid()) {
 					material->set_shader_parameter("albedo_texture", texture);
 				}
@@ -1911,7 +2014,19 @@ void GoldSrcBSP::build_mesh() {
 				MeshInstance3D *depth_instance = memnew(MeshInstance3D);
 				depth_instance->set_name(mesh_instance->get_name() + String("_depth"));
 				depth_instance->set_mesh(arr_mesh);
-				depth_instance->set_material_override(water_depth_material);
+				// A waving brush needs its OWN depth material: the shared one carries no
+				// amplitude, and a prepass that stays flat under a surface that moves stamps
+				// the wrong depth and punches holes in it.
+				if (waves) {
+					Ref<ShaderMaterial> wave_depth;
+					wave_depth.instantiate();
+					wave_depth->set_shader(water_depth_material->get_shader());
+					wave_depth->set_render_priority(-1);
+					wave_depth->set_shader_parameter("wave_height", ent_wave * scale_factor);
+					depth_instance->set_material_override(wave_depth);
+				} else {
+					depth_instance->set_material_override(water_depth_material);
+				}
 				depth_instance->set_layer_mask(2);
 				depth_instance->set_cast_shadows_setting(GeometryInstance3D::SHADOW_CASTING_SETTING_OFF);
 				group_parent->add_child(depth_instance);
