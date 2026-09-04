@@ -323,6 +323,19 @@ static LiquidKind liquid_kind_for_contents(int contents) {
 "	float phase = TIME * WAVE_SPEED;\n" \
 "	vertex.y += wave_height * sin(w.x * WAVE_FREQ + phase) * cos(w.z * WAVE_FREQ + phase);\n" \
 "	return vertex;\n" \
+"}\n" \
+"// The wave is an analytic height field, so its normal is its derivative — no sampling, no\n" \
+"// finite differences. Blended in by how upward-facing the face already is, because a pool's\n" \
+"// vertical sides ride the same displacement and must keep pointing outward.\n" \
+"vec3 goldsrc_water_normal(vec3 vertex, vec3 normal, mat4 model) {\n" \
+"	if (wave_height <= 0.0) { return normal; }\n" \
+"	vec3 w = (model * vec4(vertex, 1.0)).xyz;\n" \
+"	float phase = TIME * WAVE_SPEED;\n" \
+"	float a = wave_height * WAVE_FREQ;\n" \
+"	float dx = a * cos(w.x * WAVE_FREQ + phase) * cos(w.z * WAVE_FREQ + phase);\n" \
+"	float dz = -a * sin(w.x * WAVE_FREQ + phase) * sin(w.z * WAVE_FREQ + phase);\n" \
+"	vec3 waved = normalize(vec3(-dx, 1.0, -dz));\n" \
+"	return normalize(mix(normal, waved, clamp(normal.y, 0.0, 1.0)));\n" \
 "}\n"
 
 // Quarter of the wave period (512 GoldSrc units), in GoldSrc units. Larger reads as folds;
@@ -409,9 +422,31 @@ uniform float water_alpha : hint_range(0.0, 1.0) = 0.6;
 // say for itself: how still a surface is belongs to WaveHeight, which the mapper sets per brush
 // (ww_matrox has an ice brush at 5 and another at 0), so nothing here may override it.
 uniform int liquid_type : hint_range(0, 2) = 0;
+
+// Everything below is off unless the quality level turns it on (RenderQuality "high", pushed by
+// WaterSurfaces at load and on change), so the cheap machine keeps the surface it always had.
+uniform bool depth_effects = false;
+uniform sampler2D depth_tex : hint_depth_texture, filter_nearest;
+uniform vec3 deep_tint : source_color = vec3(0.05, 0.19, 0.22);
+uniform float absorb_distance : hint_range(0.1, 20.0) = 3.0;  // units to near-full absorption
+uniform float foam_width : hint_range(0.0, 2.0) = 0.35;       // units of shore before it whitens
+
+varying vec3 wave_normal;
 )" GOLDSRC_WATER_WAVE_GLSL R"(
 void vertex() {
+	wave_normal = goldsrc_water_normal(VERTEX, NORMAL, MODEL_MATRIX);
 	VERTEX = goldsrc_water_wave(VERTEX, MODEL_MATRIX);
+	NORMAL = wave_normal;
+}
+
+// How much water lies between this fragment and whatever is behind it. Reconstructed the way
+// decal_projector.gdshader does it, which is the pattern in this project already proven on the
+// Compatibility renderer.
+float water_thickness(vec2 screen_uv, vec3 view_vertex, mat4 inv_projection) {
+	float raw = textureLod(depth_tex, screen_uv, 0.0).r;
+	vec4 upos = inv_projection * vec4(screen_uv * 2.0 - 1.0, raw * 2.0 - 1.0, 1.0);
+	float behind = -(upos.xyz / upos.w).z;
+	return max(behind + view_vertex.z, 0.0);  // view_vertex.z is negative going into the screen
 }
 
 void fragment() {
@@ -428,6 +463,24 @@ void fragment() {
 	ALBEDO = texture(albedo_texture, uv).rgb;
 	ALPHA = water_alpha;
 	ROUGHNESS = 1.0;
+
+	if (depth_effects) {
+		// Beer-Lambert: thin water is the texture, deep water is the tint. This is what makes a
+		// pool read as a volume instead of a coloured pane, and it is the whole reason a shore
+		// looks shallow.
+		float thickness = water_thickness(SCREEN_UV, VERTEX, INV_PROJECTION_MATRIX);
+		float absorbed = 1.0 - exp(-thickness / max(absorb_distance, 0.001));
+		ALBEDO = mix(ALBEDO, deep_tint, absorbed);
+		ALPHA = mix(water_alpha * 0.45, 1.0, absorbed);
+
+		// Where the water thins to nothing it is meeting geometry — that edge is foam.
+		float foam = 1.0 - smoothstep(0.0, max(foam_width, 0.001), thickness);
+		ALBEDO = mix(ALBEDO, vec3(1.0), foam * 0.5);
+
+		// Crests catch the light, troughs do not. Without this an 8cm swell on an unshaded
+		// surface is invisible except in silhouette.
+		ALBEDO *= 0.85 + 0.3 * clamp(dot(normalize(wave_normal), normalize(vec3(0.4, 1.0, 0.2))), 0.0, 1.0);
+	}
 }
 )";
 
