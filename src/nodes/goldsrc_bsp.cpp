@@ -415,6 +415,18 @@ uniform float wave_amplitude : hint_range(0.0, 0.1) = 0.025;
 uniform float wave_frequency : hint_range(1.0, 20.0) = 8.0;
 uniform float wave_speed : hint_range(0.1, 5.0) = 1.6;
 uniform float water_alpha : hint_range(0.0, 1.0) = 0.6;
+// Set per load by EntityUtil.apply_color_space, which pushes it onto every ShaderMaterial.
+// A RenderingDevice renderer blends in LINEAR space and gl_compatibility blends in sRGB, so the
+// same translucent surface over the same floor lands in a different place: dark water over a
+// bright pool bottom comes out markedly paler under Forward+, which is why ww_2fort's moat read
+// as washed out there long before it had waves. Measured on that moat, submerged floor mean RGB:
+// gl_compatibility [44, 69, 68] against Forward+ [109, 96, 57].
+//
+// The blend itself belongs to the renderer and cannot be moved, so the water leans on the only
+// side it owns: under a linear blend it carries more of itself, which is what the sRGB blend was
+// already doing for free.
+uniform bool linear_output = false;
+uniform float linear_alpha_boost : hint_range(1.0, 2.0) = 1.35;
 // 0 water, 1 slime, 2 lava — the brush's CONTENTS_*, see liquid_kind_for_contents. Water is
 // left at 1.0/1.0 so every map that already had liquid keeps exactly the surface it had.
 //
@@ -427,8 +439,12 @@ uniform int liquid_type : hint_range(0, 2) = 0;
 // WaterSurfaces at load and on change), so the cheap machine keeps the surface it always had.
 uniform bool depth_effects = false;
 uniform sampler2D depth_tex : hint_depth_texture, filter_nearest;
-uniform vec3 deep_tint : source_color = vec3(0.05, 0.19, 0.22);
-uniform float absorb_distance : hint_range(0.1, 20.0) = 3.0;  // units to near-full absorption
+uniform vec3 deep_tint : source_color = vec3(0.04, 0.16, 0.20);
+uniform float tint_ceiling : hint_range(0.0, 1.0) = 0.55;  // deep water is never PURE tint
+// Units to near-full absorption. Generous on purpose: ww_2fort's moat is only 5 units deep, and
+// a short distance tints the whole pool flat, erasing the view of the bottom that is the best
+// thing the water already had. Depth should colour the water, not replace it.
+uniform float absorb_distance : hint_range(0.1, 40.0) = 14.0;
 uniform float foam_width : hint_range(0.0, 2.0) = 0.35;       // units of shore before it whitens
 
 varying vec3 wave_normal;
@@ -463,23 +479,45 @@ void fragment() {
 	ALBEDO = texture(albedo_texture, uv).rgb;
 	ALPHA = water_alpha;
 	ROUGHNESS = 1.0;
+	if (linear_output) {
+		ALPHA = clamp(ALPHA * linear_alpha_boost, 0.0, 1.0);
+	}
+
+	// Crests catch the light, troughs do not. Without this an 8cm swell on an unshaded surface
+	// is invisible except in silhouette. Needs no depth read, so it stands on its own.
+	if (depth_effects) {
+		ALBEDO *= 0.85 + 0.3 * clamp(dot(normalize(wave_normal), normalize(vec3(0.4, 1.0, 0.2))), 0.0, 1.0);
+	}
 
 	if (depth_effects) {
-		// Beer-Lambert: thin water is the texture, deep water is the tint. This is what makes a
-		// pool read as a volume instead of a coloured pane, and it is the whole reason a shore
-		// looks shallow.
 		float thickness = water_thickness(SCREEN_UV, VERTEX, INV_PROJECTION_MATRIX);
-		float absorbed = 1.0 - exp(-thickness / max(absorb_distance, 0.001));
-		ALBEDO = mix(ALBEDO, deep_tint, absorbed);
-		ALPHA = mix(water_alpha * 0.45, 1.0, absorbed);
 
-		// Where the water thins to nothing it is meeting geometry — that edge is foam.
-		float foam = 1.0 - smoothstep(0.0, max(foam_width, 0.001), thickness);
-		ALBEDO = mix(ALBEDO, vec3(1.0), foam * 0.5);
+		// A reading of "no water at all" is almost never the truth — it is the depth sample
+		// landing on a liquid surface rather than on the scene behind it, which is what the
+		// depth-prepass twin puts there when it is drawn (it stamps 0.2% farther than the
+		// surface, so the difference comes back as a sliver that scales with view distance,
+		// not with depth). Absent that, foam would read as 1.0 across the whole pool and paint
+		// the lot white. So no reading means NO effect, never maximum effect: the surface falls
+		// back to the plain warp it has always had.
+		if (thickness > length(VERTEX) * 0.01) {
+			// Beer-Lambert: thin water is the texture, deep water is the tint. This is what
+			// makes a pool read as a volume instead of a coloured pane.
+			float absorbed = 1.0 - exp(-thickness / max(absorb_distance, 0.001));
+			// Both effects are capped. Letting either run to its limit is what turned the moat
+			// into a flat slab: at full tint the texture is gone, and at ALPHA 1.0 so is the
+			// floor you were looking at through it. The point is a gradient across a pool, not
+			// a lid over it.
+			ALBEDO = mix(ALBEDO, deep_tint, absorbed * tint_ceiling);
+			ALPHA = mix(water_alpha, min(water_alpha + 0.18, 0.92), absorbed);
+			if (linear_output) {
+				ALPHA = clamp(ALPHA * linear_alpha_boost, 0.0, 1.0);
+			}
 
-		// Crests catch the light, troughs do not. Without this an 8cm swell on an unshaded
-		// surface is invisible except in silhouette.
-		ALBEDO *= 0.85 + 0.3 * clamp(dot(normalize(wave_normal), normalize(vec3(0.4, 1.0, 0.2))), 0.0, 1.0);
+			// Where the water thins out it is meeting geometry, and that edge is foam. Kept
+			// well short of white: it is a hint of surf, not a lid.
+			float foam = 1.0 - smoothstep(0.0, max(foam_width, 0.001), thickness);
+			ALBEDO = mix(ALBEDO, vec3(1.0), foam * 0.3);
+		}
 	}
 }
 )";
