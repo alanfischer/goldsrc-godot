@@ -317,11 +317,23 @@ static LiquidKind liquid_kind_for_contents(int contents) {
 "uniform float wave_height = 0.0;  // Godot units of crest, 0 = flat (worldspawn liquid)\n" \
 "const float WAVE_FREQ = 0.49;     // radians per unit — a ~12.8 unit (512 GoldSrc) swell\n" \
 "const float WAVE_SPEED = 1.1;\n" \
+"// A single period is a corrugation, not water: on a lake the size of ww_leyline's the repeat\n" \
+"// is plain to see. A second octave at an unrelated scale and speed breaks it up. Kept to two\n" \
+"// — the subdivision is 128 units, and a third octave would ride under what the grid resolves.\n" \
+"const float WAVE_FREQ2 = 1.13;\n" \
+"const float WAVE_SPEED2 = 0.67;\n" \
+"const float WAVE_MIX2 = 0.4;\n" \
+"float goldsrc_water_height(vec3 w) {\n" \
+"	float p1 = TIME * WAVE_SPEED;\n" \
+"	float p2 = TIME * WAVE_SPEED2;\n" \
+"	float h = sin(w.x * WAVE_FREQ + p1) * cos(w.z * WAVE_FREQ + p1);\n" \
+"	h += WAVE_MIX2 * sin(w.z * WAVE_FREQ2 + p2) * cos(w.x * WAVE_FREQ2 - p2);\n" \
+"	return h / (1.0 + WAVE_MIX2);\n" \
+"}\n" \
 "vec3 goldsrc_water_wave(vec3 vertex, mat4 model) {\n" \
 "	if (wave_height <= 0.0) { return vertex; }\n" \
 "	vec3 w = (model * vec4(vertex, 1.0)).xyz;\n" \
-"	float phase = TIME * WAVE_SPEED;\n" \
-"	vertex.y += wave_height * sin(w.x * WAVE_FREQ + phase) * cos(w.z * WAVE_FREQ + phase);\n" \
+"	vertex.y += wave_height * goldsrc_water_height(w);\n" \
 "	return vertex;\n" \
 "}\n" \
 "// The wave is an analytic height field, so its normal is its derivative — no sampling, no\n" \
@@ -330,10 +342,12 @@ static LiquidKind liquid_kind_for_contents(int contents) {
 "vec3 goldsrc_water_normal(vec3 vertex, vec3 normal, mat4 model) {\n" \
 "	if (wave_height <= 0.0) { return normal; }\n" \
 "	vec3 w = (model * vec4(vertex, 1.0)).xyz;\n" \
-"	float phase = TIME * WAVE_SPEED;\n" \
-"	float a = wave_height * WAVE_FREQ;\n" \
-"	float dx = a * cos(w.x * WAVE_FREQ + phase) * cos(w.z * WAVE_FREQ + phase);\n" \
-"	float dz = -a * sin(w.x * WAVE_FREQ + phase) * sin(w.z * WAVE_FREQ + phase);\n" \
+"	// Two octaves make a hand-written derivative a liability, so the slope is sampled a\n" \
+"	// quarter-cell either side — cheap, and it cannot drift out of step with the height.\n" \
+"	float e = 0.4;\n" \
+"	float h0 = goldsrc_water_height(w);\n" \
+"	float dx = (goldsrc_water_height(w + vec3(e, 0.0, 0.0)) - h0) * wave_height / e;\n" \
+"	float dz = (goldsrc_water_height(w + vec3(0.0, 0.0, e)) - h0) * wave_height / e;\n" \
 "	vec3 waved = normalize(vec3(-dx, 1.0, -dz));\n" \
 "	return normalize(mix(normal, waved, clamp(normal.y, 0.0, 1.0)));\n" \
 "}\n"
@@ -341,6 +355,11 @@ static LiquidKind liquid_kind_for_contents(int contents) {
 // Quarter of the wave period (512 GoldSrc units), in GoldSrc units. Larger reads as folds;
 // smaller buys nothing a sine can use. Only brushes that actually wave are cut this fine.
 static const float WATER_SUBDIVIDE = 128.0f;
+
+// GoldSrc units of swell for liquid with no entity to declare one. Under the 3.2 that brush
+// entities usually carry: a lake should move, not chop. Costs about 16.8k triangles across the
+// whole map set, the largest single share being ww_golem's 3.6k.
+static const float WORLDSPAWN_WAVE = 2.0f;
 
 // GoldSrc's water waves need geometry to bend, and a BSP face is one flat polygon. Split it on
 // world-aligned planes at multiples of `size`, exactly as Quake's GL_SubdivideSurface does, and
@@ -426,7 +445,17 @@ uniform float water_alpha : hint_range(0.0, 1.0) = 0.6;
 // side it owns: under a linear blend it carries more of itself, which is what the sRGB blend was
 // already doing for free.
 uniform bool linear_output = false;
-uniform float linear_alpha_boost : hint_range(1.0, 2.0) = 1.35;
+// Compensation runs through the water's own COLOUR, never its alpha. Alpha was the first
+// attempt and it is the wrong lever: it buys the tint by spending transparency, and at depth
+// it saturated to 1.0 and turned ww_hunt's harbour into a solid sheet. Water that cannot be
+// seen through is not water.
+//
+// Nor can the tint be matched exactly. Under a linear blend at alpha 0.6 the BACKGROUND's
+// share alone — 0.4 of a bright pool floor — already exceeds what the whole sRGB blend came
+// to, so no choice of water colour reaches gl_compatibility's result. Darkening the water's
+// contribution closes most of the gap and leaves the surface see-through, which is the half
+// worth keeping.
+uniform float linear_albedo_scale : hint_range(0.2, 1.0) = 0.55;
 // 0 water, 1 slime, 2 lava — the brush's CONTENTS_*, see liquid_kind_for_contents. Water is
 // left at 1.0/1.0 so every map that already had liquid keeps exactly the surface it had.
 //
@@ -480,7 +509,7 @@ void fragment() {
 	ALPHA = water_alpha;
 	ROUGHNESS = 1.0;
 	if (linear_output) {
-		ALPHA = clamp(ALPHA * linear_alpha_boost, 0.0, 1.0);
+		ALBEDO *= linear_albedo_scale;
 	}
 
 	// Crests catch the light, troughs do not. Without this an 8cm swell on an unshaded surface
@@ -508,10 +537,9 @@ void fragment() {
 			// floor you were looking at through it. The point is a gradient across a pool, not
 			// a lid over it.
 			ALBEDO = mix(ALBEDO, deep_tint, absorbed * tint_ceiling);
-			ALPHA = mix(water_alpha, min(water_alpha + 0.18, 0.92), absorbed);
-			if (linear_output) {
-				ALPHA = clamp(ALPHA * linear_alpha_boost, 0.0, 1.0);
-			}
+			// Deep water thickens, but never to a lid: at 0.85 the bottom is still there to be
+			// seen, and being able to see it is most of why a pool reads as depth at all.
+			ALPHA = mix(water_alpha, min(water_alpha + 0.18, 0.85), absorbed);
 
 			// Where the water thins out it is meeting geometry, and that edge is foam. Kept
 			// well short of white: it is a hint of surf, not a lid.
@@ -1415,7 +1443,11 @@ void GoldSrcBSP::build_mesh() {
 		// WaveHeight into pev->scale and the engine bends only that brush — so worldspawn liquid
 		// stays flat and, more to the point, stays untessellated: ww_leyline's 655 faces and
 		// ww_golem's 568 pay nothing for a feature their maps never asked for.
-		float ent_wave = 0.0f;
+		// Worldspawn liquid has no entity to carry a WaveHeight — in GoldSrc that meant a lake
+		// sat glassy while a pool beside it rippled, an engine limit rather than a mapper's
+		// choice. It is given a gentler swell than the 3.2 brushes typically declare, so the two
+		// read as the same substance without a lake taking on a pool's chop.
+		float ent_wave = (m == 0) ? WORLDSPAWN_WAVE : 0.0f;
 		if (m > 0) {
 			auto ent_it = model_entities.find(model_key);
 			if (ent_it != model_entities.end()) {
@@ -1427,7 +1459,7 @@ void GoldSrcBSP::build_mesh() {
 		}
 		// A mapper's declared 0 means flat and must survive: ww_matrox has an ice brush at
 		// WaveHeight 5 and another at 0, and ww_countryside freezes its ice the same way.
-		const bool waves = ent_is_liquid && ent_wave > 0.0f;
+		const bool waves = (ent_is_liquid || m == 0) && ent_wave > 0.0f;
 
 		// Create a node for this model. Worldspawn is a plain container; brush
 		// entities are AnimatableBody3D roots so their entity transform is the
