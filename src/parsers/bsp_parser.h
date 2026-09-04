@@ -119,6 +119,8 @@ struct BSPLeaf {
 inline constexpr int CONTENTS_EMPTY = -1;
 inline constexpr int CONTENTS_SOLID = -2;
 inline constexpr int CONTENTS_WATER = -3;
+inline constexpr int CONTENTS_SLIME = -4;
+inline constexpr int CONTENTS_LAVA  = -5;
 inline constexpr int CONTENTS_SKY   = -6;
 
 // Tool textures that have no visible geometry at runtime
@@ -175,6 +177,11 @@ struct ParsedFace {
 	float t_offset = 0; // texinfo vecs[1][3] — T axis offset
 	int lm_mins_s = 0;  // floor(min_s / 16) — lightmap origin in texel space
 	int lm_mins_t = 0;  // floor(min_t / 16)
+	// Which liquid a WORLDSPAWN face borders, as CONTENTS_WATER/SLIME/LAVA; 0 when it borders
+	// none. This is the compiler's own answer — it resolved the texture name into leaf contents
+	// at compile time, and GoldSrc read the leaf, not the name. Brush entities do not use this:
+	// their liquid is named by the entity's "skin" key, which is the same CONTENTS_* value.
+	int liquid_contents = 0;
 };
 
 struct ParsedEntity {
