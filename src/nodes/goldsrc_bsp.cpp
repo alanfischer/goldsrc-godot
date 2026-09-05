@@ -356,11 +356,6 @@ static LiquidKind liquid_kind_for_contents(int contents) {
 // smaller buys nothing a sine can use. Only brushes that actually wave are cut this fine.
 static const float WATER_SUBDIVIDE = 128.0f;
 
-// GoldSrc units of swell for liquid with no entity to declare one. Under the 3.2 that brush
-// entities usually carry: a lake should move, not chop. Costs about 16.8k triangles across the
-// whole map set, the largest single share being ww_golem's 3.6k.
-static const float WORLDSPAWN_WAVE = 2.0f;
-
 // GoldSrc's water waves need geometry to bend, and a BSP face is one flat polygon. Split it on
 // world-aligned planes at multiples of `size`, exactly as Quake's GL_SubdivideSurface does, and
 // for its reason: two faces that share an edge are cut by the same planes at the same places, so
@@ -1443,11 +1438,12 @@ void GoldSrcBSP::build_mesh() {
 		// WaveHeight into pev->scale and the engine bends only that brush — so worldspawn liquid
 		// stays flat and, more to the point, stays untessellated: ww_leyline's 655 faces and
 		// ww_golem's 568 pay nothing for a feature their maps never asked for.
-		// Worldspawn liquid has no entity to carry a WaveHeight — in GoldSrc that meant a lake
-		// sat glassy while a pool beside it rippled, an engine limit rather than a mapper's
-		// choice. It is given a gentler swell than the 3.2 brushes typically declare, so the two
-		// read as the same substance without a lake taking on a pool's chop.
-		float ent_wave = (m == 0) ? WORLDSPAWN_WAVE : 0.0f;
+		//
+		// Waving it as well was tried and taken back out: worldspawn geometry is culled per BSP
+		// leaf, a whole spatial group at a time, and a surface that leaves the plane the tree
+		// sorted it on fights that culling. A func_water brush is its own node with its own
+		// visibility, so it waves without any of this.
+		float ent_wave = 0.0f;
 		if (m > 0) {
 			auto ent_it = model_entities.find(model_key);
 			if (ent_it != model_entities.end()) {
@@ -1459,7 +1455,7 @@ void GoldSrcBSP::build_mesh() {
 		}
 		// A mapper's declared 0 means flat and must survive: ww_matrox has an ice brush at
 		// WaveHeight 5 and another at 0, and ww_countryside freezes its ice the same way.
-		const bool waves = (ent_is_liquid || m == 0) && ent_wave > 0.0f;
+		const bool waves = ent_is_liquid && ent_wave > 0.0f;
 
 		// Create a node for this model. Worldspawn is a plain container; brush
 		// entities are AnimatableBody3D roots so their entity transform is the
