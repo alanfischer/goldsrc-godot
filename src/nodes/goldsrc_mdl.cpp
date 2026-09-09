@@ -420,14 +420,22 @@ void GoldSrcMDL::build_meshes() {
 	}
 	stored_materials = materials;
 
-	// One MeshInstance3D per bodypart (first model only for now), carrying each of the
-	// submodel's meshes as its own surface. A GoldSrc mesh is a texture batch, which is what a
-	// Godot surface is; the bodypart is the swappable unit, which is what a node is for.
+	// One MeshInstance3D per bodypart SUBMODEL, carrying each of the submodel's meshes as
+	// its own surface. A GoldSrc mesh is a texture batch, which is what a Godot surface is;
+	// the bodypart is the swappable unit, which is what a node is for.
+	//
+	// A bodypart's submodels are ALTERNATIVES — a bodygroup — so only the first is visible
+	// and the rest are built hidden, which leaves a model that renders exactly as it did
+	// while making the others reachable. That matters for the gib models, whose submodels
+	// are the different debris shapes: bonegibs has five, metalplategibs thirteen, and
+	// before this only ever the first was built, so every gib in a burst was the same bone.
+	// They are the only models in the set with more than one, so nothing else changes.
 	for (int bp = 0; bp < (int)mdl.bodyparts.size(); bp++) {
 		const auto &bodypart = mdl.bodyparts[bp];
 		if (bodypart.models.empty()) continue;
 
-		const auto &submodel = bodypart.models[0]; // Default model
+		for (int sm = 0; sm < (int)bodypart.models.size(); sm++) {
+		const auto &submodel = bodypart.models[sm];
 
 		Ref<ArrayMesh> arr_mesh;
 		arr_mesh.instantiate();
@@ -559,9 +567,13 @@ void GoldSrcMDL::build_meshes() {
 
 		MeshInstance3D *mesh_instance = memnew(MeshInstance3D);
 		String mesh_name = String(bodypart.name.c_str()).validate_node_name();
-		mesh_instance->set_name(mesh_name.is_empty()
-			? "bodypart" + String::num_int64(bp) : mesh_name);
+		if (mesh_name.is_empty()) mesh_name = "bodypart" + String::num_int64(bp);
+		// Submodel 0 keeps the bare bodypart name, so every existing consumer that looks
+		// a bodypart up by name finds exactly what it found before.
+		mesh_instance->set_name(sm == 0 ? mesh_name
+		                                : mesh_name + "_" + String::num_int64(sm));
 		mesh_instance->set_mesh(arr_mesh);
+		mesh_instance->set_visible(sm == 0);
 
 		if (skeleton) {
 			skeleton->add_child(mesh_instance);
@@ -572,6 +584,7 @@ void GoldSrcMDL::build_meshes() {
 
 		for (const auto &[surface, skin_ref] : surface_skin_refs) {
 			mesh_skin_refs.push_back({mesh_instance, surface, skin_ref});
+		}
 		}
 	}
 }
