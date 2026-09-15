@@ -551,22 +551,31 @@ void fragment() {
 // (render_priority -1), so the color pass above only survives where it is the NEAREST liquid
 // fragment. Everything behind another water face is depth-rejected and never blends.
 //
-// Godot has a render mode for this — depth_prepass_alpha — but the Compatibility renderer
-// (rendering_method.pc, and what this game ships on PC) parses it and then ignores it, so it
-// buys nothing. Hence doing it by hand.
+// Godot has a render mode for this — depth_prepass_alpha — and the Compatibility renderer DOES
+// implement it (4.7 drivers/gles3: material_storage.cpp defines USE_OPAQUE_PREPASS, and an alpha
+// surface carrying the flag joins the depth list). It is still unusable for water, twice over.
+// The depth pass discards everything under alpha 0.99 (OPAQUE_PREPASS_THRESHOLD) and water is
+// 0.6, so it would stamp nothing at all — the mode is built for near-opaque cutouts like foliage,
+// not a translucent sheet. And the prepass is skipped outright on the vendors listed in
+// rendering/driver/depth_prepass/disable_for_vendors, which defaults to PowerVR, Mali, Adreno,
+// Apple — i.e. macOS and Quest. Hence doing it by hand.
 //
 // Two details make it work:
 //   ALPHA = 0.0    keeps the pass depth-only. It is still a transparent-queue draw, but
 //                  src*0 + dst*1 leaves the color buffer exactly as it found it, while
 //                  depth_draw_always writes depth regardless of alpha.
-//   POSITION       pushes the stamped depth 0.2% FARTHER from the camera. The Compatibility
-//                  renderer's depth func is GL_LESS, not LEQUAL, so a prepass at the exact
-//                  surface depth would reject the color pass and water would vanish outright.
-//                  Scaling the whole view-space position scales along the ray from the eye,
-//                  so the silhouette projects identically — only depth moves. The bias is
-//                  relative to view distance, so it holds at any scale; the only faces it
-//                  fails to separate are ones within 0.2% of each other in depth, i.e. the
-//                  near-coincident case, where either order looks the same anyway.
+//   POSITION       pushes the stamped depth 0.2% FARTHER from the camera, so the prepass cannot
+//                  reject the color pass it exists to gate. Scaling the whole view-space
+//                  position scales along the ray from the eye, so the silhouette projects
+//                  identically — only depth moves, and the bias is relative to view distance,
+//                  so it holds at any scale. The faces it fails to separate are ones within
+//                  0.2% of each other in depth, where either order looks the same anyway.
+//                  This was originally justified by the depth func being GL_LESS, where a
+//                  prepass at the exact surface depth rejects the color pass and water vanishes.
+//                  That is no longer true: 4.7 draws the scene reverse-Z at GL_GEQUAL
+//                  (rasterizer_scene_gles3.cpp, per-material and in the transparent pass), where
+//                  equal depth passes. So the bias may now be unnecessary. UNTESTED — dropping
+//                  it wants eyes on ww_hunt's harbour and ww_ravine first.
 static const char *WATER_DEPTH_SHADER_CODE = R"(
 shader_type spatial;
 render_mode unshaded, shadows_disabled, ambient_light_disabled, cull_disabled, depth_draw_always;
