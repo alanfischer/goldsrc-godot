@@ -416,10 +416,12 @@ static void subdivide_water_polygon(const std::vector<goldsrc::ParsedVertex> &po
 // Writing ALPHA also puts the material in the transparent queue, which Godot sorts per
 // MeshInstance3D by AABB-center distance and does not sort within a surface at all. Water is
 // batched per (texture, atlas page), so a whole map's liquid is often ONE instance with a
-// map-spanning AABB: far faces then blend over near ones and a pool reads inside-out. That
-// is what WATER_DEPTH_SHADER_CODE below fixes — see it for the mechanism. This half only has
-// to stay out of the way: depth_draw_never, so the color pass tests against the prepass's
-// depth without stamping its own on top of it.
+// map-spanning AABB: far faces then blend over near ones and a pool reads inside-out. And a
+// liquid brush keeps its top face and its four side walls in that same surface, which is how
+// ww_golem's moat came to show the far wall of every brush standing up across the water as a
+// vertical band. That is what WATER_DEPTH_SHADER_CODE below fixes — see it for the mechanism.
+// This half only has to stay out of the way: depth_draw_never, so the color pass tests against
+// the prepass's depth without stamping its own on top of it.
 static const char *WATER_SHADER_CODE = R"(
 shader_type spatial;
 render_mode unshaded, shadows_disabled, ambient_light_disabled, cull_disabled, depth_draw_never;
@@ -516,13 +518,13 @@ void fragment() {
 	if (depth_effects) {
 		float thickness = water_thickness(SCREEN_UV, VERTEX, INV_PROJECTION_MATRIX);
 
-		// A reading of "no water at all" is almost never the truth — it is the depth sample
-		// landing on a liquid surface rather than on the scene behind it, which is what the
-		// depth-prepass twin puts there when it is drawn (it stamps 0.2% farther than the
-		// surface, so the difference comes back as a sliver that scales with view distance,
-		// not with depth). Absent that, foam would read as 1.0 across the whole pool and paint
-		// the lot white. So no reading means NO effect, never maximum effect: the surface falls
-		// back to the plain warp it has always had.
+		// A sliver of a reading is treated as no reading at all. The depth copy is taken
+		// before any liquid depth is stamped (see WATER_DEPTH_SHADER_CODE), so what is behind
+		// this fragment really is the opaque scene — but a sample landing on liquid rather than
+		// on the scene would come back as a fraction of the view distance, and foam reading 1.0
+		// across a whole pool paints the lot white. So a reading under 1% of view distance means
+		// NO effect, never maximum effect: the surface falls back to the plain warp. It costs
+		// the last finger-width of foam right at the shoreline, which is a cheap insurance.
 		if (thickness > length(VERTEX) * 0.01) {
 			// Beer-Lambert: thin water is the texture, deep water is the tint. This is what
 			// makes a pool read as a volume instead of a coloured pane.
@@ -560,10 +562,23 @@ void fragment() {
 // rendering/driver/depth_prepass/disable_for_vendors, which defaults to PowerVR, Mali, Adreno,
 // Apple — i.e. macOS and Quest. Hence doing it by hand.
 //
-// Two details make it work:
+// Three details make it work:
 //   ALPHA = 0.0    keeps the pass depth-only. It is still a transparent-queue draw, but
 //                  src*0 + dst*1 leaves the color buffer exactly as it found it, while
 //                  depth_draw_always writes depth regardless of alpha.
+//   depth_tex      is read for nothing — the sample is multiplied by zero — and is here only to
+//                  make this draw the FIRST one that asks for the depth texture. Godot copies
+//                  that texture lazily, at the draw call that wants it and once per frame, the
+//                  same rule render_priority already documents for the screen texture. Without
+//                  the request here the first asker is the color pass, by which time every twin
+//                  has stamped liquid depth: the color pass then samples its own twin 0.2%
+//                  behind itself instead of the scene, thickness comes back a sliver, and
+//                  absorption and foam read the whole pool as shoreline. Asking here takes the
+//                  copy while the buffer still holds nothing but the opaque scene, which is what
+//                  the color pass wanted all along — and it is what lets the twin sit at
+//                  render_priority -1 unconditionally. The old answer was to move the twin
+//                  BEHIND the color pass whenever absorption was on, which bought the depth read
+//                  by giving up water-over-water sorting across the whole High preset.
 //   POSITION       pushes the stamped depth 0.2% FARTHER from the camera, so the prepass cannot
 //                  reject the color pass it exists to gate. Scaling the whole view-space
 //                  position scales along the ray from the eye, so the silhouette projects
@@ -579,6 +594,8 @@ void fragment() {
 static const char *WATER_DEPTH_SHADER_CODE = R"(
 shader_type spatial;
 render_mode unshaded, shadows_disabled, ambient_light_disabled, cull_disabled, depth_draw_always;
+
+uniform sampler2D depth_tex : hint_depth_texture, filter_nearest;
 )" GOLDSRC_WATER_WAVE_GLSL R"(
 void vertex() {
 	VERTEX = goldsrc_water_wave(VERTEX, MODEL_MATRIX);
@@ -588,7 +605,9 @@ void vertex() {
 }
 
 void fragment() {
-	ALPHA = 0.0;
+	// The multiply by zero is the point: the sample is never used, and dropping it would let
+	// the compiler drop the uniform with it, taking the depth copy's timing along too.
+	ALPHA = 0.0 * textureLod(depth_tex, SCREEN_UV, 0.0).r;
 }
 )";
 
