@@ -579,28 +579,37 @@ void fragment() {
 //                  render_priority -1 unconditionally. The old answer was to move the twin
 //                  BEHIND the color pass whenever absorption was on, which bought the depth read
 //                  by giving up water-over-water sorting across the whole High preset.
-//   POSITION       pushes the stamped depth 0.2% FARTHER from the camera, so the prepass cannot
+//   depth_push     pushes the stamped depth FARTHER from the camera, so the prepass cannot
 //                  reject the color pass it exists to gate. Scaling the whole view-space
 //                  position scales along the ray from the eye, so the silhouette projects
-//                  identically — only depth moves, and the bias is relative to view distance,
-//                  so it holds at any scale. The faces it fails to separate are ones within
-//                  0.2% of each other in depth, where either order looks the same anyway.
-//                  This was originally justified by the depth func being GL_LESS, where a
-//                  prepass at the exact surface depth rejects the color pass and water vanishes.
-//                  That is no longer true: 4.7 draws the scene reverse-Z at GL_GEQUAL
-//                  (rasterizer_scene_gles3.cpp, per-material and in the transparent pass), where
-//                  equal depth passes. So the bias may now be unnecessary. UNTESTED — dropping
-//                  it wants eyes on ww_hunt's harbour and ww_ravine first.
+//                  identically — only depth moves. It is a proportion of view distance, which
+//                  is what makes it dangerous: the band it opens up is 0.2% of however far away
+//                  you are, five GoldSrc units at sixty, and any liquid face BEHIND the nearest
+//                  one that falls inside the band draws too. Walk, and the band breathes — a
+//                  moat's floor and back wall blink in and out, never the surface, which is
+//                  always the nearest and always wins.
+//
+//                  So it is no longer a constant. WaterSurfaces sets it per renderer, because
+//                  the reason for it only survives on one of them. It was justified by the
+//                  depth func being GL_LESS, where a prepass at the exact surface depth rejects
+//                  the color pass and the water vanishes. On the RenderingDevice renderers 4.7
+//                  draws reverse-Z at GEQUAL, where equal depth passes: measured over a walk
+//                  round ww_golem's moat, Forward+ and Mobile draw the IDENTICAL liquid pixel
+//                  count at 1.002 and at 1.0, while the doubled pixels fall 2625 to nil. On
+//                  gl_compatibility the old reason still holds — dropping the push there loses
+//                  about 2600 liquid pixels over the same walk — so that renderer keeps it.
 static const char *WATER_DEPTH_SHADER_CODE = R"(
 shader_type spatial;
 render_mode unshaded, shadows_disabled, ambient_light_disabled, cull_disabled, depth_draw_always;
 
 uniform sampler2D depth_tex : hint_depth_texture, filter_nearest;
+// Set per renderer by WaterSurfaces — see the note above. 1.0 is no push at all.
+uniform float depth_push : hint_range(1.0, 1.01) = 1.002;
 )" GOLDSRC_WATER_WAVE_GLSL R"(
 void vertex() {
 	VERTEX = goldsrc_water_wave(VERTEX, MODEL_MATRIX);
 	vec4 view_pos = MODELVIEW_MATRIX * vec4(VERTEX, 1.0);
-	view_pos.xyz *= 1.002;
+	view_pos.xyz *= depth_push;
 	POSITION = PROJECTION_MATRIX * view_pos;
 }
 
@@ -1484,6 +1493,96 @@ void GoldSrcBSP::build_mesh() {
 		// A mapper's declared 0 means flat and must survive: ww_matrox has an ice brush at
 		// WaveHeight 5 and another at 0, and ww_countryside freezes its ice the same way.
 		const bool waves = ent_is_liquid && ent_wave > 0.0f;
+		// A GoldSrc compiler emits a liquid surface TWICE, wound each way, so the engine can
+		// show it both from in the water and from out of it. Godot draws liquid cull_disabled,
+		// so BOTH copies survive: the pool blends over itself at double density, and the depth
+		// prepass has two faces at one depth to choose between, so which copy wins flips as the
+		// camera moves — ww_golem's moat popping its own floor and sides in and out. Keep one
+		// side of each doubled plane.
+		//
+		// The doubling is measured, never assumed by scope. Worldspawn liquid is doubled on
+		// every map the game ships; brush-entity liquid is doubled on some (ww_golem, ww_feudal,
+		// ww_keep, ww_matrox, ww_pushed, ww_storm, ww_volcano) and single-sided on others
+		// (ww_2fort, ww_osaka, ww_ravine2, part of ww_countryside), which must come through
+		// untouched or their pools lose a side.
+		//
+		// The test is per PLANE, not per face, and it is AREA: a doubled plane carries the same
+		// area wound each way. Matching faces up one to one does not work — the tree splits the
+		// two copies of ww_golem's sloped moat wall into different polygons, so the pieces line
+		// up over the wall without lining up with each other. Total area does line up, exactly.
+		// A plane carrying two unrelated pools that happen to be coplanar is kept whole: the
+		// two sides have to OVERLAP in space before either is a copy of the other.
+		std::set<int> liquid_twin_skip;
+		{
+			struct LiquidPlane {
+				double area[2] = {0.0, 0.0};
+				FaceAABB box[2];
+				bool seen[2] = {false, false};
+			};
+			auto is_liquid_face = [&](const goldsrc::ParsedFace *fc) {
+				if (fc->vertices.size() < 3) return false;
+				const std::string &tn = fc->texture_name;
+				return ent_is_liquid || (!tn.empty() && (tn[0] == '!' || tn[0] == '*'));
+			};
+			// Which side of the plane's folded normal a face is wound to, 0 or 1. Same
+			// first-significant-component test plane_key folds by.
+			auto face_side = [](const goldsrc::ParsedFace *fc) {
+				for (int c = 0; c < 3; c++) {
+					if (fabsf(fc->normal[c]) > 1e-4f) return fc->normal[c] < 0 ? 1 : 0;
+				}
+				return 0;
+			};
+			auto poly_area = [](const goldsrc::ParsedFace *fc) {
+				double total = 0.0;  // fan-order polygon, the way build_mesh triangulates it
+				const auto &v = fc->vertices;
+				for (size_t i = 2; i < v.size(); i++) {
+					float e1[3], e2[3];
+					for (int c = 0; c < 3; c++) {
+						e1[c] = v[i - 1].pos[c] - v[0].pos[c];
+						e2[c] = v[i].pos[c] - v[0].pos[c];
+					}
+					float cx = e1[1]*e2[2] - e1[2]*e2[1];
+					float cy = e1[2]*e2[0] - e1[0]*e2[2];
+					float cz = e1[0]*e2[1] - e1[1]*e2[0];
+					total += 0.5 * sqrt((double)(cx*cx + cy*cy + cz*cz));
+				}
+				return total;
+			};
+
+			map<std::tuple<int,int,int,int>, LiquidPlane> liquid_planes;
+			for (const auto &fr : faces_for_model) {
+				if (!is_liquid_face(fr.face)) continue;
+				LiquidPlane &lp = liquid_planes[plane_key(fr.face)];
+				int side = face_side(fr.face);
+				FaceAABB b = face_aabb(fr.face);
+				lp.area[side] += poly_area(fr.face);
+				if (!lp.seen[side]) { lp.box[side] = b; lp.seen[side] = true; }
+				else for (int c = 0; c < 3; c++) {
+					lp.box[side].mn[c] = std::min(lp.box[side].mn[c], b.mn[c]);
+					lp.box[side].mx[c] = std::max(lp.box[side].mx[c], b.mx[c]);
+				}
+			}
+			std::set<std::tuple<int,int,int,int>> doubled_planes;
+			for (const auto &entry : liquid_planes) {
+				const LiquidPlane &lp = entry.second;
+				if (!lp.seen[0] || !lp.seen[1]) continue;           // single-sided, keep it all
+				const float EPS = 0.5f;
+				bool overlaps = true;
+				for (int c = 0; c < 3; c++) {
+					if (lp.box[0].mn[c] > lp.box[1].mx[c] + EPS ||
+					    lp.box[0].mx[c] < lp.box[1].mn[c] - EPS) { overlaps = false; break; }
+				}
+				if (!overlaps) continue;                            // two pools, not two copies
+				double big = std::max(lp.area[0], lp.area[1]);
+				if (fabs(lp.area[0] - lp.area[1]) <= big * 0.01) doubled_planes.insert(entry.first);
+			}
+			for (const auto &fr : faces_for_model) {
+				if (!is_liquid_face(fr.face)) continue;
+				if (face_side(fr.face) == 1 && doubled_planes.count(plane_key(fr.face)))
+					liquid_twin_skip.insert(fr.global_index);
+			}
+		}
+
 
 		// Create a node for this model. Worldspawn is a plain container; brush
 		// entities are AnimatableBody3D roots so their entity transform is the
@@ -1883,15 +1982,24 @@ void GoldSrcBSP::build_mesh() {
 				int nv = (int)face->vertices.size();
 				if (nv < 3) continue;
 
+				// The back half of a liquid surface the compiler doubled — see liquid_twin_skip.
+				if (is_water_group && liquid_twin_skip.count(face_refs[fi].global_index)) continue;
+
 				// Liquid coincidence cull (see world_plane_aabbs above): a liquid face that lies
 				// on the same geometric plane as a world face AND overlaps it is skipped — the
 				// opaque world wall/floor is already drawn there, and rendering the coincident
 				// translucent liquid face on top of it is exactly what z-fights. Faces with no
 				// coincident world face (the water/air surface, liquid exposed to open space such
 				// as lava/water falls) are kept untouched, so nothing is moved and no seam appears.
-				// Only brush ENTITIES (m>0) get coincidence-culled; worldspawn liquid (m==0) is
-				// already the compiler-deduped surface and must render as-is.
-				if (m > 0 && is_water_group) {
+				// Worldspawn liquid gets this too. It used to be entities only, on the reasoning
+				// that a worldspawn liquid face IS the water/air surface — true of the surface,
+				// false of the volume's SIDES and FLOOR, which sit flat on the stone of the pool
+				// they fill. Those are translucent sheets stuck to opaque walls: the prepass
+				// rejects them wherever the surface is in front and admits them wherever it is
+				// not, so a moat's floor and back wall blink in and out as you walk its edge.
+				// Only OPAQUE world faces are cull targets (see world_plane_aabbs), so the water
+				// surface itself has nothing to be coincident with and is never touched.
+				if (is_water_group) {
 					const auto &wa = world_plane_aabbs.find(plane_key(face));
 					if (wa != world_plane_aabbs.end()) {
 						FaceAABB fb = face_aabb(face);
