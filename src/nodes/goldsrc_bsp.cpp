@@ -268,8 +268,21 @@ void fragment() {
 }
 )";
 
-// Sky surface shader: samples sky cubemap by view direction. Rendered first
-// (render_priority -1) with no depth write, so it acts as a true background —
+// Where the transparent queue's back rows sort. Godot draws low priority first, so these run
+// back to front: the sky is the backdrop, then anything sitting INSIDE a pool (WaterSurfaces
+// PRIORITY_SUBMERGED), then liquid's depth prepass, then liquid's colour pass at the default 0.
+//
+// The sky has to be strictly below the prepass, not level with it. The prepass writes depth at
+// the liquid surface, and the sky is drawn with depth TEST on (it writes none of its own), so a
+// sky face behind water that draws AFTER the prepass is rejected outright — the water then
+// blends over the cleared buffer instead of over the sky and goes flat and opaque. Both shipped
+// at -1, which is the same rung: which one went first was the renderer's business, so ww_golem's
+// moat carried hard-edged slabs of dead black sky whose edges were sky-mesh boundaries.
+static const int RENDER_PRIORITY_SKY = -3;
+static const int RENDER_PRIORITY_LIQUID_DEPTH = -1;
+
+// Sky surface shader: samples sky cubemap by view direction. Rendered behind everything
+// (RENDER_PRIORITY_SKY) with no depth write, so it acts as a true background —
 // walls occlude it normally and projectiles beyond it remain visible.
 // sky_cubemap is set at runtime by GDScript.
 static const char *SKY_SURFACE_SHADER_CODE = R"(
@@ -1348,8 +1361,9 @@ void GoldSrcBSP::build_mesh() {
 	water_shader->set_code(WATER_SHADER_CODE);
 
 	// Water's depth-only prepass. Carries no per-texture state, so one material is shared by
-	// every water twin in the model; render_priority -1 is what puts it ahead of the color
-	// pass in the transparent queue, which is the whole point of it.
+	// every water twin in the model; RENDER_PRIORITY_LIQUID_DEPTH is what puts it ahead of the
+	// color pass in the transparent queue, which is the whole point of it — and behind the sky,
+	// which must already be in the buffer before this stamps depth over it.
 	Ref<ShaderMaterial> water_depth_material;
 	{
 		Ref<Shader> water_depth_shader;
@@ -1357,7 +1371,7 @@ void GoldSrcBSP::build_mesh() {
 		water_depth_shader->set_code(WATER_DEPTH_SHADER_CODE);
 		water_depth_material.instantiate();
 		water_depth_material->set_shader(water_depth_shader);
-		water_depth_material->set_render_priority(-1);
+		water_depth_material->set_render_priority(RENDER_PRIORITY_LIQUID_DEPTH);
 	}
 
 	// Create shared lightstyle brightness texture for shader path
@@ -2114,7 +2128,7 @@ void GoldSrcBSP::build_mesh() {
 				Ref<ShaderMaterial> material;
 				material.instantiate();
 				material->set_shader(sky_shader);
-				material->set_render_priority(-1); // draw before BSP so it's a true background
+				material->set_render_priority(RENDER_PRIORITY_SKY); // behind the world AND behind liquid's prepass
 				arr_mesh->surface_set_material(0, material);
 				material_cache[cache_key] = material;
 			} else if (is_water) {
@@ -2276,7 +2290,7 @@ void GoldSrcBSP::build_mesh() {
 					Ref<ShaderMaterial> wave_depth;
 					wave_depth.instantiate();
 					wave_depth->set_shader(water_depth_material->get_shader());
-					wave_depth->set_render_priority(-1);
+					wave_depth->set_render_priority(RENDER_PRIORITY_LIQUID_DEPTH);
 					wave_depth->set_shader_parameter("wave_height", ent_wave * scale_factor);
 					depth_instance->set_material_override(wave_depth);
 				} else {
