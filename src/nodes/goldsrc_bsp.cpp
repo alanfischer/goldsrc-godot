@@ -1,4 +1,5 @@
 #include "goldsrc_bsp.h"
+#include "goldsrc_pipeline_id.h"
 
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/gd_script.hpp>
@@ -836,7 +837,13 @@ GoldSrcBSP::GoldSrcBSP() {
 	}
 }
 
+String GoldSrcBSP::get_pipeline_id() {
+	return String(GOLDSRC_PIPELINE_ID);
+}
+
+
 void GoldSrcBSP::_bind_methods() {
+	ClassDB::bind_static_method("GoldSrcBSP", D_METHOD("get_pipeline_id"), &GoldSrcBSP::get_pipeline_id);
 	ClassDB::bind_method(D_METHOD("load_bsp", "path"), &GoldSrcBSP::load_bsp);
 	ClassDB::bind_method(D_METHOD("load_bsp_from_data", "data"), &GoldSrcBSP::load_bsp_from_data);
 	ClassDB::bind_method(D_METHOD("get_bsp_blob"), &GoldSrcBSP::get_bsp_blob);

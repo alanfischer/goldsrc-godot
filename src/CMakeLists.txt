@@ -6,11 +6,31 @@ file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
 )
 
+# The conversion pipeline's identity, hashed from the sources above and regenerated whenever any
+# of them changes. GoldSrcBSP hands it to GDScript, which bakes it into every .scn it converts and
+# refuses a cached map that was built by a different one — the C++ half of this library decides
+# what a .scn contains, and a cache version living in GDScript cannot see that half move.
+#
+# Every source counts, not just the BSP path. Over-invalidating costs a reconversion; under-
+# invalidating ships a map built by code nobody is running any more, silently.
+set(PIPELINE_ID_HEADER "${CMAKE_CURRENT_BINARY_DIR}/goldsrc_pipeline_id.h")
+add_custom_command(
+    OUTPUT "${PIPELINE_ID_HEADER}"
+    COMMAND ${CMAKE_COMMAND}
+        -DGOLDSRC_ID_OUT=${PIPELINE_ID_HEADER}
+        "-DGOLDSRC_ID_SOURCES=${SOURCES}"
+        -P "${CMAKE_SOURCE_DIR}/cmake/pipeline_id.cmake"
+    DEPENDS ${SOURCES} "${CMAKE_SOURCE_DIR}/cmake/pipeline_id.cmake"
+    COMMENT "Hashing the conversion pipeline"
+    VERBATIM
+)
+
 # Shared library for the GDExtension
-add_library(${PROJECT_NAME} SHARED ${SOURCES})
+add_library(${PROJECT_NAME} SHARED ${SOURCES} "${PIPELINE_ID_HEADER}")
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE godot::cpp)

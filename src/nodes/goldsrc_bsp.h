@@ -25,6 +25,12 @@ public:
 	GoldSrcBSP();
 	~GoldSrcBSP() = default;
 
+	// Identity of the conversion pipeline compiled into THIS build — a hash of the extension's
+	// own sources, taken at build time (cmake/pipeline_id.cmake). Stable across platforms for
+	// one source tree, so a peer can compare it against the id baked into a .scn it downloaded.
+	// Static: GDScript asks before it has any reason to instantiate a BSP.
+	static godot::String get_pipeline_id();
+
 	godot::Error load_bsp(const godot::String &path);
 	godot::Error load_bsp_from_data(const godot::PackedByteArray &data);
 
