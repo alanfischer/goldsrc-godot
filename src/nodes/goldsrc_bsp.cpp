@@ -19,6 +19,7 @@
 #include <godot_cpp/classes/time.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <godot_cpp/classes/geometry2d.hpp>
 #include <map>
@@ -860,6 +861,7 @@ void GoldSrcBSP::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_lightstyle_image"), &GoldSrcBSP::get_lightstyle_image);
 	ClassDB::bind_method(D_METHOD("get_lightstyle_texture"), &GoldSrcBSP::get_lightstyle_texture);
 	ClassDB::bind_method(D_METHOD("point_contents", "position"), &GoldSrcBSP::point_contents);
+	ClassDB::bind_method(D_METHOD("get_hull_mesh", "model_index", "hull_index"), &GoldSrcBSP::get_hull_mesh);
 	ClassDB::bind_method(D_METHOD("point_to_leaf", "position"), &GoldSrcBSP::point_to_leaf);
 	ClassDB::bind_method(D_METHOD("get_leaf_count"), &GoldSrcBSP::get_leaf_count);
 	ClassDB::bind_method(D_METHOD("get_leaf_pvs", "leaf_index"), &GoldSrcBSP::get_leaf_pvs);
@@ -2465,6 +2467,229 @@ void GoldSrcBSP::mark_bsp_carrier(Node3D *body, int model_index, int blocking_co
 	body->set_meta("bsp_scale", scale_factor);
 	if (blocking_contents != 0) body->set_meta("bsp_blocking", blocking_contents);
 }
+
+// --- Clipnode hull -> triangle soup --------------------------------------------------------
+//
+// GoldSrc ships three pre-dilated collision hulls alongside the visible geometry. Hull 1 is the
+// BSP swept by the standing player box, so its surface is not the world's walls -- it is the
+// locus of legal player CENTRES. That is exactly the surface a nav baker wants: the dilation
+// Recast would apply as `agent_radius` is already in the data, done by the map compiler against
+// the real brushes rather than a voxelisation of them. Bake it with a zero agent radius and a
+// walkable polygon means "a player can stand here", with no second model of the player to keep
+// in sync with the movement kernel.
+//
+// The face-based hull 0 that build_hull_collision emits is the wrong surface for this: it is
+// render geometry, which is what the player SEES, not what the player COLLIDES with.
+//
+// Plain BSP-to-brush decompilation. Descend the clipnode tree accumulating the half-spaces that
+// bound the current cell; at a solid leaf that set IS a convex polyhedron. Each bounding plane's
+// face comes from clipping it against the cell's other half-spaces, and a face is emitted only
+// where it borders empty space -- sampled just outside -- so interior partitions between
+// adjacent solid cells stay out of the mesh.
+
+namespace {
+
+struct ClipV3 { float x, y, z; };
+struct ClipHalfSpace {
+	ClipV3 n;      // the cell satisfies dot(n, p) >= d
+	float d;
+};
+
+constexpr float CLIP_ON_EPS = 0.01f;   // GoldSrc units: plane-side tolerance while clipping
+constexpr float CLIP_PROBE = 1.0f;     // how far outside a face to sample for emptiness
+constexpr int CLIP_MAX_DEPTH = 256;
+
+inline float clip_dist(const ClipHalfSpace &pl, const ClipV3 &p) {
+	return pl.n.x * p.x + pl.n.y * p.y + pl.n.z * p.z - pl.d;
+}
+
+// Contents of `p` within one clipnode hull. Mirrors the engine's HullPointContents.
+int clip_point_contents(const goldsrc::BSPData &d, int nodenum, const ClipV3 &p) {
+	int guard = 0;
+	while (nodenum >= 0) {
+		if (++guard > 8192 || nodenum >= (int)d.clipnodes.size()) return goldsrc::CONTENTS_SOLID;
+		const auto &cn = d.clipnodes[nodenum];
+		if (cn.planenum < 0 || cn.planenum >= (int)d.planes.size()) return goldsrc::CONTENTS_SOLID;
+		const auto &pl = d.planes[cn.planenum];
+		const float dist = pl.normal[0] * p.x + pl.normal[1] * p.y + pl.normal[2] * p.z - pl.dist;
+		nodenum = cn.children[dist < 0.0f ? 1 : 0];
+	}
+	return nodenum;
+}
+
+// Clip a convex polygon to the half-space dot(n, p) >= d, returning the kept part.
+std::vector<ClipV3> clip_poly(const std::vector<ClipV3> &poly, const ClipHalfSpace &pl) {
+	std::vector<ClipV3> out;
+	const size_t n = poly.size();
+	if (n < 3) return out;
+	out.reserve(n + 4);
+	for (size_t i = 0; i < n; i++) {
+		const ClipV3 &a = poly[i];
+		const ClipV3 &b = poly[(i + 1) % n];
+		const float da = clip_dist(pl, a);
+		const float db = clip_dist(pl, b);
+		if (da >= -CLIP_ON_EPS) out.push_back(a);
+		if ((da > CLIP_ON_EPS && db < -CLIP_ON_EPS) || (da < -CLIP_ON_EPS && db > CLIP_ON_EPS)) {
+			const float t = da / (da - db);
+			out.push_back({a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t});
+		}
+	}
+	return out;
+}
+
+// A square on `pl` big enough to span the map, wound CCW about +n. Clipping whittles it down.
+std::vector<ClipV3> base_poly(const ClipHalfSpace &pl, float extent) {
+	const ClipV3 n = pl.n;
+	const ClipV3 up = (fabsf(n.z) > 0.9f) ? ClipV3{1, 0, 0} : ClipV3{0, 0, 1};
+	ClipV3 t1 = {up.y * n.z - up.z * n.y, up.z * n.x - up.x * n.z, up.x * n.y - up.y * n.x};
+	const float l = sqrtf(t1.x * t1.x + t1.y * t1.y + t1.z * t1.z);
+	if (l < 1e-6f) return {};
+	t1 = {t1.x / l, t1.y / l, t1.z / l};
+	const ClipV3 t2 = {n.y * t1.z - n.z * t1.y, n.z * t1.x - n.x * t1.z, n.x * t1.y - n.y * t1.x};
+	const ClipV3 c = {n.x * pl.d, n.y * pl.d, n.z * pl.d};
+	std::vector<ClipV3> q(4);
+	for (int i = 0; i < 4; i++) {
+		const float sx = (i == 0 || i == 3) ? -extent : extent;
+		const float sy = (i < 2) ? -extent : extent;
+		q[i] = {c.x + t1.x * sx + t2.x * sy, c.y + t1.y * sx + t2.y * sy,
+				c.z + t1.z * sx + t2.z * sy};
+	}
+	return q;
+}
+
+// Running box for the cell being descended into, which is what makes this tractable. A BSP
+// splits the same region over and over, so by depth 40 most accumulated half-spaces no longer
+// touch the cell at all -- and face extraction is O(planes^2) per cell, so carrying them is the
+// difference between seconds and not finishing. A plane the box lies wholly inside is dropped;
+// one it lies wholly outside means the subtree is empty and is never walked.
+struct ClipBox {
+	float mn[3], mx[3];
+
+	// Least and greatest value of dot(n, p) over the box.
+	void span(const ClipV3 &n, float &lo, float &hi) const {
+		const float c[3] = {n.x, n.y, n.z};
+		lo = 0.0f; hi = 0.0f;
+		for (int i = 0; i < 3; i++) {
+			lo += c[i] >= 0.0f ? c[i] * mn[i] : c[i] * mx[i];
+			hi += c[i] >= 0.0f ? c[i] * mx[i] : c[i] * mn[i];
+		}
+	}
+	bool empty() const { return mn[0] > mx[0] || mn[1] > mx[1] || mn[2] > mx[2]; }
+};
+
+void collect_solid_cells(const goldsrc::BSPData &d, int nodenum, std::vector<ClipHalfSpace> &region,
+		ClipBox box, int depth, std::vector<std::vector<ClipHalfSpace>> &out) {
+	if (depth > CLIP_MAX_DEPTH || box.empty()) return;
+	if (nodenum < 0) {
+		if (nodenum == goldsrc::CONTENTS_SOLID) out.push_back(region);
+		return;
+	}
+	if (nodenum >= (int)d.clipnodes.size()) return;
+	const auto &cn = d.clipnodes[nodenum];
+	if (cn.planenum < 0 || cn.planenum >= (int)d.planes.size()) return;
+	const auto &pl = d.planes[cn.planenum];
+	const ClipV3 n = {pl.normal[0], pl.normal[1], pl.normal[2]};
+
+	// Most GoldSrc clip planes are axis-aligned, and those tighten the box outright. The rest
+	// only get the cheaper span test below.
+	int axis = -1;
+	float sign = 0.0f;
+	for (int i = 0; i < 3; i++) {
+		const float c = (i == 0) ? n.x : (i == 1) ? n.y : n.z;
+		if (fabsf(fabsf(c) - 1.0f) < 1e-4f) { axis = i; sign = c; break; }
+	}
+
+	for (int side = 0; side < 2; side++) {
+		const ClipHalfSpace hs = side == 0 ? ClipHalfSpace{n, pl.dist}
+				: ClipHalfSpace{{-n.x, -n.y, -n.z}, -pl.dist};
+		float lo, hi;
+		box.span(hs.n, lo, hi);
+		if (hi < hs.d - CLIP_ON_EPS) continue;             // wholly outside: subtree is empty
+
+		ClipBox sub = box;
+		if (axis >= 0) {
+			const float at = sign > 0.0f ? pl.dist : -pl.dist;   // plane position on that axis
+			if ((side == 0) == (sign > 0.0f)) sub.mn[axis] = std::max(sub.mn[axis], at);
+			else sub.mx[axis] = std::min(sub.mx[axis], at);
+		}
+
+		const bool redundant = lo >= hs.d - CLIP_ON_EPS;   // wholly inside: constrains nothing
+		if (!redundant) region.push_back(hs);
+		collect_solid_cells(d, cn.children[side], region, sub, depth + 1, out);
+		if (!redundant) region.pop_back();
+	}
+}
+
+}  // namespace
+
+PackedVector3Array GoldSrcBSP::get_hull_mesh(int model_index, int hull_index) const {
+	PackedVector3Array tris;
+	if (!parser) return tris;
+	const auto &d = parser->get_data();
+	if (model_index < 0 || model_index >= (int)d.models.size()) return tris;
+	if (hull_index < 1 || hull_index > 3) return tris;   // hull 0 is faces — build_hull_collision
+	if (d.clipnodes.empty()) return tris;
+
+	const auto &model = d.models[model_index];
+	const int headnode = model.headnode[hull_index];
+	if (headnode < 0) return tris;
+
+	// Bound every cell by the model's own box, grown past the hull's dilation, so the unbounded
+	// half-spaces near the root still produce finite faces.
+	const float grow = 64.0f;
+	const ClipHalfSpace box[6] = {
+		{{ 1, 0, 0}, model.mins[0] - grow}, {{-1, 0, 0}, -(model.maxs[0] + grow)},
+		{{ 0, 1, 0}, model.mins[1] - grow}, {{ 0,-1, 0}, -(model.maxs[1] + grow)},
+		{{ 0, 0, 1}, model.mins[2] - grow}, {{ 0, 0,-1}, -(model.maxs[2] + grow)},
+	};
+	float extent = 64.0f;
+	for (int i = 0; i < 3; i++) {
+		extent = std::max(extent, fabsf(model.mins[i]) + grow);
+		extent = std::max(extent, fabsf(model.maxs[i]) + grow);
+	}
+	extent *= 2.0f;
+
+	std::vector<ClipHalfSpace> region(box, box + 6);
+	std::vector<std::vector<ClipHalfSpace>> cells;
+	ClipBox root;
+	for (int i = 0; i < 3; i++) {
+		root.mn[i] = model.mins[i] - grow;
+		root.mx[i] = model.maxs[i] + grow;
+	}
+	collect_solid_cells(d, headnode, region, root, 0, cells);
+
+	for (const auto &cell : cells) {
+		for (size_t i = 0; i < cell.size(); i++) {
+			std::vector<ClipV3> poly = base_poly(cell[i], extent);
+			if (poly.empty()) continue;
+			for (size_t j = 0; j < cell.size() && poly.size() >= 3; j++) {
+				if (j != i) poly = clip_poly(poly, cell[j]);
+			}
+			if (poly.size() < 3) continue;
+			// The cell sits on this plane's +n side, so the world outside the face is -n.
+			const ClipV3 &n = cell[i].n;
+			ClipV3 mid{0, 0, 0};
+			for (const auto &v : poly) { mid.x += v.x; mid.y += v.y; mid.z += v.z; }
+			const float inv = 1.0f / (float)poly.size();
+			mid = {mid.x * inv, mid.y * inv, mid.z * inv};
+			const ClipV3 probe = {mid.x - n.x * CLIP_PROBE, mid.y - n.y * CLIP_PROBE,
+					mid.z - n.z * CLIP_PROBE};
+			if (clip_point_contents(d, headnode, probe) == goldsrc::CONTENTS_SOLID) continue;
+
+			// Wound CCW about -n. goldsrc_to_godot is a rotation (det +1), so winding survives.
+			for (size_t k = 2; k < poly.size(); k++) {
+				const ClipV3 &v0 = poly[0];
+				const ClipV3 &v1 = poly[k];
+				const ClipV3 &v2 = poly[k - 1];
+				tris.push_back(goldsrc_to_godot(v0.x, v0.y, v0.z));
+				tris.push_back(goldsrc_to_godot(v1.x, v1.y, v1.z));
+				tris.push_back(goldsrc_to_godot(v2.x, v2.y, v2.z));
+			}
+		}
+	}
+	return tris;
+}
+
 
 void GoldSrcBSP::build_hull_collision(Node3D *parent, int model_index,
 	int hull_index, const String &body_name, uint32_t collision_layer) {

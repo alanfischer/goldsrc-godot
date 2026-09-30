@@ -62,6 +62,10 @@ public:
 
 	// Debug: check what the BSP thinks a point is (returns contents: -1=empty, -2=solid, -3=water)
 	int point_contents(godot::Vector3 godot_pos) const;
+	// Clipnode hull (1/2/3) as a triangle soup, for nav baking. See the .cpp for why this is
+	// the surface a navmesh actually wants: hull 1 is pre-dilated by the player bbox, so it is
+	// the locus of legal player CENTRES, and a mesh baked from it needs zero agent radius.
+	godot::PackedVector3Array get_hull_mesh(int model_index, int hull_index) const;
 
 	// Visibility queries for the unified visibility system
 	int point_to_leaf(godot::Vector3 godot_pos) const;
