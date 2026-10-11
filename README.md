@@ -29,6 +29,13 @@ A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
 - All animation sequences as AnimationPlayer tracks
 - Chrome and additive material flags
 - Configurable scale factor
+- Hit boxes as `BoneAttachment3D` + queryable-only `Area3D` on collision layer 10, each carrying
+  `hitbox_group` (the file's own `mstudiobbox_t.group` — `1` is the head by Half-Life convention,
+  `0` is `HITGROUP_GENERIC`) and `hitbox_bone` (the bone it rides). The group is reported as the
+  file states it and never inferred: a model whose boxes are all `0` carries no anatomy, and
+  deciding otherwise is the consuming game's call. Both the editor importer and any runtime
+  converter bake these into their output, so tag the group in the `.mdl` rather than guessing
+  downstream — Wizard Wars does this with `tools/tag_mdl_head_hitboxes.py`
 
 ### SPR Sprites
 - All frame types (single and grouped)
