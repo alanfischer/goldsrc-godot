@@ -300,8 +300,9 @@ void GoldSrcMDL::build_skeleton() {
 // Attach each via a BoneAttachment3D so Godot follows the animated bone.
 // Hitboxes live on collision_layer MASK_HITBOX (bit 9 = 512) and are queryable-only
 // (monitoring=false, monitorable=true). Weapons raycast against this layer with
-// collide_with_areas=true, read the "hitbox_group" meta (1 = head in HL models),
-// and apply the damage multiplier accordingly.
+// collide_with_areas=true and read the "hitbox_group" meta — the file's own value, where 1 is
+// the head by HL convention — to apply a damage multiplier. "hitbox_bone" names the bone the box
+// rides, for a game whose models leave the group unset and wants to decide anatomy for itself.
 void GoldSrcMDL::build_hitboxes() {
 	const auto &mdl = parser->get_data();
 	if (mdl.hitboxes.empty() || !skeleton) return;
@@ -324,25 +325,13 @@ void GoldSrcMDL::build_hitboxes() {
 		area->set_collision_mask(0);
 		area->set_monitoring(false);
 		area->set_monitorable(true);
-		// WW wizard/monster MDLs don't use HL's hitbox group convention — every
-		// hitbox has group=0. Fall back to bone name: if the bone contains "head"
-		// (case-insensitive), tag this hitbox as the head group so headshot
-		// multipliers trigger. Preserve explicit groups when models do set them.
-		int group = hb.group;
-		if (group == 0) {
-			const std::string &bname = mdl.bones[hb.bone].name;
-			for (size_t c = 0; c + 3 < bname.size(); c++) {
-				char a = (char)tolower(bname[c]);
-				char b = (char)tolower(bname[c + 1]);
-				char d = (char)tolower(bname[c + 2]);
-				char e = (char)tolower(bname[c + 3]);
-				if (a == 'h' && b == 'e' && d == 'a' && e == 'd') {
-					group = 1;
-					break;
-				}
-			}
-		}
-		area->set_meta("hitbox_group", group);
+		// What the file says, nothing more. A model whose boxes are all group 0 carries no
+		// anatomy, and deciding that a bone named "head" must be one is the consuming game's
+		// call, not an importer's — it also reads the file as saying something it does not,
+		// and both the editor importer and a game's own converter bake that answer into their
+		// .scn output where nobody can see it. Tag the group in the .mdl instead.
+		area->set_meta("hitbox_group", hb.group);
+		area->set_meta("hitbox_bone", String(mdl.bones[hb.bone].name.c_str()));
 		attach->add_child(area);
 
 		// GoldSrc→Godot axis swizzle: GS(x,y,z) → Godot(x, z, -y)
