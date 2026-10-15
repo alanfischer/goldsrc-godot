@@ -231,6 +231,15 @@ the hulls whenever it finds this metadata:
 
 See hop-godot's README for hull selection, the runtime toggle, and its own fallback rules.
 
+## Related projects
+
+Part of a set of Godot 4 libraries for GoldSrc-style games:
+
+- **goldsrc-godot**: BSP/MDL/SPR/WAD loading, PVS, hull data
+- [hop-godot](https://github.com/alanfischer/hop-godot): hop physics as a `PhysicsServer3D` backend, with BSP hull traces
+- [pmove-godot](https://github.com/alanfischer/pmove-godot): GoldSrc player movement and client prediction
+- [goldnet-godot](https://github.com/alanfischer/goldnet-godot): snapshot replication behind Godot's `MultiplayerAPI`
+
 ## Building
 
 Requires CMake 3.22+ and a C++17 compiler.
