@@ -404,3 +404,7 @@ GoldSrc uses Z-up; Godot uses Y-up. The plugin converts automatically:
 - Quaternions: conjugation by -90&deg; X rotation
 
 Default scale factor is `0.025` (1 GoldSrc unit = 0.025 Godot units).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
