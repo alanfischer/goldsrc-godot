@@ -40,7 +40,8 @@ build() {
     local args=(-S "$SCRIPT_DIR" -B "$bdir" -DCMAKE_BUILD_TYPE="$type" -DGODOTCPP_TARGET="$gdt" "$@")
     [ -n "$toolchain" ] && args+=(-DCMAKE_TOOLCHAIN_FILE="$CMAKE_DIR/$toolchain")
     cmake "${args[@]}"
-    cmake --build "$bdir" --parallel
+    # BUILD_JOBS caps the job count; unset, --parallel alone means unlimited make -j.
+    cmake --build "$bdir" --parallel ${BUILD_JOBS:-}
 }
 
 # Fuse the arm64 + x86_64 slices of one config into a universal dylib.
