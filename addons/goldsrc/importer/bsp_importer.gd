@@ -1,8 +1,6 @@
 @tool
 extends EditorImportPlugin
 
-const BspSceneBuilder = preload("res://addons/goldsrc/bsp_scene_builder.gd")
-
 
 func _get_importer_name() -> String:
 	return "goldsrc.bsp"
@@ -85,10 +83,10 @@ func _get_import_options(_path: String, _preset_index: int) -> Array[Dictionary]
 			"name": "shader_lightstyles",
 			"default_value": true,
 		},
-		# Lightmap multiplier on world materials (GoldSrc's is 2.0). 0 leaves them as built.
+		# Lightmap multiplier on world materials. GoldSrc's is 2.0.
 		{
 			"name": "overbright",
-			"default_value": 0.0,
+			"default_value": 2.0,
 			"property_hint": PROPERTY_HINT_RANGE,
 			"hint_string": "0.0,4.0,0.05",
 		},
@@ -109,21 +107,29 @@ func _get_option_visibility(_path: String, _option_name: StringName, _options: D
 
 func _import(source_file: String, save_path: String, options: Dictionary,
 		_platform_variants: Array[String], _gen_files: Array[String]) -> Error:
-	# WAD resolution is the builder's: an explicit wad_directory loads every WAD in it,
-	# otherwise the WADs worldspawn declares are looked up beside the .bsp, then at res://,
-	# so a stock project textures correctly with no per-file import config.
-	var root := BspSceneBuilder.build(source_file, {
-		"scale_factor": options.get("scale_factor", 0.025),
-		"wad_directory": options.get("wad_directory", ""),
-		"shader_lightstyles": options.get("shader_lightstyles", true),
-		"overbright": options.get("overbright", 0.0),
-		"light_grid_cell_size": options.get("light_grid_cell_size", 0.0),
-	})
-	if root == null:
-		return ERR_PARSE_ERROR
+	var bsp := GoldSrcBSP.new()
+	bsp.scale_factor = options.get("scale_factor", 0.025)
+	bsp.shader_lightstyles = options.get("shader_lightstyles", true)
+	bsp.overbright = options.get("overbright", 2.0)
+	bsp.light_grid_cell_size = options.get("light_grid_cell_size", 0.0)
+	var err := bsp.load_bsp(source_file)
+	if err != OK:
+		bsp.free()
+		return err
 
+	# An explicit wad_directory loads every WAD in it. Otherwise the WADs worldspawn declares
+	# are looked up beside the .bsp, then at res://, so a stock project textures correctly
+	# with no per-file import config.
+	var wad_directory: String = options.get("wad_directory", "")
+	if wad_directory != "":
+		_load_wad_directory(bsp, wad_directory)
+	else:
+		for missing in bsp.load_declared_wads():
+			push_warning("BSP Importer: WAD '%s' not found beside %s or at res://" % [missing, source_file])
+
+	var root := bsp.build_scene()
+	bsp.free()
 	_instantiate_entity_models(root, options.get("model_directory", ""))
-	BspSceneBuilder.set_owner_recursive(root, root)
 
 	var scene := PackedScene.new()
 	var pack_err := scene.pack(root)
@@ -133,6 +139,18 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 		return pack_err
 
 	return ResourceSaver.save(scene, save_path + "." + _get_save_extension())
+
+
+func _load_wad_directory(bsp: GoldSrcBSP, wad_directory: String) -> void:
+	var dir := DirAccess.open(wad_directory)
+	if dir == null:
+		push_warning("BSP Importer: Could not open WAD directory '%s'" % wad_directory)
+		return
+	for file_name in dir.get_files():
+		if file_name.get_extension().to_lower() == "wad":
+			var wad := GoldSrcWAD.new()
+			if wad.load_wad(wad_directory.path_join(file_name)) == OK:
+				bsp.add_wad(wad)
 
 
 # Instantiate MDL/SPR scenes for each point entity that has a "model" key.
@@ -172,3 +190,5 @@ func _instantiate_entity_models(root: Node3D, model_dir: String) -> void:
 			node_name = "unnamed_entity_model"
 		instance.name = node_name
 		child.add_child(instance)
+		# build_scene() owned everything it built; the model has to be owned too to be packed.
+		instance.owner = root

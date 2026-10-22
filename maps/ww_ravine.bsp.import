@@ -17,5 +17,5 @@ wad_directory=""
 scale_factor=0.025
 model_directory=""
 shader_lightstyles=true
-overbright=0.0
+overbright=2.0
 light_grid_cell_size=0.0

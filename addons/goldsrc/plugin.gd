@@ -1,7 +1,9 @@
 @tool
 extends EditorPlugin
 
-const BspSceneBuilder = preload("res://addons/goldsrc/bsp_scene_builder.gd")
+## Off in a project that converts maps itself at runtime and never loads the imported scenes,
+## which would otherwise pay for a full reimport of every map each time the extension changes.
+const REIMPORT_SETTING := "goldsrc/import/reimport_on_extension_change"
 
 var bsp_importer: EditorImportPlugin
 var mdl_importer: EditorImportPlugin
@@ -18,6 +20,7 @@ func _enter_tree() -> void:
 	add_import_plugin(mdl_importer)
 	add_import_plugin(spr_importer)
 	add_import_plugin(wad_importer)
+	_declare_settings()
 	_reimport_stale_maps.call_deferred()
 
 
@@ -32,15 +35,22 @@ func _exit_tree() -> void:
 	wad_importer = null
 
 
+func _declare_settings() -> void:
+	if not ProjectSettings.has_setting(REIMPORT_SETTING):
+		ProjectSettings.set_setting(REIMPORT_SETTING, true)
+	ProjectSettings.set_initial_value(REIMPORT_SETTING, true)
+	ProjectSettings.add_property_info({"name": REIMPORT_SETTING, "type": TYPE_BOOL})
+
+
 ## Most of what a .bsp imports to is decided in C++, but Godot reimports only when the source,
 ## its options or the importer's format version changes — a rebuilt extension would leave every
 ## map as the old build made it. So compare each imported map's pipeline_id stamp against this
 ## build's, and reimport the ones that differ. The extension only changes across an editor
 ## restart, and the last id checked is remembered, so an ordinary start skips the scan.
 func _reimport_stale_maps() -> void:
-	var current := BspSceneBuilder.pipeline_id()
-	if current.is_empty():
+	if not ProjectSettings.get_setting(REIMPORT_SETTING, true):
 		return
+	var current := GoldSrcBSP.get_pipeline_id()
 	var settings := EditorInterface.get_editor_settings()
 	if settings.get_project_metadata("goldsrc", "checked_pipeline_id", "") == current:
 		return
@@ -65,7 +75,7 @@ func _collect_stale_maps(dir: EditorFileSystemDirectory, out: PackedStringArray)
 		if path.get_extension().to_lower() != "bsp" or not dir.get_file_import_is_valid(i):
 			continue
 		var scene := ResourceLoader.load(path, "PackedScene", ResourceLoader.CACHE_MODE_IGNORE) as PackedScene
-		if scene and BspSceneBuilder.is_scene_stale(scene):
+		if scene and GoldSrcBSP.is_scene_stale(scene):
 			out.append(path)
 	for i in dir.get_subdir_count():
 		_collect_stale_maps(dir.get_subdir(i), out)
