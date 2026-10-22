@@ -1,6 +1,13 @@
 @tool
 extends EditorImportPlugin
 
+## Bump when this script changes what an import produces. Godot itself only compares it when
+## something else already sent a file to be re-tested (its source or .import changed), so the
+## plugin's own check is what acts on it — see import_key().
+const FORMAT_VERSION := 1
+## Project metadata section recording, per .bsp, the import_key() it was last imported with.
+const IMPORTED_WITH := "goldsrc_bsp_imported_with"
+
 
 func _get_importer_name() -> String:
 	return "goldsrc.bsp"
@@ -38,12 +45,14 @@ func _get_import_order() -> int:
 	return 1 # Must run after MDL/SPR importers (order 0) so their scenes are available.
 
 
-# Bump when this script changes what an import produces; Godot reimports every .bsp whose
-# .import records a lower number. A changed C++ extension is caught separately, by the
-# pipeline_id check in plugin.gd, because Godot only reimports on a version that goes UP.
-# v1: scenes carry pipeline_id; lightstyle, overbright and light grid options.
 func _get_format_version() -> int:
-	return 1
+	return FORMAT_VERSION
+
+
+## What an import made now would be built by: this extension build and this script's version.
+## A map recorded with any other key is stale (plugin.gd reimports it).
+static func import_key() -> String:
+	return "%s/%d" % [GoldSrcBSP.get_pipeline_id(), FORMAT_VERSION]
 
 
 # Must run on main thread — ArrayMesh/ImageTexture serialization deadlocks
@@ -125,7 +134,7 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 		_load_wad_directory(bsp, wad_directory)
 	else:
 		for missing in bsp.load_declared_wads():
-			push_warning("BSP Importer: WAD '%s' not found beside %s or at res://" % [missing, source_file])
+			push_warning("BSP Importer: WAD '%s' not found for %s" % [missing, source_file])
 
 	var root := bsp.build_scene()
 	bsp.free()
@@ -138,7 +147,10 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 		push_error("BSP Importer: Failed to pack scene: %s" % error_string(pack_err))
 		return pack_err
 
-	return ResourceSaver.save(scene, save_path + "." + _get_save_extension())
+	var save_err := ResourceSaver.save(scene, save_path + "." + _get_save_extension())
+	if save_err == OK:
+		EditorInterface.get_editor_settings().set_project_metadata(IMPORTED_WITH, source_file, import_key())
+	return save_err
 
 
 func _load_wad_directory(bsp: GoldSrcBSP, wad_directory: String) -> void:

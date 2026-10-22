@@ -75,17 +75,29 @@ All imported scenes contain only standard Godot types (Node3D, MeshInstance3D, A
 | `light_grid_cell_size` | `0.0` | Bake an ambient-cube light grid into root metadata as `light_grid`, for lighting models by position. Cell size in GoldSrc units; `0` skips it. |
 
 Every imported map's root is also stamped with `pipeline_id`, a hash of the extension's C++
-source. Godot only reimports a file when its source, its options or the importer's format
-version change, so a rebuilt extension would otherwise leave every map as the old build made
-it: on editor start the plugin compares each imported map's stamp with the running build's and
-reimports the ones that differ. It remembers the last id it checked, so an ordinary start skips
-the scan. A project that converts maps itself at runtime and never loads the imported scenes can
-turn this off with the `goldsrc/import/reimport_on_extension_change` project setting.
+source. Godot re-tests an import only when its source or `.import` file changes, so a rebuilt
+extension (or a changed importer) would otherwise leave every map as the old build made it. The
+importer records what built each map in the editor's project metadata, and the plugin reimports
+any map recorded with something else on editor start and after an extension hot reload. A
+project that converts maps itself at runtime and never loads the imported scenes can turn this
+off with the `goldsrc/import/reimport_on_extension_change` project setting.
+
+### BSP Entity Model Instantiation
+
+The BSP importer automatically instantiates MDL/SPR scenes for point entities (monsters, props, sprites, etc.). Entity `model` keys are resolved as `res://` + the entity path, mirroring the GoldSrc layout at the project root — so `models/headcrab.mdl` maps to `res://models/headcrab.mdl`.
+
+If the asset is not found, a small placeholder `BoxMesh` (0.3 m³) is placed at the entity position so it remains visible in the editor.
+
+**Typical workflow:**
+1. Drop your game's `models/` and `sprites/` folders into the project root (`res://`).
+2. Godot auto-imports all `.mdl` and `.spr` files.
+3. Import your `.bsp` — entities with models/sprites appear in the scene automatically.
 
 ### Runtime Conversion
 
 A game that converts maps at runtime instead (downloaded maps, a cache in `user://`) calls the
-same `build_scene()` the importer does, so both produce identical output:
+same `build_scene()` the importer does, so both produce the same scene, less the entity models
+the importer adds:
 
 ```gdscript
 var bsp := GoldSrcBSP.new()
@@ -100,8 +112,8 @@ var scene := PackedScene.new()
 scene.pack(root)
 ResourceSaver.save(scene, "user://maps/mymap.scn")
 
-# Later: is that cached scene from another build of the extension?
-if GoldSrcBSP.is_scene_stale(load("user://maps/mymap.scn")):
+# Later: was that cached scene built by another build of the extension?
+if GoldSrcBSP.scene_pipeline_id(load("user://maps/mymap.scn")) != GoldSrcBSP.get_pipeline_id():
     pass  # rebuild it
 ```
 
@@ -126,7 +138,7 @@ BSP maps are divided into convex regions called *leaves*. During map compilation
                   └─ VisibilityManager ready — no .bsp file needed at runtime
 ```
 
-The `bsp_data` blob is written by `build_scene()`, so both the editor importer and runtime conversion carry it. Retrieve it from the instantiated map scene:
+The `bsp_data` blob is written by `build_mesh()`, so every converted map carries it. Retrieve it from the instantiated map scene:
 
 ```gdscript
 var pvs_blob: PackedByteArray = map_root.get_meta("bsp_data", PackedByteArray())
@@ -300,12 +312,13 @@ bsp.add_wad(wad)
 bsp.load_bsp("map.bsp")
 bsp.build_mesh()
 
-# Or, instead of build_mesh(), get a scene ready to pack and save (see Runtime Conversion):
-#   bsp.overbright = 2.0                 # lightmap multiplier on world materials (default 2.0)
-#   bsp.light_grid_cell_size = 32.0      # bake light_grid onto the root; 0 (default) skips it
-#   var missing = bsp.load_declared_wads(["res://wads"])  # worldspawn's WADs from these dirs
-#   var root: Node3D = bsp.build_scene()
-#   GoldSrcBSP.scene_pipeline_id(packed_scene) / GoldSrcBSP.is_scene_stale(packed_scene)
+# build_scene() instead of build_mesh() gives a plain, owned Node3D to pack and save
+# (see Runtime Conversion). Both put the root metadata (bsp_data, pipeline_id, lightstyles,
+# light_grid) on the node they return or fill.
+bsp.overbright = 2.0                   # lightmap multiplier on world materials (default 2.0)
+bsp.light_grid_cell_size = 32.0        # bake light_grid; 0 (default) skips it
+var missing = bsp.load_declared_wads(["res://wads"])  # worldspawn's WADs; returns those not found
+var pipeline = GoldSrcBSP.scene_pipeline_id(packed_scene)  # "" before the stamp existed
 
 # Entity data is on the child nodes as metadata:
 for child in bsp.get_children():

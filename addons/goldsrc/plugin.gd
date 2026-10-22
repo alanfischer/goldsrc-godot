@@ -4,6 +4,7 @@ extends EditorPlugin
 ## Off in a project that converts maps itself at runtime and never loads the imported scenes,
 ## which would otherwise pay for a full reimport of every map each time the extension changes.
 const REIMPORT_SETTING := "goldsrc/import/reimport_on_extension_change"
+const BspImporter := preload("res://addons/goldsrc/importer/bsp_importer.gd")
 
 var bsp_importer: EditorImportPlugin
 var mdl_importer: EditorImportPlugin
@@ -12,7 +13,7 @@ var wad_importer: EditorImportPlugin
 
 
 func _enter_tree() -> void:
-	bsp_importer = preload("res://addons/goldsrc/importer/bsp_importer.gd").new()
+	bsp_importer = BspImporter.new()
 	mdl_importer = preload("res://addons/goldsrc/importer/mdl_importer.gd").new()
 	spr_importer = preload("res://addons/goldsrc/importer/spr_importer.gd").new()
 	wad_importer = preload("res://addons/goldsrc/importer/wad_importer.gd").new()
@@ -22,9 +23,12 @@ func _enter_tree() -> void:
 	add_import_plugin(wad_importer)
 	_declare_settings()
 	_reimport_stale_maps.call_deferred()
+	# goldsrc.gdextension is reloadable, so a rebuild can land without an editor restart.
+	GDExtensionManager.extensions_reloaded.connect(_reimport_stale_maps)
 
 
 func _exit_tree() -> void:
+	GDExtensionManager.extensions_reloaded.disconnect(_reimport_stale_maps)
 	remove_import_plugin(bsp_importer)
 	remove_import_plugin(mdl_importer)
 	remove_import_plugin(spr_importer)
@@ -42,40 +46,33 @@ func _declare_settings() -> void:
 	ProjectSettings.add_property_info({"name": REIMPORT_SETTING, "type": TYPE_BOOL})
 
 
-## Most of what a .bsp imports to is decided in C++, but Godot reimports only when the source,
-## its options or the importer's format version changes — a rebuilt extension would leave every
-## map as the old build made it. So compare each imported map's pipeline_id stamp against this
-## build's, and reimport the ones that differ. The extension only changes across an editor
-## restart, and the last id checked is remembered, so an ordinary start skips the scan.
+## Godot re-tests an import only when its source or .import file changes, so neither a rebuilt
+## extension nor a bumped importer would ever reach a map imported before. The importer records
+## the key each map was built with in project metadata; any map recorded with another key (or
+## none) is reimported here, on editor start and on an extension hot reload.
 func _reimport_stale_maps() -> void:
 	if not ProjectSettings.get_setting(REIMPORT_SETTING, true):
 		return
-	var current := GoldSrcBSP.get_pipeline_id()
-	var settings := EditorInterface.get_editor_settings()
-	if settings.get_project_metadata("goldsrc", "checked_pipeline_id", "") == current:
-		return
-
 	var fs := EditorInterface.get_resource_filesystem()
 	while fs.is_scanning():
 		await fs.filesystem_changed
 
 	var stale := PackedStringArray()
-	_collect_stale_maps(fs.get_filesystem(), stale)
-	settings.set_project_metadata("goldsrc", "checked_pipeline_id", current)
+	_collect_stale_maps(fs.get_filesystem(), BspImporter.import_key(), stale)
 	if stale.is_empty():
 		return
-	print("GoldSrc: reimporting %d map(s) built by another build of the extension: %s"
+	print("GoldSrc: reimporting %d map(s) imported by another build of the extension or importer: %s"
 			% [stale.size(), ", ".join(stale)])
 	fs.reimport_files(stale)
 
 
-func _collect_stale_maps(dir: EditorFileSystemDirectory, out: PackedStringArray) -> void:
+func _collect_stale_maps(dir: EditorFileSystemDirectory, key: String, out: PackedStringArray) -> void:
+	var settings := EditorInterface.get_editor_settings()
 	for i in dir.get_file_count():
 		var path := dir.get_file_path(i)
 		if path.get_extension().to_lower() != "bsp" or not dir.get_file_import_is_valid(i):
 			continue
-		var scene := ResourceLoader.load(path, "PackedScene", ResourceLoader.CACHE_MODE_IGNORE) as PackedScene
-		if scene and GoldSrcBSP.is_scene_stale(scene):
+		if settings.get_project_metadata(BspImporter.IMPORTED_WITH, path, "") != key:
 			out.append(path)
 	for i in dir.get_subdir_count():
-		_collect_stale_maps(dir.get_subdir(i), out)
+		_collect_stale_maps(dir.get_subdir(i), key, out)

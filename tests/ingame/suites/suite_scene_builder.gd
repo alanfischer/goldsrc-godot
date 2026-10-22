@@ -1,6 +1,8 @@
 extends "res://tests/ingame/suite.gd"
 ## GoldSrcBSP.build_scene(): what a converted map carries on its root, what each property
 ## changes, and the pipeline_id stamp that tells a consumer the scene came from another build.
+## The properties are read by build_mesh()/build_scene(), not load_bsp(), so they can be set
+## on load_map()'s node after loading.
 
 
 func run() -> void:
@@ -10,22 +12,20 @@ func run() -> void:
 	_defaults(root)
 	_stamp_round_trips(root)
 	_unloaded_is_null()
+	_build_mesh_carries_the_metadata()
 	_declared_wads()
 	_properties()
 
 
-## A scene from a fresh GoldSrcBSP with `props` set on it before loading.
+## A scene from a freshly loaded map with `props` set on its GoldSrcBSP.
 func _build(props: Dictionary) -> Node3D:
-	var bsp := GoldSrcBSP.new()
+	var bsp := load_map()
+	if bsp == null:
+		return null
 	for key in props:
 		bsp.set(key, props[key])
-	if bsp.load_bsp(MAP_PATH) != OK:
-		fail("could not load %s" % MAP_PATH)
-		bsp.free()
-		return null
 	var root := bsp.build_scene()
 	check_eq(bsp.get_child_count(), 0, "build_scene() leaves the GoldSrcBSP empty")
-	bsp.free()
 	if root == null:
 		fail("build_scene() returned null with %s" % props)
 		return null
@@ -65,20 +65,13 @@ func _stamp_round_trips(root: Node3D) -> void:
 		return
 	check_eq(GoldSrcBSP.scene_pipeline_id(scene), GoldSrcBSP.get_pipeline_id(),
 		"the stamp reads back off the packed scene without instantiating it")
-	check(not GoldSrcBSP.is_scene_stale(scene), "a scene this build made is not stale")
 	check_eq(GoldSrcBSP.scene_pipeline_id(null), "", "a null scene has no stamp")
 
-	var other := Node3D.new()
-	other.set_meta("pipeline_id", "some-other-build")
-	var other_scene := PackedScene.new()
-	other_scene.pack(other)
-	check(GoldSrcBSP.is_scene_stale(other_scene), "another build's stamp is stale")
-
-	other.remove_meta("pipeline_id")
+	var unstamped_root := Node3D.new()
 	var unstamped := PackedScene.new()
-	unstamped.pack(other)
-	check(GoldSrcBSP.is_scene_stale(unstamped), "a scene from before the stamp is stale")
-	other.free()
+	unstamped.pack(unstamped_root)
+	unstamped_root.free()
+	check_eq(GoldSrcBSP.scene_pipeline_id(unstamped), "", "a scene from before the stamp reads as no stamp")
 
 
 func _unloaded_is_null() -> void:
@@ -87,20 +80,26 @@ func _unloaded_is_null() -> void:
 	bsp.free()
 
 
+## A caller that keeps the GoldSrcBSP in its tree instead gets the same metadata on it.
+func _build_mesh_carries_the_metadata() -> void:
+	var bsp := load_map()
+	if bsp == null:
+		return
+	bsp.build_mesh()
+	check_eq(bsp.get_meta("pipeline_id", ""), GoldSrcBSP.get_pipeline_id(), "build_mesh() stamps its own node")
+	check(bsp.has_meta("bsp_data") and bsp.has_meta("lightstyle_texture"),
+		"build_mesh() puts the rest of the root metadata on its own node too")
+
+
 ## The repo carries no WADs, so every one ww_ravine declares comes back missing.
 func _declared_wads() -> void:
-	var bsp := GoldSrcBSP.new()
-	track(bsp)
-	if bsp.load_bsp(MAP_PATH) != OK:
-		fail("could not load %s" % MAP_PATH)
+	var bsp := load_map()
+	if bsp == null:
 		return
 	var missing := bsp.load_declared_wads(PackedStringArray(["res://maps"]))
 	check(not missing.is_empty(), "ww_ravine declares WADs the repo does not carry")
 	check(missing.has("halflife.wad"), "declared paths come back as lowercase basenames")
-	var unique := {}
-	for name in missing:
-		unique[name] = true
-	check_eq(unique.size(), missing.size(), "each missing WAD is reported once")
+	check(Array(missing).all(func(n): return missing.count(n) == 1), "each missing WAD is reported once")
 
 
 func _properties() -> void:

@@ -843,8 +843,8 @@ String GoldSrcBSP::get_pipeline_id() {
 	return String(GOLDSRC_PIPELINE_ID);
 }
 
-// Read off the SceneState rather than instantiating: a PackedScene's node tree is not built
-// until instantiate(), so this stays cheap on a map of hundreds of MB.
+// Read off the SceneState, so the node tree is never built. The resources are: loading the
+// PackedScene in the first place deserializes every mesh and texture in it.
 String GoldSrcBSP::scene_pipeline_id(const Ref<PackedScene> &scene) {
 	if (scene.is_null()) return String();
 	Ref<SceneState> state = scene->get_state();
@@ -858,15 +858,10 @@ String GoldSrcBSP::scene_pipeline_id(const Ref<PackedScene> &scene) {
 	return String();
 }
 
-bool GoldSrcBSP::is_scene_stale(const Ref<PackedScene> &scene) {
-	return scene_pipeline_id(scene) != get_pipeline_id();
-}
-
 
 void GoldSrcBSP::_bind_methods() {
 	ClassDB::bind_static_method("GoldSrcBSP", D_METHOD("get_pipeline_id"), &GoldSrcBSP::get_pipeline_id);
 	ClassDB::bind_static_method("GoldSrcBSP", D_METHOD("scene_pipeline_id", "scene"), &GoldSrcBSP::scene_pipeline_id);
-	ClassDB::bind_static_method("GoldSrcBSP", D_METHOD("is_scene_stale", "scene"), &GoldSrcBSP::is_scene_stale);
 	ClassDB::bind_method(D_METHOD("load_bsp", "path"), &GoldSrcBSP::load_bsp);
 	ClassDB::bind_method(D_METHOD("load_bsp_from_data", "data"), &GoldSrcBSP::load_bsp_from_data);
 	ClassDB::bind_method(D_METHOD("get_bsp_blob"), &GoldSrcBSP::get_bsp_blob);
@@ -1038,19 +1033,18 @@ PackedStringArray GoldSrcBSP::load_declared_wads(const PackedStringArray &search
 		dirs.push_back("res://");
 	}
 
-	String wad_string;
-	Array entities = get_entities();
-	for (int64_t i = 0; i < entities.size(); i++) {
-		Dictionary ent = entities[i];
-		if (String(ent.get("classname", "")) == "worldspawn") {
-			wad_string = ent.get("wad", "");
-			break;
-		}
+	std::string wad_string;
+	for (const auto &ent : parser->get_data().entities) {
+		auto cn = ent.properties.find("classname");
+		if (cn == ent.properties.end() || cn->second != "worldspawn") continue;
+		auto wad = ent.properties.find("wad");
+		if (wad != ent.properties.end()) wad_string = wad->second;
+		break;
 	}
 
 	// Declared paths are the mapper's own machine's ("\half-life\valve\halflife.wad"), so
 	// only the basename means anything here.
-	PackedStringArray declared = wad_string.split(";", false);
+	PackedStringArray declared = String(wad_string.c_str()).split(";", false);
 	PackedStringArray seen;
 	for (int64_t i = 0; i < declared.size(); i++) {
 		String name = declared[i].replace("\\", "/").get_file().to_lower();
@@ -1058,15 +1052,16 @@ PackedStringArray GoldSrcBSP::load_declared_wads(const PackedStringArray &search
 		seen.push_back(name);
 
 		bool found = false;
-		for (int64_t d = 0; d < dirs.size() && !found; d++) {
+		for (int64_t d = 0; d < dirs.size(); d++) {
 			String full = dirs[d].path_join(name);
 			if (!FileAccess::file_exists(full)) continue;
-			found = true;
 			Ref<GoldSrcWAD> wad;
 			wad.instantiate();
 			if (wad->load_wad(full) == OK) {
 				add_wad(wad);
 			}
+			found = true;
+			break;
 		}
 		if (!found) missing.push_back(name);
 	}
@@ -1096,19 +1091,11 @@ Node3D *GoldSrcBSP::build_scene() {
 	String root_name = source_path.get_file().get_basename();
 	root->set_name(root_name.is_empty() ? String("bsp_root") : root_name);
 
-	// build_mesh() parked the stripped tree here; PackedByteArray is copy-on-write, so this
-	// is a refcount, not a second multi-MB copy.
-	PackedByteArray blob = get_meta("bsp_data", PackedByteArray());
-	if (!blob.is_empty()) root->set_meta("bsp_data", blob);
-	root->set_meta("pipeline_id", get_pipeline_id());
-
-	if (shader_lightstyles && lightstyle_image.is_valid() && lightstyle_texture.is_valid()) {
-		root->set_meta("lightstyle_image", lightstyle_image);
-		root->set_meta("lightstyle_texture", lightstyle_texture);
-	}
-	if (light_grid_cell_size > 0.0f) {
-		Dictionary grid = bake_light_grid(light_grid_cell_size);
-		if (!grid.is_empty()) root->set_meta("light_grid", grid);
+	// build_mesh() put everything a consumer reads off the map root in this node's metadata;
+	// all of it moves. (PackedByteArray and the resources are refcounted, so nothing is copied.)
+	TypedArray<StringName> keys = get_meta_list();
+	for (int64_t i = 0; i < keys.size(); i++) {
+		root->set_meta(keys[i], get_meta(keys[i]));
 	}
 
 	TypedArray<Node> children = get_children();
@@ -1476,8 +1463,10 @@ void GoldSrcBSP::build_mesh() {
 	// The stripped BSP rides on the tree root, once, for both the PVS reader and
 	// the hull trace. Bodies carry only a model index (see mark_bsp_carrier); a
 	// consumer walks up from a body to find this. Set before the model loop so
-	// nothing has to remember to do it afterwards.
+	// nothing has to remember to do it afterwards. The stamp naming the build that
+	// made the tree rides with it, so a cached scene can tell it is out of date.
 	set_meta("bsp_data", get_bsp_blob());
+	set_meta("pipeline_id", get_pipeline_id());
 
 	const auto &bsp_data = parser->get_data();
 	uint64_t t0 = Time::get_singleton()->get_ticks_msec();
@@ -2595,6 +2584,17 @@ void GoldSrcBSP::build_mesh() {
 		} else {
 			UtilityFunctions::printerr("[GoldSrc] Failed to compile texture animator script");
 		}
+	}
+
+	// The rest of the root metadata, for the same reason as bsp_data: set here, it reaches
+	// every consumer, whether it keeps this node or takes build_scene()'s root.
+	if (shader_lightstyles && lightstyle_image.is_valid()) {
+		set_meta("lightstyle_image", lightstyle_image);
+		set_meta("lightstyle_texture", lightstyle_texture);
+	}
+	if (light_grid_cell_size > 0.0f) {
+		Dictionary grid = bake_light_grid(light_grid_cell_size);
+		if (!grid.is_empty()) set_meta("light_grid", grid);
 	}
 }
 

@@ -32,10 +32,9 @@ public:
 	// Static: GDScript asks before it has any reason to instantiate a BSP.
 	static godot::String get_pipeline_id();
 	// The pipeline id a packed map scene was built by (its root's "pipeline_id" metadata), read
-	// off the scene state without instantiating it. "" when the scene predates the stamp.
+	// off the scene state without instantiating it. "" when the scene predates the stamp; a
+	// scene whose id differs from get_pipeline_id() came from another build and is stale.
 	static godot::String scene_pipeline_id(const godot::Ref<godot::PackedScene> &scene);
-	// True when a packed map came from a different build than this one and should be rebuilt.
-	static bool is_scene_stale(const godot::Ref<godot::PackedScene> &scene);
 
 	godot::Error load_bsp(const godot::String &path);
 	godot::Error load_bsp_from_data(const godot::PackedByteArray &data);
@@ -57,10 +56,10 @@ public:
 	// each declared path is used. Returns the names found in none of the directories.
 	godot::PackedStringArray load_declared_wads(const godot::PackedStringArray &search_dirs = godot::PackedStringArray());
 	void build_mesh();
-	// build_mesh(), then hand everything it built to a new plain Node3D that can be packed and
-	// saved as-is: no GDExtension types, owners set, and the root carrying the metadata a
-	// consumer needs — bsp_data, pipeline_id, the lightstyle image/texture (shader lightstyles
-	// only) and light_grid (light_grid_cell_size > 0). Leaves this node empty; free it after.
+	// build_mesh(), then hand everything it built — children and metadata (bsp_data,
+	// pipeline_id, the lightstyle image/texture with shader lightstyles, light_grid with a
+	// cell size) — to a new plain Node3D that can be packed and saved as-is: no GDExtension
+	// types, owners set. Leaves this node empty; free it after.
 	godot::Node3D *build_scene();
 
 	void set_scale_factor(float scale);
@@ -73,7 +72,7 @@ public:
 	void set_overbright(float value);
 	float get_overbright() const;
 
-	// Cell size, in GoldSrc units, of the light grid build_scene() bakes; 0 skips it.
+	// Cell size, in GoldSrc units, of the light grid build_mesh() bakes; 0 skips it.
 	void set_light_grid_cell_size(float value);
 	float get_light_grid_cell_size() const;
 
