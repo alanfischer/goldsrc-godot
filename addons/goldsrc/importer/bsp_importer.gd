@@ -1,6 +1,8 @@
 @tool
 extends EditorImportPlugin
 
+const BspSceneBuilder = preload("res://addons/goldsrc/bsp_scene_builder.gd")
+
 
 func _get_importer_name() -> String:
 	return "goldsrc.bsp"
@@ -38,6 +40,14 @@ func _get_import_order() -> int:
 	return 1 # Must run after MDL/SPR importers (order 0) so their scenes are available.
 
 
+# Bump when this script changes what an import produces; Godot reimports every .bsp whose
+# .import records a lower number. A changed C++ extension is caught separately, by the
+# pipeline_id check in plugin.gd, because Godot only reimports on a version that goes UP.
+# v1: scenes carry pipeline_id; lightstyle, overbright and light grid options.
+func _get_format_version() -> int:
+	return 1
+
+
 # Must run on main thread — ArrayMesh/ImageTexture serialization deadlocks
 # when ResourceSaver.save() is called from import worker threads.
 func _can_import_threaded() -> bool:
@@ -68,6 +78,28 @@ func _get_import_options(_path: String, _preset_index: int) -> Array[Dictionary]
 			"property_hint": PROPERTY_HINT_DIR,
 			"hint_string": "",
 		},
+		# Composite the lightmap styles in the world shader from a 64-entry lightstyle texture,
+		# so switchable and flickering lights can be animated at runtime. The texture rides in
+		# the scene's "lightstyle_texture" metadata.
+		{
+			"name": "shader_lightstyles",
+			"default_value": true,
+		},
+		# Lightmap multiplier on world materials (GoldSrc's is 2.0). 0 leaves them as built.
+		{
+			"name": "overbright",
+			"default_value": 0.0,
+			"property_hint": PROPERTY_HINT_RANGE,
+			"hint_string": "0.0,4.0,0.05",
+		},
+		# Bake an ambient-cube light grid into the scene's "light_grid" metadata, for lighting
+		# models by where they stand. Cell size in GoldSrc units; 0 skips the bake.
+		{
+			"name": "light_grid_cell_size",
+			"default_value": 0.0,
+			"property_hint": PROPERTY_HINT_RANGE,
+			"hint_string": "0.0,256.0,1.0",
+		},
 	]
 
 
@@ -77,109 +109,30 @@ func _get_option_visibility(_path: String, _option_name: StringName, _options: D
 
 func _import(source_file: String, save_path: String, options: Dictionary,
 		_platform_variants: Array[String], _gen_files: Array[String]) -> Error:
-	var wad_directory: String = options.get("wad_directory", "")
-	var scale_factor: float = options.get("scale_factor", 0.025)
-	var model_directory: String = options.get("model_directory", "")
+	# WAD resolution is the builder's: an explicit wad_directory loads every WAD in it,
+	# otherwise the WADs worldspawn declares are looked up beside the .bsp, then at res://,
+	# so a stock project textures correctly with no per-file import config.
+	var root := BspSceneBuilder.build(source_file, {
+		"scale_factor": options.get("scale_factor", 0.025),
+		"wad_directory": options.get("wad_directory", ""),
+		"shader_lightstyles": options.get("shader_lightstyles", true),
+		"overbright": options.get("overbright", 0.0),
+		"light_grid_cell_size": options.get("light_grid_cell_size", 0.0),
+	})
+	if root == null:
+		return ERR_PARSE_ERROR
 
-	var bsp := GoldSrcBSP.new()
-	bsp.set_scale_factor(scale_factor)
-
-	bsp.load_bsp(source_file)
-
-	# Resolve WAD files. If an explicit directory is given, scan it; otherwise
-	# read the WADs the BSP itself declares in worldspawn's "wad" key and look
-	# them up next to the .bsp and at the project root — so a stock project
-	# textures correctly with no per-file import config.
-	if wad_directory != "":
-		var dir := DirAccess.open(wad_directory)
-		if dir:
-			dir.list_dir_begin()
-			var file_name := dir.get_next()
-			while file_name != "":
-				if not dir.current_is_dir() and file_name.get_extension().to_lower() == "wad":
-					var wad := GoldSrcWAD.new()
-					var wad_path := wad_directory.path_join(file_name)
-					wad.load_wad(wad_path)
-					bsp.add_wad(wad)
-				file_name = dir.get_next()
-			dir.list_dir_end()
-		else:
-			push_warning("BSP Importer: Could not open WAD directory '%s'" % wad_directory)
-	else:
-		_load_declared_wads(bsp, source_file)
-
-	bsp.build_mesh()
-
-	# Reparent children to a plain Node3D so the saved scene is GDExtension-independent
-	var root := Node3D.new()
-	var root_name := source_file.get_file().get_basename()
-	if root_name.is_empty():
-		root_name = "bsp_root"
-	root.name = root_name
-
-	var children := bsp.get_children()
-	for child in children:
-		bsp.remove_child(child)
-		root.add_child(child)
-
-	_instantiate_entity_models(root, model_directory)
-
-	# Bake the stripped BSP (PLANES/NODES/CLIPNODES/LEAFS/VISIBILITY/MODELS) so
-	# VisibilityManager (PVS) and hull collision can both initialise from the .scn
-	# without the original .bsp. Collision bodies carry only a "bsp_model" index
-	# and walk up the tree to find this. build_mesh() already parked it on the BSP
-	# node, so read it back rather than rebuilding the whole payload —
-	# PackedByteArray is copy-on-write, so this is a refcount.
-	var bsp_blob: PackedByteArray = bsp.get_meta("bsp_data", PackedByteArray())
-	if not bsp_blob.is_empty():
-		root.set_meta("bsp_data", bsp_blob)
-
-	_set_owner_recursive(root, root)
+	_instantiate_entity_models(root, options.get("model_directory", ""))
+	BspSceneBuilder.set_owner_recursive(root, root)
 
 	var scene := PackedScene.new()
 	var pack_err := scene.pack(root)
+	root.free()
 	if pack_err != OK:
 		push_error("BSP Importer: Failed to pack scene: %s" % error_string(pack_err))
 		return pack_err
 
-	var save_err := ResourceSaver.save(scene, save_path + "." + _get_save_extension())
-	return save_err
-
-
-# Load the WADs a BSP declares in worldspawn's "wad" key (a ';'-separated list
-# of GoldSrc paths). Only the basename is used; each is searched for beside the
-# .bsp first, then at the project root. This mirrors the runtime WAD lookup so
-# the editor and the game texture maps identically without any import options.
-func _load_declared_wads(bsp: GoldSrcBSP, source_file: String) -> void:
-	var wad_string := ""
-	for ent in bsp.get_entities():
-		if ent.get("classname", "") == "worldspawn":
-			wad_string = ent.get("wad", "")
-			break
-
-	var search_dirs := [source_file.get_base_dir(), "res://"]
-	var seen := {}
-	for wad_path in wad_string.split(";", false):
-		var wad_name := wad_path.get_file().to_lower()
-		if wad_name.is_empty() or seen.has(wad_name):
-			continue
-		seen[wad_name] = true
-		for base in search_dirs:
-			var full_path: String = base.path_join(wad_name)
-			if FileAccess.file_exists(full_path):
-				var wad := GoldSrcWAD.new()
-				if wad.load_wad(full_path) == OK:
-					bsp.add_wad(wad)
-				break
-
-
-func _set_owner_recursive(node: Node, owner: Node) -> void:
-	for child in node.get_children():
-		child.owner = owner
-		# Don't recurse into instanced sub-scenes — their internal nodes belong
-		# to that scene, not to this one. Setting owner on the root is enough.
-		if child.scene_file_path == "":
-			_set_owner_recursive(child, owner)
+	return ResourceSaver.save(scene, save_path + "." + _get_save_extension())
 
 
 # Instantiate MDL/SPR scenes for each point entity that has a "model" key.

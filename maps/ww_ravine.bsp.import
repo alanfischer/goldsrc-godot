@@ -1,6 +1,7 @@
 [remap]
 
 importer="goldsrc.bsp"
+importer_version=1
 type="PackedScene"
 uid="uid://rw8pa31wjn4r"
 path="res://.godot/imported/ww_ravine.bsp-d55c9c2634fe61e517b2f226983f7b05.scn"
@@ -15,3 +16,6 @@ dest_files=["res://.godot/imported/ww_ravine.bsp-d55c9c2634fe61e517b2f226983f7b0
 wad_directory=""
 scale_factor=0.025
 model_directory=""
+shader_lightstyles=true
+overbright=0.0
+light_grid_cell_size=0.0

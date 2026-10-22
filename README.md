@@ -63,6 +63,51 @@ Drop files into a project and they auto-import:
 
 All imported scenes contain only standard Godot types (Node3D, MeshInstance3D, ArrayMesh, Skeleton3D, AnimationPlayer, StaticBody3D, AnimatableBody3D, etc.) and do **not** require the GDExtension at runtime.
 
+### BSP Import Options
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `scale_factor` | `0.025` | Godot units per GoldSrc unit. |
+| `wad_directory` | `""` | Load every `.wad` in this folder. Empty loads the WADs worldspawn declares, looked up beside the `.bsp` and then at `res://`. |
+| `model_directory` | `""` | Base path for entity `model` keys (see below). |
+| `shader_lightstyles` | `true` | Composite the four lightmap styles in the world shader, so styles can be animated at runtime. The 64-entry style texture rides in root metadata as `lightstyle_texture` (and `lightstyle_image`). |
+| `overbright` | `0.0` | Lightmap multiplier on world materials (GoldSrc's is 2.0). `0` leaves them as built: 2.0 in the lightstyle shader, 1.0 on the plain material path. |
+| `light_grid_cell_size` | `0.0` | Bake an ambient-cube light grid into root metadata as `light_grid`, for lighting models by position. Cell size in GoldSrc units; `0` skips it. |
+
+Every imported map's root is also stamped with `pipeline_id`, a hash of the extension's C++
+source. Godot only reimports a file when its source, its options or the importer's format
+version change, so a rebuilt extension would otherwise leave every map as the old build made
+it: on editor start the plugin compares each imported map's stamp with the running build's and
+reimports the ones that differ. It remembers the last id it checked, so an ordinary start skips
+the scan.
+
+### Runtime Conversion
+
+A game that converts maps at runtime instead (downloaded maps, a cache in `user://`) builds the
+same scene with `BspSceneBuilder`, which the importer itself uses, so both produce identical
+output. It takes the import options above as a Dictionary, plus `wad_search_dirs` and
+`extra_wads` for WAD lookup:
+
+```gdscript
+const BspSceneBuilder = preload("res://addons/goldsrc/bsp_scene_builder.gd")
+
+var root := BspSceneBuilder.build("res://maps/mymap.bsp", {
+    "overbright": 2.0,
+    "light_grid_cell_size": 32.0,
+})
+BspSceneBuilder.set_owner_recursive(root, root)
+var scene := PackedScene.new()
+scene.pack(root)
+ResourceSaver.save(scene, "user://maps/mymap.scn")
+
+# Later: is that cached scene from another build of the extension?
+if BspSceneBuilder.is_scene_stale(load("user://maps/mymap.scn")):
+    pass  # rebuild it
+```
+
+It has no `class_name` on purpose — preload it — because a global class name only resolves
+after an editor run has written Godot's class cache, which a fresh headless run has not.
+
 ### BSP Entity Model Instantiation
 
 The BSP importer automatically instantiates MDL/SPR scenes for point entities (monsters, props, sprites, etc.). Entity `model` keys are resolved as `res://` + the entity path, mirroring the GoldSrc layout at the project root — so `models/headcrab.mdl` maps to `res://models/headcrab.mdl`.
@@ -95,7 +140,7 @@ BSP maps are divided into convex regions called *leaves*. During map compilation
                   └─ VisibilityManager ready — no .bsp file needed at runtime
 ```
 
-The `bsp_data` blob is written by both the editor importer and the headless batch converter. Retrieve it from the instantiated map scene:
+The `bsp_data` blob is written by both the editor importer and `BspSceneBuilder` (runtime conversion). Retrieve it from the instantiated map scene:
 
 ```gdscript
 var pvs_blob: PackedByteArray = map_root.get_meta("bsp_data", PackedByteArray())
