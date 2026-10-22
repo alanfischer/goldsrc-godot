@@ -63,6 +63,25 @@ Drop files into a project and they auto-import:
 
 All imported scenes contain only standard Godot types (Node3D, MeshInstance3D, ArrayMesh, Skeleton3D, AnimationPlayer, StaticBody3D, AnimatableBody3D, etc.) and do **not** require the GDExtension at runtime.
 
+### BSP Import Options
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `scale_factor` | `0.025` | Godot units per GoldSrc unit. |
+| `wad_directory` | `""` | Load every `.wad` in this folder. Empty loads the WADs worldspawn declares, looked up beside the `.bsp` and then at `res://`. |
+| `model_directory` | `""` | Base path for entity `model` keys (see below). |
+| `shader_lightstyles` | `true` | Composite the four lightmap styles in the world shader, so styles can be animated at runtime. The 64-entry style texture rides in root metadata as `lightstyle_texture` (and `lightstyle_image`). |
+| `overbright` | `2.0` | Lightmap multiplier on world materials. GoldSrc's is 2.0. |
+| `light_grid_cell_size` | `0.0` | Bake an ambient-cube light grid into root metadata as `light_grid`, for lighting models by position. Cell size in GoldSrc units; `0` skips it. |
+
+Every imported map's root is also stamped with `pipeline_id`, a hash of the extension's C++
+source. Godot re-tests an import only when its source or `.import` file changes, so a rebuilt
+extension (or a changed importer) would otherwise leave every map as the old build made it. The
+importer records what built each map in the editor's project metadata, and the plugin reimports
+any map recorded with something else on editor start and after an extension hot reload. A
+project that converts maps itself at runtime and never loads the imported scenes can turn this
+off with the `goldsrc/import/reimport_on_extension_change` project setting.
+
 ### BSP Entity Model Instantiation
 
 The BSP importer automatically instantiates MDL/SPR scenes for point entities (monsters, props, sprites, etc.). Entity `model` keys are resolved as `res://` + the entity path, mirroring the GoldSrc layout at the project root — so `models/headcrab.mdl` maps to `res://models/headcrab.mdl`.
@@ -73,6 +92,30 @@ If the asset is not found, a small placeholder `BoxMesh` (0.3 m³) is placed at 
 1. Drop your game's `models/` and `sprites/` folders into the project root (`res://`).
 2. Godot auto-imports all `.mdl` and `.spr` files.
 3. Import your `.bsp` — entities with models/sprites appear in the scene automatically.
+
+### Runtime Conversion
+
+A game that converts maps at runtime instead (downloaded maps, a cache in `user://`) calls the
+same `build_scene()` the importer does, so both produce the same scene, less the entity models
+the importer adds:
+
+```gdscript
+var bsp := GoldSrcBSP.new()
+bsp.scale_factor = 0.025
+bsp.light_grid_cell_size = 32.0
+bsp.load_bsp("res://maps/mymap.bsp")
+bsp.load_declared_wads()          # beside the .bsp, then res://; returns any it couldn't find
+var root := bsp.build_scene()     # plain Node3D, owners set, metadata on the root
+bsp.free()
+
+var scene := PackedScene.new()
+scene.pack(root)
+ResourceSaver.save(scene, "user://maps/mymap.scn")
+
+# Later: was that cached scene built by another build of the extension?
+if GoldSrcBSP.scene_pipeline_id(load("user://maps/mymap.scn")) != GoldSrcBSP.get_pipeline_id():
+    pass  # rebuild it
+```
 
 ## PVS Runtime Visibility Culling
 
@@ -95,7 +138,7 @@ BSP maps are divided into convex regions called *leaves*. During map compilation
                   └─ VisibilityManager ready — no .bsp file needed at runtime
 ```
 
-The `bsp_data` blob is written by both the editor importer and the headless batch converter. Retrieve it from the instantiated map scene:
+The `bsp_data` blob is written by `build_mesh()`, so every converted map carries it. Retrieve it from the instantiated map scene:
 
 ```gdscript
 var pvs_blob: PackedByteArray = map_root.get_meta("bsp_data", PackedByteArray())
@@ -268,6 +311,14 @@ bsp.add_wad(wad)
 
 bsp.load_bsp("map.bsp")
 bsp.build_mesh()
+
+# build_scene() instead of build_mesh() gives a plain, owned Node3D to pack and save
+# (see Runtime Conversion). Both put the root metadata (bsp_data, pipeline_id, lightstyles,
+# light_grid) on the node they return or fill.
+bsp.overbright = 2.0                   # lightmap multiplier on world materials (default 2.0)
+bsp.light_grid_cell_size = 32.0        # bake light_grid; 0 (default) skips it
+var missing = bsp.load_declared_wads(["res://wads"])  # worldspawn's WADs; returns those not found
+var pipeline = GoldSrcBSP.scene_pipeline_id(packed_scene)  # "" before the stamp existed
 
 # Entity data is on the child nodes as metadata:
 for child in bsp.get_children():

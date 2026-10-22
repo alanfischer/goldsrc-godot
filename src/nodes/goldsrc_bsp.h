@@ -4,6 +4,7 @@
 #include <godot_cpp/classes/animatable_body3d.hpp>
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
+#include <godot_cpp/classes/packed_scene.hpp>
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/vector3.hpp>
@@ -30,6 +31,10 @@ public:
 	// one source tree, so a peer can compare it against the id baked into a .scn it downloaded.
 	// Static: GDScript asks before it has any reason to instantiate a BSP.
 	static godot::String get_pipeline_id();
+	// The pipeline id a packed map scene was built by (its root's "pipeline_id" metadata), read
+	// off the scene state without instantiating it. "" when the scene predates the stamp; a
+	// scene whose id differs from get_pipeline_id() came from another build and is stale.
+	static godot::String scene_pipeline_id(const godot::Ref<godot::PackedScene> &scene);
 
 	godot::Error load_bsp(const godot::String &path);
 	godot::Error load_bsp_from_data(const godot::PackedByteArray &data);
@@ -46,13 +51,30 @@ public:
 	void set_wad(const godot::Ref<GoldSrcWAD> &wad);
 	void add_wad(const godot::Ref<GoldSrcWAD> &wad);
 	godot::Array get_entities() const;
+	// After load_bsp(): load the WADs worldspawn's "wad" key declares, each from the first of
+	// search_dirs that holds it (empty = beside the .bsp, then res://). Only the basename of
+	// each declared path is used. Returns the names found in none of the directories.
+	godot::PackedStringArray load_declared_wads(const godot::PackedStringArray &search_dirs = godot::PackedStringArray());
 	void build_mesh();
+	// build_mesh(), then hand everything it built — children and metadata (bsp_data,
+	// pipeline_id, the lightstyle image/texture with shader lightstyles, light_grid with a
+	// cell size) — to a new plain Node3D that can be packed and saved as-is: no GDExtension
+	// types, owners set. Leaves this node empty; free it after.
+	godot::Node3D *build_scene();
 
 	void set_scale_factor(float scale);
 	float get_scale_factor() const;
 
 	void set_shader_lightstyles(bool enabled);
 	bool get_shader_lightstyles() const;
+
+	// Lightmap multiplier on world materials, read by build_mesh(). GoldSrc's is 2.0.
+	void set_overbright(float value);
+	float get_overbright() const;
+
+	// Cell size, in GoldSrc units, of the light grid build_mesh() bakes; 0 skips it.
+	void set_light_grid_cell_size(float value);
+	float get_light_grid_cell_size() const;
 
 	void set_lightstyle(int style_index, float brightness);
 	float get_lightstyle(int style_index) const;
@@ -136,5 +158,8 @@ private:
 	std::vector<godot::Ref<GoldSrcWAD>> wads;
 	mutable std::map<std::string, godot::Ref<godot::ImageTexture>> texture_cache;
 	float scale_factor = 0.025f; // GoldSrc units to Godot units
+	float overbright = 2.0f;
+	float light_grid_cell_size = 0.0f;
+	godot::String source_path; // what load_bsp() read; names the build_scene() root
 	bool mesh_built = false;
 };

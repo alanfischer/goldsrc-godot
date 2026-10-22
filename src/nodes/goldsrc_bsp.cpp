@@ -2,6 +2,7 @@
 #include "goldsrc_pipeline_id.h"
 
 #include <godot_cpp/classes/file_access.hpp>
+#include <godot_cpp/classes/scene_state.hpp>
 #include <godot_cpp/classes/gd_script.hpp>
 #include <godot_cpp/classes/mesh_instance3d.hpp>
 #include <godot_cpp/classes/array_mesh.hpp>
@@ -842,9 +843,25 @@ String GoldSrcBSP::get_pipeline_id() {
 	return String(GOLDSRC_PIPELINE_ID);
 }
 
+// Read off the SceneState, so the node tree is never built. The resources are: loading the
+// PackedScene in the first place deserializes every mesh and texture in it.
+String GoldSrcBSP::scene_pipeline_id(const Ref<PackedScene> &scene) {
+	if (scene.is_null()) return String();
+	Ref<SceneState> state = scene->get_state();
+	if (state.is_null() || state->get_node_count() == 0) return String();
+	const StringName property("metadata/pipeline_id");
+	for (int i = 0; i < state->get_node_property_count(0); i++) {
+		if (state->get_node_property_name(0, i) == property) {
+			return state->get_node_property_value(0, i);
+		}
+	}
+	return String();
+}
+
 
 void GoldSrcBSP::_bind_methods() {
 	ClassDB::bind_static_method("GoldSrcBSP", D_METHOD("get_pipeline_id"), &GoldSrcBSP::get_pipeline_id);
+	ClassDB::bind_static_method("GoldSrcBSP", D_METHOD("scene_pipeline_id", "scene"), &GoldSrcBSP::scene_pipeline_id);
 	ClassDB::bind_method(D_METHOD("load_bsp", "path"), &GoldSrcBSP::load_bsp);
 	ClassDB::bind_method(D_METHOD("load_bsp_from_data", "data"), &GoldSrcBSP::load_bsp_from_data);
 	ClassDB::bind_method(D_METHOD("get_bsp_blob"), &GoldSrcBSP::get_bsp_blob);
@@ -852,7 +869,9 @@ void GoldSrcBSP::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_wad", "wad"), &GoldSrcBSP::set_wad);
 	ClassDB::bind_method(D_METHOD("add_wad", "wad"), &GoldSrcBSP::add_wad);
 	ClassDB::bind_method(D_METHOD("get_entities"), &GoldSrcBSP::get_entities);
+	ClassDB::bind_method(D_METHOD("load_declared_wads", "search_dirs"), &GoldSrcBSP::load_declared_wads, DEFVAL(PackedStringArray()));
 	ClassDB::bind_method(D_METHOD("build_mesh"), &GoldSrcBSP::build_mesh);
+	ClassDB::bind_method(D_METHOD("build_scene"), &GoldSrcBSP::build_scene);
 	ClassDB::bind_method(D_METHOD("set_scale_factor", "scale"), &GoldSrcBSP::set_scale_factor);
 	ClassDB::bind_method(D_METHOD("get_scale_factor"), &GoldSrcBSP::get_scale_factor);
 
@@ -871,8 +890,14 @@ void GoldSrcBSP::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_shader_lightstyles", "enabled"), &GoldSrcBSP::set_shader_lightstyles);
 	ClassDB::bind_method(D_METHOD("get_shader_lightstyles"), &GoldSrcBSP::get_shader_lightstyles);
 	ClassDB::bind_method(D_METHOD("bake_light_grid", "cell_size"), &GoldSrcBSP::bake_light_grid);
+	ClassDB::bind_method(D_METHOD("set_overbright", "value"), &GoldSrcBSP::set_overbright);
+	ClassDB::bind_method(D_METHOD("get_overbright"), &GoldSrcBSP::get_overbright);
+	ClassDB::bind_method(D_METHOD("set_light_grid_cell_size", "value"), &GoldSrcBSP::set_light_grid_cell_size);
+	ClassDB::bind_method(D_METHOD("get_light_grid_cell_size"), &GoldSrcBSP::get_light_grid_cell_size);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "scale_factor"), "set_scale_factor", "get_scale_factor");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "shader_lightstyles"), "set_shader_lightstyles", "get_shader_lightstyles");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "overbright"), "set_overbright", "get_overbright");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "light_grid_cell_size"), "set_light_grid_cell_size", "get_light_grid_cell_size");
 }
 
 Error GoldSrcBSP::load_bsp(const String &path) {
@@ -893,6 +918,7 @@ Error GoldSrcBSP::load_bsp(const String &path) {
 	}
 
 	mesh_built = false;
+	source_path = path;
 	UtilityFunctions::print("[GoldSrc] Loaded BSP: ", path,
 		" (", (int64_t)parser->get_data().faces.size(), " faces, ",
 		(int64_t)parser->get_data().entities.size(), " entities)");
@@ -907,6 +933,7 @@ Error GoldSrcBSP::load_bsp_from_data(const PackedByteArray &data) {
 		return ERR_PARSE_ERROR;
 	}
 	mesh_built = false;
+	source_path = String();
 	return OK;
 }
 
@@ -978,6 +1005,107 @@ void GoldSrcBSP::set_shader_lightstyles(bool enabled) {
 
 bool GoldSrcBSP::get_shader_lightstyles() const {
 	return shader_lightstyles;
+}
+
+void GoldSrcBSP::set_overbright(float value) {
+	overbright = value;
+}
+
+float GoldSrcBSP::get_overbright() const {
+	return overbright;
+}
+
+void GoldSrcBSP::set_light_grid_cell_size(float value) {
+	light_grid_cell_size = value;
+}
+
+float GoldSrcBSP::get_light_grid_cell_size() const {
+	return light_grid_cell_size;
+}
+
+PackedStringArray GoldSrcBSP::load_declared_wads(const PackedStringArray &search_dirs) {
+	PackedStringArray missing;
+	if (!parser) return missing;
+
+	PackedStringArray dirs = search_dirs;
+	if (dirs.is_empty()) {
+		if (!source_path.is_empty()) dirs.push_back(source_path.get_base_dir());
+		dirs.push_back("res://");
+	}
+
+	std::string wad_string;
+	for (const auto &ent : parser->get_data().entities) {
+		auto cn = ent.properties.find("classname");
+		if (cn == ent.properties.end() || cn->second != "worldspawn") continue;
+		auto wad = ent.properties.find("wad");
+		if (wad != ent.properties.end()) wad_string = wad->second;
+		break;
+	}
+
+	// Declared paths are the mapper's own machine's ("\half-life\valve\halflife.wad"), so
+	// only the basename means anything here.
+	PackedStringArray declared = String(wad_string.c_str()).split(";", false);
+	PackedStringArray seen;
+	for (int64_t i = 0; i < declared.size(); i++) {
+		String name = declared[i].replace("\\", "/").get_file().to_lower();
+		if (name.is_empty() || seen.has(name)) continue;
+		seen.push_back(name);
+
+		bool found = false;
+		for (int64_t d = 0; d < dirs.size(); d++) {
+			String full = dirs[d].path_join(name);
+			if (!FileAccess::file_exists(full)) continue;
+			Ref<GoldSrcWAD> wad;
+			wad.instantiate();
+			if (wad->load_wad(full) == OK) {
+				add_wad(wad);
+			}
+			found = true;
+			break;
+		}
+		if (!found) missing.push_back(name);
+	}
+	return missing;
+}
+
+static void set_owner_recursive(Node *node, Node *owner) {
+	TypedArray<Node> children = node->get_children();
+	for (int64_t i = 0; i < children.size(); i++) {
+		Node *child = Object::cast_to<Node>(children[i]);
+		child->set_owner(owner);
+		// An instanced sub-scene keeps its own internals; owning its root is enough.
+		if (child->get_scene_file_path().is_empty()) {
+			set_owner_recursive(child, owner);
+		}
+	}
+}
+
+Node3D *GoldSrcBSP::build_scene() {
+	if (!parser) {
+		UtilityFunctions::printerr("[GoldSrc] build_scene: no BSP loaded");
+		return nullptr;
+	}
+	build_mesh();
+
+	Node3D *root = memnew(Node3D);
+	String root_name = source_path.get_file().get_basename();
+	root->set_name(root_name.is_empty() ? String("bsp_root") : root_name);
+
+	// build_mesh() put everything a consumer reads off the map root in this node's metadata;
+	// all of it moves. (PackedByteArray and the resources are refcounted, so nothing is copied.)
+	TypedArray<StringName> keys = get_meta_list();
+	for (int64_t i = 0; i < keys.size(); i++) {
+		root->set_meta(keys[i], get_meta(keys[i]));
+	}
+
+	TypedArray<Node> children = get_children();
+	for (int64_t i = 0; i < children.size(); i++) {
+		Node *child = Object::cast_to<Node>(children[i]);
+		remove_child(child);
+		root->add_child(child);
+	}
+	set_owner_recursive(root, root);
+	return root;
 }
 
 int GoldSrcBSP::point_contents(Vector3 godot_pos) const {
@@ -1335,8 +1463,10 @@ void GoldSrcBSP::build_mesh() {
 	// The stripped BSP rides on the tree root, once, for both the PVS reader and
 	// the hull trace. Bodies carry only a model index (see mark_bsp_carrier); a
 	// consumer walks up from a body to find this. Set before the model loop so
-	// nothing has to remember to do it afterwards.
+	// nothing has to remember to do it afterwards. The stamp naming the build that
+	// made the tree rides with it, so a cached scene can tell it is out of date.
 	set_meta("bsp_data", get_bsp_blob());
+	set_meta("pipeline_id", get_pipeline_id());
 
 	const auto &bsp_data = parser->get_data();
 	uint64_t t0 = Time::get_singleton()->get_ticks_msec();
@@ -2186,7 +2316,7 @@ void GoldSrcBSP::build_mesh() {
 				}
 
 				material->set_shader_parameter("lightstyle_tex", lightstyle_texture);
-				material->set_shader_parameter("overbright", 2.0f);
+				material->set_shader_parameter("overbright", overbright);
 
 				arr_mesh->surface_set_material(0, material);
 				material_cache[cache_key] = material;
@@ -2212,6 +2342,10 @@ void GoldSrcBSP::build_mesh() {
 					material->set_texture(BaseMaterial3D::TEXTURE_DETAIL_ALBEDO, page->blended);
 					material->set_detail_blend_mode(BaseMaterial3D::BLEND_MODE_MUL);
 					material->set_detail_uv(BaseMaterial3D::DETAIL_UV_2);
+					// The detail pass multiplies the lightmap in, so overbright rides the albedo.
+					Color albedo = material->get_albedo();
+					material->set_albedo(Color(albedo.r * overbright, albedo.g * overbright,
+							albedo.b * overbright, albedo.a));
 				}
 
 				arr_mesh->surface_set_material(0, material);
@@ -2450,6 +2584,17 @@ void GoldSrcBSP::build_mesh() {
 		} else {
 			UtilityFunctions::printerr("[GoldSrc] Failed to compile texture animator script");
 		}
+	}
+
+	// The rest of the root metadata, for the same reason as bsp_data: set here, it reaches
+	// every consumer, whether it keeps this node or takes build_scene()'s root.
+	if (shader_lightstyles && lightstyle_image.is_valid()) {
+		set_meta("lightstyle_image", lightstyle_image);
+		set_meta("lightstyle_texture", lightstyle_texture);
+	}
+	if (light_grid_cell_size > 0.0f) {
+		Dictionary grid = bake_light_grid(light_grid_cell_size);
+		if (!grid.is_empty()) set_meta("light_grid", grid);
 	}
 }
 
