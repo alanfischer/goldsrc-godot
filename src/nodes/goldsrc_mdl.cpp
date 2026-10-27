@@ -592,26 +592,25 @@ bool keys_close(const Vector3 &a, const Vector3 &b) { return a.distance_to(b) <=
 // Not angle_to(): its acos of a dot product near 1 is off by ~0.04 degrees in float, nearly the
 // whole tolerance. Twice the half-angle of the relative rotation stays exact down to zero.
 bool keys_close(const Quaternion &a, const Quaternion &b) {
-	Quaternion q = a.normalized().inverse() * b.normalized();
+	Quaternion q = a.inverse() * b;
 	return 2 * Math::atan2(Vector3(q.x, q.y, q.z).length(), Math::abs(q.w)) <= KEY_ROT_TOLERANCE;
 }
 Vector3 key_blend(const Vector3 &a, const Vector3 &b, real_t w) { return a.lerp(b, w); }
 Quaternion key_blend(const Quaternion &a, const Quaternion &b, real_t w) { return a.slerp(b, w); }
 
-// Indices of the keys to keep: each dropped key is reproduced within tolerance by blending
-// the kept keys either side of it, the way the track interpolates. An MDL keys every bone on
-// every frame, and most bones spend most frames still or moving steadily, so this drops ~4 in
-// 5. Hand-rolled because Animation::optimize() drops the middle key of an out-and-back swing
-// (A,B,A), losing e.g. a 46 degree arm flick.
+// Frames of the evenly spaced keys to keep: each dropped key is reproduced within tolerance by
+// blending the kept keys either side of it, the way the track interpolates. An MDL keys every
+// bone on every frame, and most bones spend most frames still or moving steadily, so this drops
+// ~4 in 5. Hand-rolled because Animation::optimize() drops the middle key of an out-and-back
+// swing (A,B,A), losing e.g. a 46 degree arm flick.
 template <typename T>
-vector<int> reduce_keys(const vector<float> &times, const vector<T> &vals) {
+vector<int> reduce_keys(const vector<T> &vals) {
 	const int n = (int)vals.size();
 	vector<int> keep{ 0 };
-	if (n < 2) return keep;
 	int anchor = 0;
 	for (int i = 1; i < n - 1; i++) {
 		for (int k = anchor + 1; k <= i; k++) {
-			real_t w = (times[k] - times[anchor]) / (times[i + 1] - times[anchor]);
+			real_t w = real_t(k - anchor) / real_t(i + 1 - anchor);
 			if (!keys_close(key_blend(vals[anchor], vals[i + 1], w), vals[k])) {
 				keep.push_back(i);
 				anchor = i;
@@ -672,20 +671,18 @@ void GoldSrcMDL::build_animations() {
 			int rot_track = anim->add_track(Animation::TYPE_ROTATION_3D);
 			anim->track_set_path(rot_track, skel_path);
 
-			vector<float> times;
 			vector<Vector3> positions;
 			vector<Quaternion> rotations;
-			for (int f = 0; f < (int)seq.frames.size(); f++) {
-				Transform3D t = compute_bone_transform(b, seq.frames[f]);
-				times.push_back((float)f / seq.fps);
+			for (const auto &frame : seq.frames) {
+				Transform3D t = compute_bone_transform(b, frame);
 				positions.push_back(t.origin);
 				rotations.push_back(t.basis.get_quaternion());
 			}
-			for (int k : reduce_keys(times, positions)) {
-				anim->position_track_insert_key(pos_track, times[k], positions[k]);
+			for (int f : reduce_keys(positions)) {
+				anim->position_track_insert_key(pos_track, (float)f / seq.fps, positions[f]);
 			}
-			for (int k : reduce_keys(times, rotations)) {
-				anim->rotation_track_insert_key(rot_track, times[k], rotations[k]);
+			for (int f : reduce_keys(rotations)) {
+				anim->rotation_track_insert_key(rot_track, (float)f / seq.fps, rotations[f]);
 			}
 		}
 
