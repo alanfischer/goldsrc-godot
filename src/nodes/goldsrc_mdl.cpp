@@ -8,7 +8,7 @@
 #include <godot_cpp/classes/animation_library.hpp>
 #include <godot_cpp/classes/standard_material3d.hpp>
 #include <godot_cpp/classes/image.hpp>
-#include <godot_cpp/classes/image_texture.hpp>
+#include <godot_cpp/classes/portable_compressed_texture2d.hpp>
 #include <godot_cpp/classes/bone_attachment3d.hpp>
 #include <godot_cpp/classes/area3d.hpp>
 #include <godot_cpp/classes/collision_shape3d.hpp>
@@ -373,7 +373,6 @@ void GoldSrcMDL::build_hitboxes() {
 void GoldSrcMDL::build_meshes() {
 	const auto &mdl = parser->get_data();
 
-	vector<Ref<ImageTexture>> godot_textures;
 	vector<Ref<StandardMaterial3D>> materials;
 
 	for (const auto &tex : mdl.textures) {
@@ -387,8 +386,13 @@ void GoldSrcMDL::build_meshes() {
 		// cannot bleed transparent-black in — and without one a player across the map is a
 		// crawling mess of aliased texels.
 		img->generate_mipmaps();
-		Ref<ImageTexture> gtex = ImageTexture::create_from_image(img);
-		godot_textures.push_back(gtex);
+		// Lossless WebP, mip chain included: a saved scene holds ~1/6 the bytes of a raw
+		// RGBA8 ImageTexture and loads back bit-identical. The buffer is kept so a scene built
+		// outside the editor (the runtime converter) can still be saved.
+		Ref<PortableCompressedTexture2D> gtex;
+		gtex.instantiate();
+		gtex->set_keep_compressed_buffer(true);
+		gtex->create_from_image(img, PortableCompressedTexture2D::COMPRESSION_MODE_LOSSLESS);
 
 		Ref<StandardMaterial3D> mat;
 		mat.instantiate();
@@ -578,6 +582,49 @@ void GoldSrcMDL::build_meshes() {
 	}
 }
 
+namespace {
+
+// Far below what reads on screen: 0.5 mm at the default 0.025 scale, and 0.05 degrees.
+constexpr real_t KEY_POS_TOLERANCE = 0.0005;
+constexpr real_t KEY_ROT_TOLERANCE = 0.05 * Math_PI / 180.0;
+
+bool keys_close(const Vector3 &a, const Vector3 &b) { return a.distance_to(b) <= KEY_POS_TOLERANCE; }
+// Not angle_to(): its acos of a dot product near 1 is off by ~0.04 degrees in float, nearly the
+// whole tolerance. Twice the half-angle of the relative rotation stays exact down to zero.
+bool keys_close(const Quaternion &a, const Quaternion &b) {
+	Quaternion q = a.inverse() * b;
+	return 2 * Math::atan2(Vector3(q.x, q.y, q.z).length(), Math::abs(q.w)) <= KEY_ROT_TOLERANCE;
+}
+Vector3 key_blend(const Vector3 &a, const Vector3 &b, real_t w) { return a.lerp(b, w); }
+Quaternion key_blend(const Quaternion &a, const Quaternion &b, real_t w) { return a.slerp(b, w); }
+
+// Frames of the evenly spaced keys to keep: each dropped key is reproduced within tolerance by
+// blending the kept keys either side of it, the way the track interpolates. An MDL keys every
+// bone on every frame, and most bones spend most frames still or moving steadily, so this drops
+// ~4 in 5. Hand-rolled because Animation::optimize() drops the middle key of an out-and-back
+// swing (A,B,A), losing e.g. a 46 degree arm flick.
+template <typename T>
+vector<int> reduce_keys(const vector<T> &vals) {
+	const int n = (int)vals.size();
+	vector<int> keep{ 0 };
+	int anchor = 0;
+	for (int i = 1; i < n - 1; i++) {
+		for (int k = anchor + 1; k <= i; k++) {
+			real_t w = real_t(k - anchor) / real_t(i + 1 - anchor);
+			if (!keys_close(key_blend(vals[anchor], vals[i + 1], w), vals[k])) {
+				keep.push_back(i);
+				anchor = i;
+				break;
+			}
+		}
+	}
+	keep.push_back(n - 1);
+	if (keep.size() == 2 && keys_close(vals[0], vals[n - 1])) keep.pop_back();
+	return keep;
+}
+
+} // namespace
+
 void GoldSrcMDL::build_animations() {
 	const auto &mdl = parser->get_data();
 	if (mdl.sequences.empty() || !skeleton) return;
@@ -624,12 +671,18 @@ void GoldSrcMDL::build_animations() {
 			int rot_track = anim->add_track(Animation::TYPE_ROTATION_3D);
 			anim->track_set_path(rot_track, skel_path);
 
-			for (int f = 0; f < (int)seq.frames.size(); f++) {
-				float time = (float)f / seq.fps;
-				Transform3D t = compute_bone_transform(b, seq.frames[f]);
-
-				anim->position_track_insert_key(pos_track, time, t.origin);
-				anim->rotation_track_insert_key(rot_track, time, t.basis.get_quaternion());
+			vector<Vector3> positions;
+			vector<Quaternion> rotations;
+			for (const auto &frame : seq.frames) {
+				Transform3D t = compute_bone_transform(b, frame);
+				positions.push_back(t.origin);
+				rotations.push_back(t.basis.get_quaternion());
+			}
+			for (int f : reduce_keys(positions)) {
+				anim->position_track_insert_key(pos_track, (float)f / seq.fps, positions[f]);
+			}
+			for (int f : reduce_keys(rotations)) {
+				anim->rotation_track_insert_key(rot_track, (float)f / seq.fps, rotations[f]);
 			}
 		}
 
