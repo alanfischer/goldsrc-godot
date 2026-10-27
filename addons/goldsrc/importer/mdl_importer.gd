@@ -31,14 +31,15 @@ func _get_preset_name(preset_index: int) -> String:
 
 
 ## What shape of scene this importer builds. 1: meshes merged into one MeshInstance3D per
-## bodypart. 2: triangle corners welded back into shared vertices.
+## bodypart. 2: triangle corners welded back into shared vertices. 3: animation keys cut to the
+## ones interpolation can't reproduce, skins stored as lossless WebP.
 ##
 ## Godot records it in each .import file but does not act on a bump — neither --import nor an
 ## editor session reimports on its own (checked on 4.7). Changing the built scene means clearing
 ## .godot/imported/*.mdl-* by hand; the number is here so it is visible which build a cache came
 ## from.
 func _get_format_version() -> int:
-	return 2
+	return 3
 
 
 func _get_priority() -> float:
