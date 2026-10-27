@@ -69,6 +69,7 @@ All imported scenes contain only standard Godot types (Node3D, MeshInstance3D, A
 |--------|---------|--------|
 | `scale_factor` | `0.025` | Godot units per GoldSrc unit. |
 | `wad_directory` | `""` | Load every `.wad` in this folder. Empty loads the WADs worldspawn declares, looked up beside the `.bsp` and then at `res://`. |
+| `fallback_wads` | `""` | Comma-separated WADs searched after the declared ones, for stand-ins for WADs you can't ship. Set it for every map under `[importer_defaults]` in `project.godot`. Missing declared WADs aren't warned about while one loads. |
 | `model_directory` | `""` | Base path for entity `model` keys (see below). |
 | `shader_lightstyles` | `true` | Composite the four lightmap styles in the world shader, so styles can be animated at runtime. The 64-entry style texture rides in root metadata as `lightstyle_texture` (and `lightstyle_image`). |
 | `overbright` | `2.0` | Lightmap multiplier on world materials. GoldSrc's is 2.0. |

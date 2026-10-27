@@ -69,6 +69,13 @@ func _get_import_options(_path: String, _preset_index: int) -> Array[Dictionary]
 			"property_hint": PROPERTY_HINT_DIR,
 			"hint_string": "",
 		},
+		# Comma-separated WAD paths searched after the declared ones, for a project that ships
+		# its own stand-ins for WADs it can't redistribute. Set it project-wide in
+		# [importer_defaults]. A declared WAD that's present still wins.
+		{
+			"name": "fallback_wads",
+			"default_value": "",
+		},
 		{
 			"name": "scale_factor",
 			"default_value": 0.025,
@@ -133,8 +140,11 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 	if wad_directory != "":
 		_load_wad_directory(bsp, wad_directory)
 	else:
-		for missing in bsp.load_declared_wads():
-			push_warning("BSP Importer: WAD '%s' not found for %s" % [missing, source_file])
+		var missing := bsp.load_declared_wads()
+		var fallbacks := _load_fallback_wads(bsp, options.get("fallback_wads", ""))
+		if fallbacks == 0:
+			for name in missing:
+				push_warning("BSP Importer: WAD '%s' not found for %s" % [name, source_file])
 
 	var root := bsp.build_scene()
 	bsp.free()
@@ -151,6 +161,19 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 	if save_err == OK:
 		EditorInterface.get_editor_settings().set_project_metadata(IMPORTED_WITH, source_file, import_key())
 	return save_err
+
+
+func _load_fallback_wads(bsp: GoldSrcBSP, paths: String) -> int:
+	var loaded := 0
+	for path in paths.split(",", false):
+		path = path.strip_edges()
+		var wad := GoldSrcWAD.new()
+		if wad.load_wad(path) == OK:
+			bsp.add_wad(wad)
+			loaded += 1
+		else:
+			push_warning("BSP Importer: fallback WAD '%s' could not be loaded" % path)
+	return loaded
 
 
 func _load_wad_directory(bsp: GoldSrcBSP, wad_directory: String) -> void:
