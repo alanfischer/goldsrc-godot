@@ -169,11 +169,10 @@ uniform sampler2D lm_layer2 : filter_linear;
 uniform sampler2D lm_layer3 : filter_linear;
 uniform sampler2D lightstyle_tex : filter_nearest;
 uniform float overbright = 2.0;
-// The sky's share of each luxel's light (GoldSrcBSP::compute_sun_fractions), and how far it
-// is turned toward night_tint, a linear-light multiplier. Black leaves the lightmap as baked.
+// The sky's share of each luxel's light (GoldSrcBSP::compute_sun_fractions), and a linear-light
+// multiplier on that share: night, or a fade on a sun that shares style 0 with the lights.
 uniform sampler2D lm_sun : filter_linear, hint_default_black;
-uniform float night = 0.0;
-uniform vec3 night_tint = vec3(1.0);
+uniform vec3 sky_light = vec3(1.0);
 // GoldSrc composited texture x lightmap on 8-bit gamma values. The RD renderers
 // (forward+/mobile) shade in linear space and encode on output, gl_compatibility
 // shades in sRGB and does not, so the same expression lands in a different space
@@ -207,7 +206,7 @@ void fragment() {
 	         + texture(lm_layer2, UV2).rgb * b2
 	         + texture(lm_layer3, UV2).rgb * b3;
 	// Lightmaps hold pow(light, 0.55), so the share is scaled before that curve, not after.
-	lm *= pow(mix(vec3(1.0), night_tint, texture(lm_sun, UV2).r * night), vec3(0.55));
+	lm *= pow(mix(vec3(1.0), sky_light, texture(lm_sun, UV2).r), vec3(0.55));
 
 	// ALBEDO stays in the renderer's native space so real-time lights stay correct;
 	// only the lightmap term needs the gamma-space treatment. min() before the
@@ -232,11 +231,10 @@ uniform sampler2D lm_layer2 : filter_linear;
 uniform sampler2D lm_layer3 : filter_linear;
 uniform sampler2D lightstyle_tex : filter_nearest;
 uniform float overbright = 2.0;
-// The sky's share of each luxel's light (GoldSrcBSP::compute_sun_fractions), and how far it
-// is turned toward night_tint, a linear-light multiplier. Black leaves the lightmap as baked.
+// The sky's share of each luxel's light (GoldSrcBSP::compute_sun_fractions), and a linear-light
+// multiplier on that share: night, or a fade on a sun that shares style 0 with the lights.
 uniform sampler2D lm_sun : filter_linear, hint_default_black;
-uniform float night = 0.0;
-uniform vec3 night_tint = vec3(1.0);
+uniform vec3 sky_light = vec3(1.0);
 // GoldSrc composited texture x lightmap on 8-bit gamma values. The RD renderers
 // (forward+/mobile) shade in linear space and encode on output, gl_compatibility
 // shades in sRGB and does not, so the same expression lands in a different space
@@ -271,7 +269,7 @@ void fragment() {
 	         + texture(lm_layer2, UV2).rgb * b2
 	         + texture(lm_layer3, UV2).rgb * b3;
 	// Lightmaps hold pow(light, 0.55), so the share is scaled before that curve, not after.
-	lm *= pow(mix(vec3(1.0), night_tint, texture(lm_sun, UV2).r * night), vec3(0.55));
+	lm *= pow(mix(vec3(1.0), sky_light, texture(lm_sun, UV2).r), vec3(0.55));
 
 	// ALBEDO stays in the renderer's native space so real-time lights stay correct;
 	// only the lightmap term needs the gamma-space treatment. min() before the
@@ -503,9 +501,9 @@ uniform float tint_ceiling : hint_range(0.0, 1.0) = 0.55;  // deep water is neve
 // thing the water already had. Depth should colour the water, not replace it.
 uniform float absorb_distance : hint_range(0.1, 40.0) = 14.0;
 uniform float foam_width : hint_range(0.0, 2.0) = 0.35;       // units of shore before it whitens
-// Liquid is fullbright, so it has no lightmap for night to turn down; this dims it whole.
-// Lava keeps its glow.
-uniform vec3 night_dim = vec3(1.0);
+// Liquid is fullbright, so it has no lightmap share to turn down: the world's sky_light dims
+// it whole. Lava keeps its glow.
+uniform vec3 sky_light = vec3(1.0);
 
 varying vec3 wave_normal;
 )" GOLDSRC_WATER_WAVE_GLSL R"(
@@ -579,7 +577,7 @@ void fragment() {
 		}
 	}
 	if (liquid_type != 2) {
-		ALBEDO *= night_dim;
+		ALBEDO *= pow(sky_light, vec3(0.55));
 	}
 }
 )";
