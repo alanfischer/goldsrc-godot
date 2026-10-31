@@ -105,6 +105,7 @@ public:
 	// Bake ambient cube light grid from BSP lightmaps.
 	// Returns Dictionary {grid_origin: Vector3, grid_dims: Vector3i, cell_size: float, images: Array[Image]}
 	// Images are 6 RGB8 images (one per axis: +X, -X, +Y, -Y, +Z, -Z in Godot coords).
+	// sun_slices, on maps with a light_environment: L8 slices of the sky's share of each cell.
 	godot::Dictionary bake_light_grid(float cell_size_gs = 32.0f) const;
 
 private:
@@ -125,6 +126,8 @@ private:
 	void build_brush_convex(godot::Node3D *parent, int model_index,
 		int contents_filter = 0);
 	void rebake_lightstyle(int style_index);
+	// Fills face_sun_fraction. See the .cpp for how the sky's share is found.
+	void compute_sun_fractions();
 
 	void _collect_leaves_in_aabb(int node_idx, const float gs_min[3], const float gs_max[3],
 		godot::PackedInt32Array &result) const;
@@ -148,6 +151,9 @@ private:
 	std::vector<FaceLightmapInfo> face_lm_info;
 	std::vector<LightmapAtlasState> lm_atlases;
 	float lightstyle_values[64];
+	// Per parsed face, per luxel: the share of its light that came from the sky, 0..255.
+	// Empty when the map has no light_environment.
+	std::vector<std::vector<uint8_t>> face_sun_fraction;
 
 	// Shader-based lightstyle members
 	bool shader_lightstyles = true;

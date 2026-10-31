@@ -22,6 +22,7 @@ A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
 - Entity properties stored as metadata on each node — classname, targetname, origin, angles, and all other key-value pairs are accessible from GDScript via `node.get_meta("entity")`
 - Entity lump parsing (key-value dictionaries accessible from GDScript)
 - Ambient cube light grid baking — traces rays in 6 directions from a 3D grid through the BSP tree, samples lightmaps at hit points, and outputs slice images for `ImageTexture3D` construction. Includes flood-fill of solid cells to prevent trilinear interpolation artifacts. Provides spatially-varying directional ambient lighting for dynamic models
+- Sun fraction — the share of each luxel's light that came from the sky, so a game can turn the sun down (night) and leave the map's own lights alone. hlrad bakes both into style 0; when the `light_environment` has a style of its own the split is exact, otherwise each luxel is re-lit by sun, sky and point-light traces and the weights that best rebuild the real lightmap decide it. Bound to world materials as `lm_sun` (turned with the `night` and `night_tint` uniforms) and added to the light grid as `sun_slices`
 
 ### MDL Models
 - Skeleton3D with full bone hierarchy
@@ -359,6 +360,8 @@ var grid = bsp.bake_light_grid(32.0)  # cell size in GoldSrc units
 #   dir_slices: Array of 6 Arrays of Images — one per axis direction
 #     (+X, -X, +Y, -Y, +Z, -Z), each array contains depth-slice Images
 #     for ImageTexture3D construction
+#   sun_slices: Array of L8 Images — the sky's share of each cell's light
+#     (only on maps with a light_environment)
 ```
 
 ### VisibilityManager
