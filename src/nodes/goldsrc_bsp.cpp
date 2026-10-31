@@ -306,12 +306,21 @@ shader_type spatial;
 render_mode unshaded, shadows_disabled, ambient_light_disabled, depth_draw_never;
 
 uniform samplerCube sky_cubemap : source_color, hint_default_black;
+// A flash lighting the sky from within, brightest toward flash_dir (world space): what lights
+// up the clouds behind a lightning strike. Black is no flash.
+uniform vec3 flash_color = vec3(0.0);
+uniform vec3 flash_dir = vec3(0.0, 1.0, 0.0);
 
 void fragment() {
 	// Reconstruct world-space eye direction matching sky_cubemap.gdshader EYEDIR.
 	// VIEW points from fragment toward camera (view space); negate and rotate to world.
 	vec3 eye_dir = normalize((INV_VIEW_MATRIX * vec4(-VIEW, 0.0)).xyz);
-	ALBEDO = texture(sky_cubemap, vec3(-eye_dir.x, eye_dir.y, eye_dir.z)).rgb;
+	vec3 col = texture(sky_cubemap, vec3(-eye_dir.x, eye_dir.y, eye_dir.z)).rgb;
+	// Clouds have something to light and open sky only a glow, so it multiplies and then adds.
+	float toward = max(dot(eye_dir, normalize(flash_dir)), 0.0);
+	col *= vec3(1.0) + flash_color * (1.0 + 3.0 * pow(toward, 3.0));
+	col += flash_color * (0.3 + 0.9 * pow(toward, 4.0));
+	ALBEDO = col;
 }
 )";
 
