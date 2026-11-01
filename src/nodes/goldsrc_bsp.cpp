@@ -21,6 +21,7 @@
 #include <godot_cpp/classes/worker_thread_pool.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <godot_cpp/classes/geometry2d.hpp>
@@ -1501,9 +1502,12 @@ void GoldSrcBSP::build_mesh() {
 	if (!shader_lightstyles) {
 		face_lm_info.resize(bsp_data.faces.size());
 	}
-	if (shader_lightstyles) {
+	// Only a shader hook reads it.
+	if (shader_lightstyles && !shader_hook.is_empty()) {
 		compute_sun_fractions();
 		log_timing("sun fraction");
+	} else {
+		face_sun_fraction.clear();
 	}
 
 	// Count faces that actually receive a lightmap, independent of which path
@@ -3311,9 +3315,9 @@ static SunLight find_sun(const goldsrc::BSPData &bsp_data) {
 		}
 
 		float yaw_deg = 0, pitch_deg = 0;
+		float a0 = 0, a1 = 0;
 		auto ap = ent.properties.find("angles");
 		if (ap != ent.properties.end()) {
-			float a0, a1;
 			if (sscanf(ap->second.c_str(), "%f %f", &a0, &a1) >= 2)
 				yaw_deg = a1;
 		} else {
@@ -3321,9 +3325,12 @@ static SunLight find_sun(const goldsrc::BSPData &bsp_data) {
 			if (angp != ent.properties.end())
 				yaw_deg = atof(angp->second.c_str());
 		}
+		// As hlrad: a missing or zero pitch falls back to angles[0].
 		auto pp = ent.properties.find("pitch");
 		if (pp != ent.properties.end())
 			pitch_deg = atof(pp->second.c_str());
+		if (pitch_deg == 0)
+			pitch_deg = a0;
 
 		float pitch_rad = pitch_deg * 3.14159265f / 180.0f;
 		float yaw_rad = yaw_deg * 3.14159265f / 180.0f;
@@ -3379,6 +3386,7 @@ struct SunFractionJob {
 	const SunLight *sun;
 	const vector<PointLight> *lights;
 	const vector<vector<bool>> *light_pvs;
+	const vector<array<float, 3>> *model_origins;
 	int head_node;
 	vector<vector<LuxelTerms>> *terms;
 };
@@ -3389,6 +3397,23 @@ static inline float lin(uint8_t v) {
 
 static inline float luxel_lum(const vector<uint8_t> &lighting, size_t ofs) {
 	return (lin(lighting[ofs]) + lin(lighting[ofs + 1]) + lin(lighting[ofs + 2])) / 3.0f;
+}
+
+// A sun fraction is the sky's share of every style a luxel has; this is its share of the first
+// layer alone, the one the light grid samples.
+static float layer0_sun_share(const goldsrc::BSPData &bsp, const goldsrc::ParsedFace &face,
+		int luxel, float fraction, int sun_style) {
+	if (sun_style != 0) return face.styles[0] == sun_style ? 1.0f : 0.0f;
+	size_t pixels = (size_t)face.lightmap_width * face.lightmap_height;
+	float layer0 = 0, total = 0;
+	for (int s = 0; s < 4 && face.styles[s] != 255; s++) {
+		size_t ofs = (size_t)face.lightmap_offset + (s * pixels + luxel) * 3;
+		if (ofs + 2 >= bsp.lighting.size()) break;
+		float l = luxel_lum(bsp.lighting, ofs);
+		if (s == 0) layer0 = l;
+		total += l;
+	}
+	return layer0 > 0 ? fminf(1.0f, fraction * total / layer0) : 0.0f;
 }
 
 static int leaf_at(const goldsrc::BSPData &bsp, int node, const float p[3]) {
@@ -3452,7 +3477,9 @@ static void sun_fraction_face(void *userdata, uint32_t face_index) {
 	const auto &bsp = *job.bsp;
 	const auto &face = bsp.faces[face_index];
 	auto &out = (*job.terms)[face_index];
-	if (face.lightmap_offset < 0 || face.vertices.size() < 3 || face.model_index != 0) return;
+	if (face.lightmap_offset < 0 || face.vertices.size() < 3) return;
+	if (face.model_index < 0 || (size_t)face.model_index >= job.model_origins->size()) return;
+	const auto &model_origin = (*job.model_origins)[face.model_index];
 	if (face.lightmap_width <= 0 || face.lightmap_height <= 0) return;
 
 	int n_styles = 0;
@@ -3513,7 +3540,7 @@ static void sun_fraction_face(void *userdata, uint32_t face_index) {
 			// Edge luxels sit past the polygon, often inside the neighbouring wall.
 			for (int i = 0; i < 4 && !point_in_face(face, p); i++)
 				for (int k = 0; k < 3; k++) p[k] = (p[k] + centroid[k]) * 0.5f;
-			for (int k = 0; k < 3; k++) p[k] += N[k] * 2.0f;
+			for (int k = 0; k < 3; k++) p[k] += N[k] * 2.0f + model_origin[k];
 			int leaf = leaf_at(bsp, job.head_node, p);
 			if (leaf < 0 || bsp.leafs[leaf].contents == goldsrc::CONTENTS_SOLID) {
 				lt.valid = false;
@@ -3642,20 +3669,37 @@ void GoldSrcBSP::compute_sun_fractions() {
 		for (size_t i = 0; i < lights.size(); i++)
 			if (lights[i].leaf > 0) light_pvs[i] = bsp.decompress_pvs(lights[i].leaf);
 
+	// Brush entities are lit where they stand: an ORIGIN brush stores the faces local to it.
+	vector<array<float, 3>> model_origins(bsp.models.size());
+	for (size_t m = 0; m < bsp.models.size(); m++)
+		for (int k = 0; k < 3; k++) model_origins[m][k] = bsp.models[m].origin[k];
+	for (const auto &ent : bsp.entities) {
+		auto mk = ent.properties.find("model");
+		auto org = ent.properties.find("origin");
+		if (mk == ent.properties.end() || org == ent.properties.end() || mk->second.size() < 2 ||
+			mk->second[0] != '*') continue;
+		int m = atoi(mk->second.c_str() + 1);
+		if (m > 0 && (size_t)m < model_origins.size())
+			sscanf(org->second.c_str(), "%f %f %f", &model_origins[m][0], &model_origins[m][1],
+				&model_origins[m][2]);
+	}
+
 	vector<vector<LuxelTerms>> terms(bsp.faces.size());
-	SunFractionJob job{&bsp, &sun, &lights, &light_pvs, head, &terms};
+	SunFractionJob job{&bsp, &sun, &lights, &light_pvs, &model_origins, head, &terms};
 	WorkerThreadPool *pool = WorkerThreadPool::get_singleton();
 	auto group = pool->add_native_group_task(&sun_fraction_face, &job, (int)bsp.faces.size(),
 		-1, true, "sun fraction");
 	pool->wait_for_group_task_completion(group);
 
-	// Weights that best rebuild the style-0 lightmap from the three terms.
+	// Weights that best rebuild the style-0 lightmap from the three terms. Fitted on the world
+	// alone: brush entities only take the result.
 	double w[3] = {1, 0, 0};
 	bool estimated = sun.style == 0 && !lights.empty();
 	if (estimated) {
 		double ata[3][3] = {}, atb[3] = {};
-		for (const auto &face_terms : terms) {
-			for (const auto &lt : face_terms) {
+		for (size_t fi = 0; fi < terms.size(); fi++) {
+			if (bsp.faces[fi].model_index != 0) continue;
+			for (const auto &lt : terms[fi]) {
 				if (!lt.valid || lt.lit <= lin(2) || lt.lit >= lin(250)) continue;
 				double col[3] = {lt.sun, lt.sky, lt.point};
 				for (int i = 0; i < 3; i++) {
@@ -3669,8 +3713,9 @@ void GoldSrcBSP::compute_sun_fractions() {
 
 	// The map's overall sky share, for whatever the fit can't place.
 	double sky_total = 0, all_total = 0;
-	for (const auto &face_terms : terms) {
-		for (const auto &lt : face_terms) {
+	for (size_t fi = 0; fi < terms.size(); fi++) {
+		if (bsp.faces[fi].model_index != 0) continue;
+		for (const auto &lt : terms[fi]) {
 			if (!lt.valid) continue;
 			double s = w[0] * lt.sun + w[1] * lt.sky, p = w[2] * lt.point;
 			sky_total += s;
@@ -3860,7 +3905,8 @@ Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 							hit.hit_pos, bsp_data.lighting, r, g, b, &luxel);
 						if (has_sun_fraction && luxel >= 0) {
 							const auto &frac = face_sun_fraction[hit.face_index];
-							float f = (size_t)luxel < frac.size() ? frac[luxel] / 255.0f : 0.0f;
+							float f = (size_t)luxel < frac.size() ? layer0_sun_share(bsp_data,
+								bsp_data.faces[hit.face_index], luxel, frac[luxel] / 255.0f, sun.style) : 0.0f;
 							sky_weight[cell_idx] += (r + g + b) * f;
 							all_weight[cell_idx] += r + g + b;
 						}
