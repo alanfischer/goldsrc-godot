@@ -4087,7 +4087,7 @@ Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 
 // --- Rain floor ---
 
-// One trace per column from the top of the map straight down. Sky faces are where rain comes
+// Traces from the top of the map straight down, per column. Sky faces are where rain comes
 // from, not what stops it, so the trace carries on through them; the first face that is not sky
 // is where it lands. Faces are tested from both sides, so a sealed room's ceiling stops it from
 // above even though the face only ever draws from below. Worldspawn, and func_water, which rain
@@ -4119,37 +4119,54 @@ Dictionary GoldSrcBSP::bake_rain_floor(float cell_size_gs) const {
 		if (m > 0 && (size_t)m < bsp_data.models.size()) liquid_models.push_back(m);
 	}
 
+	auto land = [&](float x, float y) {
+		float origin[3] = {x, y, top};
+		// A column that meets nothing is outside the sealed map: no rain falls there.
+		float landed = top;
+		float t = 0.0f;
+		while (t < span) {
+			LightGridRayHit hit;
+			trace_ray_bsp(bsp_data, head, origin, down, t, span, hit);
+			if (hit.face_index < 0) break;
+			if (!goldsrc::is_sky_texture(bsp_data.faces[hit.face_index].texture_name)) {
+				landed = hit.hit_pos[2];
+				break;
+			}
+			t = hit.t + 0.5f;
+		}
+		if (landed < top) {
+			for (int m : liquid_models) {
+				const auto &liquid = bsp_data.models[m];
+				if (x < liquid.mins[0] || x > liquid.maxs[0] || y < liquid.mins[1] || y > liquid.maxs[1])
+					continue;
+				LightGridRayHit hit;
+				trace_ray_bsp(bsp_data, liquid.headnode[0], origin, down, 0.0f, span, hit, m);
+				if (hit.face_index >= 0 && hit.hit_pos[2] > landed) landed = hit.hit_pos[2];
+			}
+		}
+		return landed;
+	};
+
+	// A cell is one height, so it takes the highest of its centre and corners: a roof over any of
+	// it keeps rain out of all of it. A centre alone let rain in along every wall a cell straddled.
+	// Corners are shared, and nudged off the grid lines that walls are built on.
+	const float nudge = 0.25f;
+	vector<float> corners((size_t)(w + 1) * (h + 1));
+	for (int iy = 0; iy <= h; iy++)
+		for (int ix = 0; ix <= w; ix++)
+			corners[(size_t)iy * (w + 1) + ix] = land(world.mins[0] + ix * cell_size_gs + nudge,
+				world.mins[1] + iy * cell_size_gs + nudge);
+
 	PackedByteArray data;
 	data.resize((size_t)w * h * 4);
 	float *heights = (float *)data.ptrw();
 	int open = 0;
 	for (int iy = 0; iy < h; iy++) {
 		for (int ix = 0; ix < w; ix++) {
-			float origin[3] = {world.mins[0] + (ix + 0.5f) * cell_size_gs,
-				world.mins[1] + (iy + 0.5f) * cell_size_gs, top};
-			// A column that meets nothing is outside the sealed map: no rain falls there.
-			float landed = top;
-			float t = 0.0f;
-			while (t < span) {
-				LightGridRayHit hit;
-				trace_ray_bsp(bsp_data, head, origin, down, t, span, hit);
-				if (hit.face_index < 0) break;
-				if (!goldsrc::is_sky_texture(bsp_data.faces[hit.face_index].texture_name)) {
-					landed = hit.hit_pos[2];
-					break;
-				}
-				t = hit.t + 0.5f;
-			}
-			if (landed < top) {
-				for (int m : liquid_models) {
-					const auto &liquid = bsp_data.models[m];
-					if (origin[0] < liquid.mins[0] || origin[0] > liquid.maxs[0]
-							|| origin[1] < liquid.mins[1] || origin[1] > liquid.maxs[1]) continue;
-					LightGridRayHit hit;
-					trace_ray_bsp(bsp_data, liquid.headnode[0], origin, down, 0.0f, span, hit, m);
-					if (hit.face_index >= 0 && hit.hit_pos[2] > landed) landed = hit.hit_pos[2];
-				}
-			}
+			float landed = land(world.mins[0] + (ix + 0.5f) * cell_size_gs,
+				world.mins[1] + (iy + 0.5f) * cell_size_gs);
+			for (int k = 0; k < 4; k++)
+				landed = fmaxf(landed, corners[(size_t)(iy + (k >> 1)) * (w + 1) + ix + (k & 1)]);
 			if (landed >= top) open++;
 			heights[(size_t)iy * w + ix] = landed * scale_factor;
 		}
