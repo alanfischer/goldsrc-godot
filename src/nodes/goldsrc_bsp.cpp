@@ -18,8 +18,10 @@
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/classes/time.hpp>
+#include <godot_cpp/classes/worker_thread_pool.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <godot_cpp/classes/geometry2d.hpp>
@@ -156,7 +158,39 @@ string str_to_lower(const string &s) {
 	return result;
 }
 
-// Shader source for lightstyle blending (opaque variant)
+// A game's shader hook (GoldSrcBSP.shader_hook): every shader built here stays plain GoldSrc
+// unless one is set, and then includes it with GOLDSRC_HOOK_<KIND> defined, so one file can
+// supply what each kind calls. The include is resolved when the shader compiles, at load, so
+// the game can change what it does without reconverting a map; only the calls are baked in.
+//   WORLD  vec3 goldsrc_lightmap(vec3 lm, float sun_share)
+//              lm: the styled lightmap, gamma (as stored); sun_share: lm_sun, the sky's part of it
+//          void goldsrc_surface(inout vec3 lit_srgb, inout vec3 albedo, vec3 world_pos,
+//                               vec3 world_normal, vec3 normal_view, vec3 view)
+//              lit_srgb: texture x lightmap, gamma; albedo: what real-time lights see
+//   LIQUID vec3 goldsrc_liquid(vec3 albedo, int liquid_type)
+//   SKY    vec3 goldsrc_sky(vec3 color, vec3 eye_dir)
+// `variant`, if given, is one more name to #define: which build of a shared source this is.
+static String with_shader_hook(const char *code, const String &hook, const char *kind,
+		const char *variant = nullptr) {
+	String head;
+	if (variant) {
+		head += String("#define ") + variant + "\n";
+	}
+	if (!hook.is_empty()) {
+		head += String("#define GOLDSRC_HOOK_") + kind + "\n#include \"" + hook + "\"\n";
+	}
+	String src(code);
+	if (head.is_empty()) {
+		return src;
+	}
+	// After render_mode: the preprocessor runs first, but shader_type must still lead.
+	int at = src.find("render_mode");
+	at = at < 0 ? src.find("shader_type") : at;
+	return src.insert(src.find("\n", at) + 1, head);
+}
+
+// Shader source for lightstyle blending. Built twice: as it is, and with GOLDSRC_ALPHA_SCISSOR
+// defined for '{' textures (fences, grates).
 static const char *LIGHTSTYLE_SHADER_CODE = R"(
 shader_type spatial;
 render_mode ambient_light_disabled, specular_disabled;
@@ -168,6 +202,8 @@ uniform sampler2D lm_layer2 : filter_linear;
 uniform sampler2D lm_layer3 : filter_linear;
 uniform sampler2D lightstyle_tex : filter_nearest;
 uniform float overbright = 2.0;
+// The sky's share of each luxel's light (GoldSrcBSP::compute_sun_fractions), for the game's hook.
+uniform sampler2D lm_sun : filter_linear, hint_default_black;
 // GoldSrc composited texture x lightmap on 8-bit gamma values. The RD renderers
 // (forward+/mobile) shade in linear space and encode on output, gl_compatibility
 // shades in sRGB and does not, so the same expression lands in a different space
@@ -182,67 +218,22 @@ vec3 gs_to_linear(vec3 c) {
 	return mix(c / 12.92, pow((max(c, vec3(0.0)) + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
 }
 
-varying vec4 style_coords;
-
-void vertex() {
-	style_coords = COLOR;
-}
-
-void fragment() {
-	vec4 albedo = texture(albedo_texture, UV);
-
-	float b0 = texture(lightstyle_tex, vec2(style_coords.r, 0.5)).r;
-	float b1 = texture(lightstyle_tex, vec2(style_coords.g, 0.5)).r;
-	float b2 = texture(lightstyle_tex, vec2(style_coords.b, 0.5)).r;
-	float b3 = texture(lightstyle_tex, vec2(style_coords.a, 0.5)).r;
-
-	vec3 lm = texture(lm_layer0, UV2).rgb * b0
-	         + texture(lm_layer1, UV2).rgb * b1
-	         + texture(lm_layer2, UV2).rgb * b2
-	         + texture(lm_layer3, UV2).rgb * b3;
-
-	// ALBEDO stays in the renderer's native space so real-time lights stay correct;
-	// only the lightmap term needs the gamma-space treatment. min() before the
-	// conversion reproduces GoldSrc's clamp, which clips differently in linear.
-	vec3 base_srgb = linear_output ? gs_to_srgb(albedo.rgb) : albedo.rgb;
-	vec3 lit_srgb = min(base_srgb * lm * overbright, vec3(1.0));
-	ALBEDO = albedo.rgb;
-	EMISSION = linear_output ? gs_to_linear(lit_srgb) : lit_srgb;
-	ROUGHNESS = 1.0;
-}
-)";
-
-// Alpha-scissor variant for '{' textures (fences, grates)
-static const char *LIGHTSTYLE_SHADER_ALPHA_CODE = R"(
-shader_type spatial;
-render_mode ambient_light_disabled, specular_disabled;
-
-uniform sampler2D albedo_texture : source_color, filter_linear_mipmap_anisotropic;
-uniform sampler2D lm_layer0 : filter_linear;
-uniform sampler2D lm_layer1 : filter_linear;
-uniform sampler2D lm_layer2 : filter_linear;
-uniform sampler2D lm_layer3 : filter_linear;
-uniform sampler2D lightstyle_tex : filter_nearest;
-uniform float overbright = 2.0;
-// GoldSrc composited texture x lightmap on 8-bit gamma values. The RD renderers
-// (forward+/mobile) shade in linear space and encode on output, gl_compatibility
-// shades in sRGB and does not, so the same expression lands in a different space
-// on each. Do the multiply in gamma space either way and convert once at the end.
-uniform bool linear_output = false;
-
-vec3 gs_to_srgb(vec3 c) {
-	return mix(c * 12.92, 1.055 * pow(max(c, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
-}
-
-vec3 gs_to_linear(vec3 c) {
-	return mix(c / 12.92, pow((max(c, vec3(0.0)) + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
-}
+#ifdef GOLDSRC_ALPHA_SCISSOR
 uniform float alpha_scissor_threshold : hint_range(0, 1) = 0.5;
+#endif
 
 varying vec4 style_coords;
+#ifdef GOLDSRC_HOOK_WORLD
+varying vec3 goldsrc_world_pos;
+varying vec3 goldsrc_world_normal;
+#endif
 
 void vertex() {
 	style_coords = COLOR;
+#ifdef GOLDSRC_HOOK_WORLD
+	goldsrc_world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	goldsrc_world_normal = normalize((MODEL_MATRIX * vec4(NORMAL, 0.0)).xyz);
+#endif
 }
 
 void fragment() {
@@ -257,17 +248,26 @@ void fragment() {
 	         + texture(lm_layer1, UV2).rgb * b1
 	         + texture(lm_layer2, UV2).rgb * b2
 	         + texture(lm_layer3, UV2).rgb * b3;
+#ifdef GOLDSRC_HOOK_WORLD
+	lm = goldsrc_lightmap(lm, texture(lm_sun, UV2).r);
+#endif
 
 	// ALBEDO stays in the renderer's native space so real-time lights stay correct;
 	// only the lightmap term needs the gamma-space treatment. min() before the
 	// conversion reproduces GoldSrc's clamp, which clips differently in linear.
 	vec3 base_srgb = linear_output ? gs_to_srgb(albedo.rgb) : albedo.rgb;
 	vec3 lit_srgb = min(base_srgb * lm * overbright, vec3(1.0));
-	ALBEDO = albedo.rgb;
+	vec3 base = albedo.rgb;
+#ifdef GOLDSRC_HOOK_WORLD
+	goldsrc_surface(lit_srgb, base, goldsrc_world_pos, goldsrc_world_normal, NORMAL, VIEW);
+#endif
+	ALBEDO = base;
 	EMISSION = linear_output ? gs_to_linear(lit_srgb) : lit_srgb;
 	ROUGHNESS = 1.0;
+#ifdef GOLDSRC_ALPHA_SCISSOR
 	ALPHA = albedo.a;
 	ALPHA_SCISSOR_THRESHOLD = alpha_scissor_threshold;
+#endif
 }
 )";
 
@@ -298,7 +298,11 @@ void fragment() {
 	// Reconstruct world-space eye direction matching sky_cubemap.gdshader EYEDIR.
 	// VIEW points from fragment toward camera (view space); negate and rotate to world.
 	vec3 eye_dir = normalize((INV_VIEW_MATRIX * vec4(-VIEW, 0.0)).xyz);
-	ALBEDO = texture(sky_cubemap, vec3(-eye_dir.x, eye_dir.y, eye_dir.z)).rgb;
+	vec3 col = texture(sky_cubemap, vec3(-eye_dir.x, eye_dir.y, eye_dir.z)).rgb;
+#ifdef GOLDSRC_HOOK_SKY
+	col = goldsrc_sky(col, eye_dir);
+#endif
+	ALBEDO = col;
 }
 )";
 
@@ -560,6 +564,9 @@ void fragment() {
 			ALBEDO = mix(ALBEDO, vec3(1.0), foam * 0.3);
 		}
 	}
+#ifdef GOLDSRC_HOOK_LIQUID
+	ALBEDO = goldsrc_liquid(ALBEDO, liquid_type);
+#endif
 }
 )";
 
@@ -889,13 +896,17 @@ void GoldSrcBSP::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_face_axes", "position", "normal"), &GoldSrcBSP::get_face_axes);
 	ClassDB::bind_method(D_METHOD("set_shader_lightstyles", "enabled"), &GoldSrcBSP::set_shader_lightstyles);
 	ClassDB::bind_method(D_METHOD("get_shader_lightstyles"), &GoldSrcBSP::get_shader_lightstyles);
+	ClassDB::bind_method(D_METHOD("set_shader_hook", "path"), &GoldSrcBSP::set_shader_hook);
+	ClassDB::bind_method(D_METHOD("get_shader_hook"), &GoldSrcBSP::get_shader_hook);
 	ClassDB::bind_method(D_METHOD("bake_light_grid", "cell_size"), &GoldSrcBSP::bake_light_grid);
+	ClassDB::bind_method(D_METHOD("bake_rain_floor", "cell_size"), &GoldSrcBSP::bake_rain_floor);
 	ClassDB::bind_method(D_METHOD("set_overbright", "value"), &GoldSrcBSP::set_overbright);
 	ClassDB::bind_method(D_METHOD("get_overbright"), &GoldSrcBSP::get_overbright);
 	ClassDB::bind_method(D_METHOD("set_light_grid_cell_size", "value"), &GoldSrcBSP::set_light_grid_cell_size);
 	ClassDB::bind_method(D_METHOD("get_light_grid_cell_size"), &GoldSrcBSP::get_light_grid_cell_size);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "scale_factor"), "set_scale_factor", "get_scale_factor");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "shader_lightstyles"), "set_shader_lightstyles", "get_shader_lightstyles");
+	ADD_PROPERTY(PropertyInfo(Variant::STRING, "shader_hook", PROPERTY_HINT_FILE, "*.gdshaderinc"), "set_shader_hook", "get_shader_hook");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "overbright"), "set_overbright", "get_overbright");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "light_grid_cell_size"), "set_light_grid_cell_size", "get_light_grid_cell_size");
 }
@@ -1005,6 +1016,14 @@ void GoldSrcBSP::set_shader_lightstyles(bool enabled) {
 
 bool GoldSrcBSP::get_shader_lightstyles() const {
 	return shader_lightstyles;
+}
+
+void GoldSrcBSP::set_shader_hook(const String &path) {
+	shader_hook = path;
+}
+
+String GoldSrcBSP::get_shader_hook() const {
+	return shader_hook;
 }
 
 void GoldSrcBSP::set_overbright(float value) {
@@ -1483,6 +1502,13 @@ void GoldSrcBSP::build_mesh() {
 	if (!shader_lightstyles) {
 		face_lm_info.resize(bsp_data.faces.size());
 	}
+	// Only a shader hook reads it.
+	if (shader_lightstyles && !shader_hook.is_empty()) {
+		compute_sun_fractions();
+		log_timing("sun fraction");
+	} else {
+		face_sun_fraction.clear();
+	}
 
 	// Count faces that actually receive a lightmap, independent of which path
 	// bakes them. lm_atlases is only populated in the legacy path, so it can't
@@ -1492,12 +1518,12 @@ void GoldSrcBSP::build_mesh() {
 	// Sky surface shader: always created, used for all 'sky*' texture faces
 	Ref<Shader> sky_shader;
 	sky_shader.instantiate();
-	sky_shader->set_code(SKY_SURFACE_SHADER_CODE);
+	sky_shader->set_code(with_shader_hook(SKY_SURFACE_SHADER_CODE, shader_hook, "SKY"));
 
 	// Water surface shader: turbulent warp for '!' and '*' texture faces
 	Ref<Shader> water_shader;
 	water_shader.instantiate();
-	water_shader->set_code(WATER_SHADER_CODE);
+	water_shader->set_code(with_shader_hook(WATER_SHADER_CODE, shader_hook, "LIQUID"));
 
 	// Water's depth-only prepass. Carries no per-texture state, so one material is shared by
 	// every water twin in the model; RENDER_PRIORITY_LIQUID_DEPTH is what puts it ahead of the
@@ -1525,9 +1551,9 @@ void GoldSrcBSP::build_mesh() {
 		lightstyle_texture = ImageTexture::create_from_image(lightstyle_image);
 
 		opaque_shader.instantiate();
-		opaque_shader->set_code(LIGHTSTYLE_SHADER_CODE);
+		opaque_shader->set_code(with_shader_hook(LIGHTSTYLE_SHADER_CODE, shader_hook, "WORLD"));
 		alpha_shader.instantiate();
-		alpha_shader->set_code(LIGHTSTYLE_SHADER_ALPHA_CODE);
+		alpha_shader->set_code(with_shader_hook(LIGHTSTYLE_SHADER_CODE, shader_hook, "WORLD", "GOLDSRC_ALPHA_SCISSOR"));
 
 		Ref<Image> black_img = Image::create(1, 1, false, Image::FORMAT_RGB8);
 		black_img->set_pixel(0, 0, Color(0, 0, 0));
@@ -1902,6 +1928,7 @@ void GoldSrcBSP::build_mesh() {
 		struct AtlasPage {
 			ShelfPacker packer;
 			Ref<ImageTexture> layer_textures[4];  // shader path: one atlas per lightstyle layer
+			Ref<ImageTexture> sun_texture;        // shader path: face_sun_fraction, same layout
 			Ref<ImageTexture> blended;            // legacy path: single pre-blended atlas
 			vector<int> face_indices;             // global indices packed into this page
 			int w = 0, h = 0;
@@ -2000,6 +2027,24 @@ void GoldSrcBSP::build_mesh() {
 					Ref<Image> img = Image::create_from_data(
 						pg.w, pg.h, false, Image::FORMAT_RGB8, layer_pixels[l]);
 					pg.layer_textures[l] = ImageTexture::create_from_image(img);
+				}
+
+				if (!face_sun_fraction.empty()) {
+					PackedByteArray sun_pixels;
+					sun_pixels.resize(pg.w * pg.h);
+					memset(sun_pixels.ptrw(), 0, sun_pixels.size());
+					uint8_t *dst = sun_pixels.ptrw();
+					for (int gi : pg.face_indices) {
+						const auto &frac = face_sun_fraction[gi];
+						if (frac.empty()) continue;
+						const FacePack &fp = face_pack_by_index[gi];
+						const auto *face = &bsp_data.faces[gi];
+						for (int y = 0; y < face->lightmap_height; y++)
+							memcpy(dst + (size_t)(fp.atlas_y + y) * pg.w + fp.atlas_x,
+								frac.data() + (size_t)y * face->lightmap_width, face->lightmap_width);
+					}
+					pg.sun_texture = ImageTexture::create_from_image(
+						Image::create_from_data(pg.w, pg.h, false, Image::FORMAT_L8, sun_pixels));
 				}
 				// Unused layers stay null — they get black_1x1 at material build
 			} else {
@@ -2317,6 +2362,9 @@ void GoldSrcBSP::build_mesh() {
 
 				material->set_shader_parameter("lightstyle_tex", lightstyle_texture);
 				material->set_shader_parameter("overbright", overbright);
+				if (has_any_lightmap && page->sun_texture.is_valid()) {
+					material->set_shader_parameter("lm_sun", page->sun_texture);
+				}
 
 				arr_mesh->surface_set_material(0, material);
 				material_cache[cache_key] = material;
@@ -3137,9 +3185,11 @@ static void sample_lightmap_at(
 	const goldsrc::ParsedFace &face,
 	const float hit_pos[3],
 	const vector<uint8_t> &lighting,
-	float &out_r, float &out_g, float &out_b)
+	float &out_r, float &out_g, float &out_b,
+	int *out_luxel = nullptr)
 {
 	out_r = out_g = out_b = 0;
+	if (out_luxel) *out_luxel = -1;
 
 	if (face.lightmap_offset < 0) return;
 	if (face.lightmap_width <= 0 || face.lightmap_height <= 0) return;
@@ -3159,6 +3209,7 @@ static void sample_lightmap_at(
 	size_t pixel_count = (size_t)face.lightmap_width * face.lightmap_height;
 	size_t ofs = (size_t)face.lightmap_offset + (size_t)(py * face.lightmap_width + px) * 3;
 	if (ofs + 2 >= lighting.size()) return;
+	if (out_luxel) *out_luxel = py * face.lightmap_width + px;
 
 	out_r = (float)lighting[ofs + 0];
 	out_g = (float)lighting[ofs + 1];
@@ -3172,7 +3223,8 @@ static void trace_ray_bsp(
 	int node_index,
 	const float origin[3], const float dir[3],
 	float t_min, float t_max,
-	LightGridRayHit &best_hit)
+	LightGridRayHit &best_hit,
+	int model_index = 0)
 {
 	if (t_min >= t_max) return;
 	if (node_index < 0) return; // leaf — hull 0 stores faces on nodes, not leaves
@@ -3190,7 +3242,7 @@ static void trace_ray_bsp(
 		if (parsed < 0) continue;
 
 		const auto &face = bsp_data.faces[parsed];
-		if (face.model_index != 0) continue; // worldspawn only
+		if (face.model_index != model_index) continue; // the tree's own model only
 		if (face.vertices.size() < 3) continue;
 
 		float t = ray_polygon_intersect(origin, dir, face);
@@ -3212,9 +3264,9 @@ static void trace_ray_bsp(
 	                plane.normal[2] * (origin[2] + dir[2] * t_max) - plane.dist;
 
 	if (d_start >= 0 && d_end >= 0) {
-		trace_ray_bsp(bsp_data, node.children[0], origin, dir, t_min, t_max, best_hit);
+		trace_ray_bsp(bsp_data, node.children[0], origin, dir, t_min, t_max, best_hit, model_index);
 	} else if (d_start < 0 && d_end < 0) {
-		trace_ray_bsp(bsp_data, node.children[1], origin, dir, t_min, t_max, best_hit);
+		trace_ray_bsp(bsp_data, node.children[1], origin, dir, t_min, t_max, best_hit, model_index);
 	} else {
 		// Ray crosses the plane — compute split point
 		float denom = plane.normal[0] * dir[0] + plane.normal[1] * dir[1] + plane.normal[2] * dir[2];
@@ -3229,12 +3281,505 @@ static void trace_ray_bsp(
 
 		int near_child = d_start >= 0 ? 0 : 1;
 		int far_child = 1 - near_child;
-		trace_ray_bsp(bsp_data, node.children[near_child], origin, dir, t_min, t_split, best_hit);
-		trace_ray_bsp(bsp_data, node.children[far_child], origin, dir, t_split, t_max, best_hit);
+		trace_ray_bsp(bsp_data, node.children[near_child], origin, dir, t_min, t_split, best_hit, model_index);
+		trace_ray_bsp(bsp_data, node.children[far_child], origin, dir, t_split, t_max, best_hit, model_index);
+	}
+}
+
+struct SunLight {
+	bool present = false;
+	float dir[3] = {0, 0, -1};   // TOWARD the sun; straight down until a light_environment says
+	float color[3] = {0, 0, 0};  // 0..1, scaled by brightness / 200
+	int style = 0;               // lightstyle hlrad baked the sun into
+};
+
+// The map's first light_environment, which is the one hlrad lit it with. The angle/pitch
+// name the direction light TRAVELS; dir is negated so a trace along it looks for the sun.
+static SunLight find_sun(const goldsrc::BSPData &bsp_data) {
+	SunLight sun;
+	for (const auto &ent : bsp_data.entities) {
+		auto cn = ent.properties.find("classname");
+		if (cn == ent.properties.end() || cn->second != "light_environment") continue;
+
+		auto lp = ent.properties.find("_light");
+		if (lp != ent.properties.end()) {
+			float lr = 0, lg = 0, lb = 0, lbright = 200.0f;
+			if (sscanf(lp->second.c_str(), "%f %f %f %f", &lr, &lg, &lb, &lbright) >= 3) {
+				float peak = fmaxf(lr, fmaxf(lg, lb));
+				if (peak > 0) {
+					sun.color[0] = (lr / peak) * (lbright / 200.0f) * peak / 255.0f;
+					sun.color[1] = (lg / peak) * (lbright / 200.0f) * peak / 255.0f;
+					sun.color[2] = (lb / peak) * (lbright / 200.0f) * peak / 255.0f;
+				}
+			}
+		}
+
+		float yaw_deg = 0, pitch_deg = 0;
+		float a0 = 0, a1 = 0;
+		auto ap = ent.properties.find("angles");
+		if (ap != ent.properties.end()) {
+			if (sscanf(ap->second.c_str(), "%f %f", &a0, &a1) >= 2)
+				yaw_deg = a1;
+		} else {
+			auto angp = ent.properties.find("angle");
+			if (angp != ent.properties.end())
+				yaw_deg = atof(angp->second.c_str());
+		}
+		// As hlrad: a missing or zero pitch falls back to angles[0].
+		auto pp = ent.properties.find("pitch");
+		if (pp != ent.properties.end())
+			pitch_deg = atof(pp->second.c_str());
+		if (pitch_deg == 0)
+			pitch_deg = a0;
+
+		float pitch_rad = pitch_deg * 3.14159265f / 180.0f;
+		float yaw_rad = yaw_deg * 3.14159265f / 180.0f;
+		sun.dir[0] = -(cosf(pitch_rad) * cosf(yaw_rad));
+		sun.dir[1] = -(cosf(pitch_rad) * sinf(yaw_rad));
+		sun.dir[2] = -sinf(pitch_rad);
+
+		auto sp = ent.properties.find("style");
+		if (sp != ent.properties.end())
+			sun.style = atoi(sp->second.c_str());
+		sun.present = true;
+		break;
+	}
+	return sun;
+}
+
+} // anonymous namespace
+
+// --- Sun fraction: how much of each luxel's light came from the sky ---
+//
+// hlrad bakes the sun and the map's own lights into the same style-0 lightmap, so nothing in
+// the BSP says which is which. Night needs to know: it turns the sky's share down and leaves
+// the torches alone. When the mapper put the sun on a style of its own (ww_chasm) the split is
+// exact, one layer over the sum. Otherwise each luxel is re-lit with the three things hlrad
+// lit it with — a sun trace, a hemisphere of sky traces, the point lights — and the weights
+// that best reproduce the real lightmap say how much of what it holds was which. What none of
+// the three explains (bounce, texture lights) is shared out in the map's overall proportion.
+
+namespace {
+
+// hlrad writes lightmaps as pow(light, gamma); shares are only additive before that.
+const float LIGHTMAP_GAMMA = 0.55f;
+const int SKY_RAYS = 12;
+const float SUN_TRACE_DIST = 16384.0f;
+// Beyond this a point light's share is noise next to whatever else lights the luxel.
+const float POINT_LIGHT_RANGE = 1024.0f;
+
+struct PointLight {
+	float pos[3];
+	float lum;
+	int leaf;
+};
+
+struct LuxelTerms {
+	float lit;    // style-0 light, linear
+	float other;  // every other style's light, linear (switchable lights, a styled sun)
+	float sun, sky, point;
+	bool valid;
+};
+
+struct SunFractionJob {
+	const goldsrc::BSPData *bsp;
+	const SunLight *sun;
+	const vector<PointLight> *lights;
+	const vector<vector<bool>> *light_pvs;
+	const vector<array<float, 3>> *model_origins;
+	int head_node;
+	vector<vector<LuxelTerms>> *terms;
+};
+
+static inline float lin(uint8_t v) {
+	return powf(v / 255.0f, 1.0f / LIGHTMAP_GAMMA);
+}
+
+static inline float luxel_lum(const vector<uint8_t> &lighting, size_t ofs) {
+	return (lin(lighting[ofs]) + lin(lighting[ofs + 1]) + lin(lighting[ofs + 2])) / 3.0f;
+}
+
+// A sun fraction is the sky's share of every style a luxel has; this is its share of the first
+// layer alone, the one the light grid samples.
+static float layer0_sun_share(const goldsrc::BSPData &bsp, const goldsrc::ParsedFace &face,
+		int luxel, float fraction, int sun_style) {
+	if (sun_style != 0) return face.styles[0] == sun_style ? 1.0f : 0.0f;
+	size_t pixels = (size_t)face.lightmap_width * face.lightmap_height;
+	float layer0 = 0, total = 0;
+	for (int s = 0; s < 4 && face.styles[s] != 255; s++) {
+		size_t ofs = (size_t)face.lightmap_offset + (s * pixels + luxel) * 3;
+		if (ofs + 2 >= bsp.lighting.size()) break;
+		float l = luxel_lum(bsp.lighting, ofs);
+		if (s == 0) layer0 = l;
+		total += l;
+	}
+	return layer0 > 0 ? fminf(1.0f, fraction * total / layer0) : 0.0f;
+}
+
+static int leaf_at(const goldsrc::BSPData &bsp, int node, const float p[3]) {
+	while (node >= 0) {
+		if ((size_t)node >= bsp.nodes.size()) return -1;
+		const auto &n = bsp.nodes[node];
+		if (n.planenum < 0 || (size_t)n.planenum >= bsp.planes.size()) return -1;
+		const auto &pl = bsp.planes[n.planenum];
+		float d = pl.normal[0] * p[0] + pl.normal[1] * p[1] + pl.normal[2] * p[2];
+		node = d >= pl.dist ? n.children[0] : n.children[1];
+	}
+	int leaf = -(node + 1);
+	return (leaf >= 0 && (size_t)leaf < bsp.leafs.size()) ? leaf : -1;
+}
+
+static inline bool point_in_face(const goldsrc::ParsedFace &face, const float p[3]) {
+	int n = (int)face.vertices.size();
+	int pos = 0, neg = 0;
+	for (int i = 0; i < n; i++) {
+		const float *a = face.vertices[i].pos;
+		const float *b = face.vertices[(i + 1) % n].pos;
+		float e[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+		float q[3] = {p[0] - a[0], p[1] - a[1], p[2] - a[2]};
+		float c[3] = {e[1] * q[2] - e[2] * q[1], e[2] * q[0] - e[0] * q[2], e[0] * q[1] - e[1] * q[0]};
+		float d = c[0] * face.normal[0] + c[1] * face.normal[1] + c[2] * face.normal[2];
+		if (d > 0) pos++;
+		else if (d < 0) neg++;
+		if (pos && neg) return false;
+	}
+	return true;
+}
+
+// Solve S·p + s_off = s, T·p + t_off = t, N·p = d for p (Cramer's rule).
+static bool luxel_to_world(const goldsrc::ParsedFace &face, float s, float t, float out[3]) {
+	const float *S = face.s_axis, *T = face.t_axis, *N = face.normal;
+	const float *v0 = face.vertices[0].pos;
+	float rhs[3] = {s - face.s_offset, t - face.t_offset,
+		N[0] * v0[0] + N[1] * v0[1] + N[2] * v0[2]};
+	auto det3 = [](const float a[3], const float b[3], const float c[3]) {
+		return a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+			+ a[2] * (b[0] * c[1] - b[1] * c[0]);
+	};
+	float det = det3(S, T, N);
+	if (fabsf(det) < 1e-8f) return false;
+	for (int k = 0; k < 3; k++) {
+		float r0[3] = {S[0], S[1], S[2]}, r1[3] = {T[0], T[1], T[2]}, r2[3] = {N[0], N[1], N[2]};
+		r0[k] = rhs[0]; r1[k] = rhs[1]; r2[k] = rhs[2];
+		out[k] = det3(r0, r1, r2) / det;
+	}
+	return true;
+}
+
+static bool reaches_sky(const goldsrc::BSPData &bsp, int head, const float p[3], const float dir[3]) {
+	LightGridRayHit hit;
+	trace_ray_bsp(bsp, head, p, dir, 0.0f, SUN_TRACE_DIST, hit);
+	return ray_reached_sky(bsp, hit);
+}
+
+static void sun_fraction_face(void *userdata, uint32_t face_index) {
+	const SunFractionJob &job = *(const SunFractionJob *)userdata;
+	const auto &bsp = *job.bsp;
+	const auto &face = bsp.faces[face_index];
+	auto &out = (*job.terms)[face_index];
+	if (face.lightmap_offset < 0 || face.vertices.size() < 3) return;
+	if (face.model_index < 0 || (size_t)face.model_index >= job.model_origins->size()) return;
+	const auto &model_origin = (*job.model_origins)[face.model_index];
+	if (face.lightmap_width <= 0 || face.lightmap_height <= 0) return;
+
+	int n_styles = 0;
+	int sun_layer = -1;
+	for (int s = 0; s < 4 && face.styles[s] != 255; s++) {
+		if (job.sun->style != 0 && face.styles[s] == job.sun->style) sun_layer = s;
+		n_styles++;
+	}
+	size_t pixels = (size_t)face.lightmap_width * face.lightmap_height;
+	if (n_styles == 0 || (size_t)face.lightmap_offset + pixels * 3 * n_styles > bsp.lighting.size()) return;
+	out.resize(pixels);
+
+	const float *N = face.normal;
+	float centroid[3] = {0, 0, 0};
+	for (const auto &v : face.vertices)
+		for (int k = 0; k < 3; k++) centroid[k] += v.pos[k];
+	for (int k = 0; k < 3; k++) centroid[k] /= face.vertices.size();
+
+	// Tangent frame for the hemisphere.
+	float tx[3], ty[3];
+	{
+		float up[3] = {0, 0, 1};
+		if (fabsf(N[2]) > 0.9f) { up[0] = 1; up[2] = 0; }
+		tx[0] = up[1] * N[2] - up[2] * N[1];
+		tx[1] = up[2] * N[0] - up[0] * N[2];
+		tx[2] = up[0] * N[1] - up[1] * N[0];
+		float l = sqrtf(tx[0] * tx[0] + tx[1] * tx[1] + tx[2] * tx[2]);
+		for (int k = 0; k < 3; k++) tx[k] /= l;
+		ty[0] = N[1] * tx[2] - N[2] * tx[1];
+		ty[1] = N[2] * tx[0] - N[0] * tx[2];
+		ty[2] = N[0] * tx[1] - N[1] * tx[0];
+	}
+	float sun_ndl = N[0] * job.sun->dir[0] + N[1] * job.sun->dir[1] + N[2] * job.sun->dir[2];
+
+	for (int y = 0; y < face.lightmap_height; y++) {
+		for (int x = 0; x < face.lightmap_width; x++) {
+			size_t px = (size_t)y * face.lightmap_width + x;
+			LuxelTerms &lt = out[px];
+			lt = LuxelTerms{};
+			lt.valid = true;
+			float layer_lum[4] = {0, 0, 0, 0};
+			for (int s = 0; s < n_styles; s++)
+				layer_lum[s] = luxel_lum(bsp.lighting, (size_t)face.lightmap_offset + (s * pixels + px) * 3);
+			for (int s = 0; s < n_styles; s++) {
+				if (s == 0 && face.styles[0] == 0) lt.lit = layer_lum[s];
+				else lt.other += layer_lum[s];
+			}
+			if (sun_layer >= 0) {
+				// Exact: the sun has a layer of its own.
+				lt.sun = layer_lum[sun_layer];
+				continue;
+			}
+			if (job.sun->style != 0 || job.lights->empty()) continue;
+
+			float p[3];
+			if (!luxel_to_world(face, (face.lm_mins_s + x) * 16.0f, (face.lm_mins_t + y) * 16.0f, p))
+				continue;
+			// Edge luxels sit past the polygon, often inside the neighbouring wall.
+			for (int i = 0; i < 4 && !point_in_face(face, p); i++)
+				for (int k = 0; k < 3; k++) p[k] = (p[k] + centroid[k]) * 0.5f;
+			for (int k = 0; k < 3; k++) p[k] += N[k] * 2.0f + model_origin[k];
+			int leaf = leaf_at(bsp, job.head_node, p);
+			if (leaf < 0 || bsp.leafs[leaf].contents == goldsrc::CONTENTS_SOLID) {
+				lt.valid = false;
+				continue;
+			}
+
+			if (sun_ndl > 0 && reaches_sky(bsp, job.head_node, p, job.sun->dir))
+				lt.sun = sun_ndl;
+
+			// Cosine-weighted spiral, turned per luxel so neighbours don't band.
+			uint32_t h = (uint32_t)(face_index * 73856093u) ^ (uint32_t)(px * 19349663u);
+			float turn = (h & 0xffff) / 65536.0f * 6.2831853f;
+			int seen = 0;
+			for (int r = 0; r < SKY_RAYS; r++) {
+				float rad = sqrtf((r + 0.5f) / SKY_RAYS);
+				float phi = r * 2.3999632f + turn;
+				float a = rad * cosf(phi), b = rad * sinf(phi), c = sqrtf(fmaxf(0.0f, 1.0f - rad * rad));
+				float dir[3] = {tx[0] * a + ty[0] * b + N[0] * c,
+					tx[1] * a + ty[1] * b + N[1] * c,
+					tx[2] * a + ty[2] * b + N[2] * c};
+				if (reaches_sky(bsp, job.head_node, p, dir)) seen++;
+			}
+			lt.sky = (float)seen / SKY_RAYS;
+
+			for (size_t li = 0; li < job.lights->size(); li++) {
+				const PointLight &L = (*job.lights)[li];
+				const auto &pvs = (*job.light_pvs)[li];
+				if (!pvs.empty() && (size_t)leaf < pvs.size() && !pvs[leaf]) continue;
+				float v[3] = {L.pos[0] - p[0], L.pos[1] - p[1], L.pos[2] - p[2]};
+				float d2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+				if (d2 > POINT_LIGHT_RANGE * POINT_LIGHT_RANGE) continue;
+				float d = sqrtf(fmaxf(d2, 1.0f));
+				float ndl = (N[0] * v[0] + N[1] * v[1] + N[2] * v[2]) / d;
+				if (ndl <= 0) continue;
+				float dir[3] = {v[0] / d, v[1] / d, v[2] / d};
+				LightGridRayHit hit;
+				trace_ray_bsp(bsp, job.head_node, p, dir, 0.0f, d - 1.0f, hit);
+				if (hit.face_index >= 0) continue;
+				lt.point += L.lum * ndl / fmaxf(d2, 256.0f);
+			}
+		}
+	}
+}
+
+// Non-negative least squares over three columns, by trying every subset of them: the
+// unconstrained solve of the best subset whose weights are all >= 0.
+static void fit_nonnegative(const double ata[3][3], const double atb[3], double w[3]) {
+	double best = -1e300;
+	w[0] = w[1] = w[2] = 0;
+	for (int mask = 1; mask < 8; mask++) {
+		int idx[3], n = 0;
+		for (int i = 0; i < 3; i++) if (mask & (1 << i)) idx[n++] = i;
+		double m[3][4] = {};
+		for (int r = 0; r < n; r++) {
+			for (int c = 0; c < n; c++) m[r][c] = ata[idx[r]][idx[c]];
+			m[r][n] = atb[idx[r]];
+		}
+		bool ok = true;
+		for (int c = 0; c < n && ok; c++) {
+			int piv = c;
+			for (int r = c + 1; r < n; r++) if (fabs(m[r][c]) > fabs(m[piv][c])) piv = r;
+			if (fabs(m[piv][c]) < 1e-12) { ok = false; break; }
+			for (int k = 0; k <= n; k++) std::swap(m[c][k], m[piv][k]);
+			for (int r = 0; r < n; r++) {
+				if (r == c) continue;
+				double f = m[r][c] / m[c][c];
+				for (int k = 0; k <= n; k++) m[r][k] -= f * m[c][k];
+			}
+		}
+		if (!ok) continue;
+		double x[3] = {0, 0, 0};
+		for (int r = 0; r < n; r++) {
+			x[idx[r]] = m[r][n] / m[r][r];
+			if (x[idx[r]] < 0) ok = false;
+		}
+		if (!ok) continue;
+		// Minimising |Ax-b|² is maximising 2x·Atb - x·AtA·x.
+		double gain = 0;
+		for (int i = 0; i < 3; i++) {
+			gain += 2 * x[i] * atb[i];
+			for (int j = 0; j < 3; j++) gain -= x[i] * ata[i][j] * x[j];
+		}
+		if (gain > best) {
+			best = gain;
+			for (int i = 0; i < 3; i++) w[i] = x[i];
+		}
 	}
 }
 
 } // anonymous namespace
+
+void GoldSrcBSP::compute_sun_fractions() {
+	face_sun_fraction.clear();
+	if (!parser) return;
+	const auto &bsp = parser->get_data();
+	const SunLight sun = find_sun(bsp);
+	if (!sun.present || bsp.lighting.empty() || bsp.models.empty()) return;
+	uint64_t t0 = Time::get_singleton()->get_ticks_msec();
+	int head = bsp.models[0].headnode[0];
+
+	// Only lights that landed in style 0: a targeted or styled light has its own layer.
+	vector<PointLight> lights;
+	for (const auto &ent : bsp.entities) {
+		auto cn = ent.properties.find("classname");
+		if (cn == ent.properties.end()) continue;
+		if (cn->second != "light" && cn->second != "light_spot") continue;
+		auto st = ent.properties.find("style");
+		if (st != ent.properties.end() && atoi(st->second.c_str()) != 0) continue;
+		if (ent.properties.count("targetname")) continue;
+		PointLight L;
+		auto org = ent.properties.find("origin");
+		if (org == ent.properties.end() ||
+			sscanf(org->second.c_str(), "%f %f %f", &L.pos[0], &L.pos[1], &L.pos[2]) != 3) continue;
+		float c[4] = {255, 255, 255, 200};
+		auto lp = ent.properties.find("_light");
+		int n = lp == ent.properties.end() ? 0 :
+			sscanf(lp->second.c_str(), "%f %f %f %f", &c[0], &c[1], &c[2], &c[3]);
+		if (n == 1) c[1] = c[2] = c[0], c[3] = 255;
+		else if (n == 3) c[3] = 255;
+		L.lum = (c[0] + c[1] + c[2]) / 3.0f * (c[3] / 255.0f);
+		L.leaf = leaf_at(bsp, head, L.pos);
+		if (L.lum > 0) lights.push_back(L);
+	}
+	vector<vector<bool>> light_pvs(lights.size());
+	if (!bsp.visibility.empty())
+		for (size_t i = 0; i < lights.size(); i++)
+			if (lights[i].leaf > 0) light_pvs[i] = bsp.decompress_pvs(lights[i].leaf);
+
+	// Brush entities are lit where they stand: an ORIGIN brush stores the faces local to it.
+	vector<array<float, 3>> model_origins(bsp.models.size());
+	for (size_t m = 0; m < bsp.models.size(); m++)
+		for (int k = 0; k < 3; k++) model_origins[m][k] = bsp.models[m].origin[k];
+	for (const auto &ent : bsp.entities) {
+		auto mk = ent.properties.find("model");
+		auto org = ent.properties.find("origin");
+		if (mk == ent.properties.end() || org == ent.properties.end() || mk->second.size() < 2 ||
+			mk->second[0] != '*') continue;
+		int m = atoi(mk->second.c_str() + 1);
+		if (m > 0 && (size_t)m < model_origins.size())
+			sscanf(org->second.c_str(), "%f %f %f", &model_origins[m][0], &model_origins[m][1],
+				&model_origins[m][2]);
+	}
+
+	vector<vector<LuxelTerms>> terms(bsp.faces.size());
+	SunFractionJob job{&bsp, &sun, &lights, &light_pvs, &model_origins, head, &terms};
+	WorkerThreadPool *pool = WorkerThreadPool::get_singleton();
+	auto group = pool->add_native_group_task(&sun_fraction_face, &job, (int)bsp.faces.size(),
+		-1, true, "sun fraction");
+	pool->wait_for_group_task_completion(group);
+
+	// Weights that best rebuild the style-0 lightmap from the three terms. Fitted on the world
+	// alone: brush entities only take the result.
+	double w[3] = {1, 0, 0};
+	bool estimated = sun.style == 0 && !lights.empty();
+	if (estimated) {
+		double ata[3][3] = {}, atb[3] = {};
+		for (size_t fi = 0; fi < terms.size(); fi++) {
+			if (bsp.faces[fi].model_index != 0) continue;
+			for (const auto &lt : terms[fi]) {
+				if (!lt.valid || lt.lit <= lin(2) || lt.lit >= lin(250)) continue;
+				double col[3] = {lt.sun, lt.sky, lt.point};
+				for (int i = 0; i < 3; i++) {
+					atb[i] += col[i] * lt.lit;
+					for (int j = 0; j < 3; j++) ata[i][j] += col[i] * col[j];
+				}
+			}
+		}
+		fit_nonnegative(ata, atb, w);
+	}
+
+	// The map's overall sky share, for whatever the fit can't place.
+	double sky_total = 0, all_total = 0;
+	for (size_t fi = 0; fi < terms.size(); fi++) {
+		if (bsp.faces[fi].model_index != 0) continue;
+		for (const auto &lt : terms[fi]) {
+			if (!lt.valid) continue;
+			double s = w[0] * lt.sun + w[1] * lt.sky, p = w[2] * lt.point;
+			sky_total += s;
+			all_total += s + p;
+		}
+	}
+	double sky_share = estimated ? (all_total > 0 ? sky_total / all_total : 1.0) : 1.0;
+
+	face_sun_fraction.resize(bsp.faces.size());
+	int64_t luxels = 0;
+	for (size_t fi = 0; fi < terms.size(); fi++) {
+		const auto &ft = terms[fi];
+		if (ft.empty()) continue;
+		const auto &face = bsp.faces[fi];
+		int W = face.lightmap_width, H = face.lightmap_height;
+		vector<float> f(ft.size(), 0.0f);
+		for (size_t px = 0; px < ft.size(); px++) {
+			const LuxelTerms &lt = ft[px];
+			float total = lt.lit + lt.other;
+			if (total <= 0) continue;
+			float sky_part;
+			if (sun.style != 0) {
+				sky_part = lt.sun;
+			} else if (!estimated) {
+				sky_part = lt.lit;
+			} else {
+				float s = (float)(w[0] * lt.sun + w[1] * lt.sky);
+				float p = (float)(w[2] * lt.point);
+				float excess = lt.valid ? fmaxf(0.0f, lt.lit - s - p) : lt.lit;
+				float predicted = s + p;
+				sky_part = (float)(excess * sky_share);
+				if (predicted > 0) sky_part += (lt.lit - excess) * s / predicted;
+			}
+			f[px] = fminf(1.0f, sky_part / total);
+		}
+		// 3x3 blur inside the face: the hemisphere is a dozen rays.
+		auto &dst = face_sun_fraction[fi];
+		dst.resize(ft.size());
+		for (int y = 0; y < H; y++) {
+			for (int x = 0; x < W; x++) {
+				float sum = 0;
+				int n = 0;
+				for (int dy = -1; dy <= 1; dy++) {
+					for (int dx = -1; dx <= 1; dx++) {
+						int xx = x + dx, yy = y + dy;
+						if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+						sum += f[(size_t)yy * W + xx];
+						n++;
+					}
+				}
+				dst[(size_t)y * W + x] = (uint8_t)lroundf(sum / n * 255.0f);
+			}
+		}
+		luxels += (int64_t)ft.size();
+	}
+
+	UtilityFunctions::print("[GoldSrc] Sun fraction: ", luxels, " luxels, ",
+		(int64_t)lights.size(), " lights, ",
+		sun.style != 0 ? String("sun on style ") + String::num_int64(sun.style) :
+			!estimated ? String("sky-lit only") :
+			String("fit sun ") + String::num(w[0], 4) + " sky " + String::num(w[1], 4) +
+			" point " + String::num(w[2], 6) + ", sky share " + String::num(sky_share, 3),
+		", ", (int64_t)(Time::get_singleton()->get_ticks_msec() - t0), "ms");
+}
 
 Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 	if (!parser) return Dictionary();
@@ -3277,58 +3822,11 @@ Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 		{ 0, 0, 1}, { 0, 0,-1}
 	};
 
-	// Extract light_environment sky color and sun direction for rays that escape the map.
-	// HLRAD uses this as the sky light when compiling lightmaps, so surfaces hit by sunlight
-	// have bright values, but rays going up into the sky need to return the sky contribution.
-	float sky_color[3] = {0, 0, 0};
-	float sun_dir[3] = {0, 0, -1}; // default: straight down
-	bool has_sky_light = false;
-	for (const auto &ent : bsp_data.entities) {
-		auto cn = ent.properties.find("classname");
-		if (cn == ent.properties.end() || cn->second != "light_environment") continue;
-
-		// Parse "_light" as "R G B [brightness]"
-		auto lp = ent.properties.find("_light");
-		if (lp != ent.properties.end()) {
-			float lr = 0, lg = 0, lb = 0, lbright = 200.0f;
-			if (sscanf(lp->second.c_str(), "%f %f %f %f", &lr, &lg, &lb, &lbright) >= 3) {
-				// Normalize and scale by brightness (match light_environment.gd logic)
-				float peak = fmaxf(lr, fmaxf(lg, lb));
-				if (peak > 0) {
-					sky_color[0] = (lr / peak) * (lbright / 200.0f) * peak / 255.0f;
-					sky_color[1] = (lg / peak) * (lbright / 200.0f) * peak / 255.0f;
-					sky_color[2] = (lb / peak) * (lbright / 200.0f) * peak / 255.0f;
-				}
-			}
-		}
-
-		// Parse sun direction from "angles" (yaw) and "pitch"
-		float yaw_deg = 0, pitch_deg = 0;
-		auto ap = ent.properties.find("angles");
-		if (ap != ent.properties.end()) {
-			float a0, a1;
-			if (sscanf(ap->second.c_str(), "%f %f", &a0, &a1) >= 2)
-				yaw_deg = a1;
-		} else {
-			auto angp = ent.properties.find("angle");
-			if (angp != ent.properties.end())
-				yaw_deg = atof(angp->second.c_str());
-		}
-		auto pp = ent.properties.find("pitch");
-		if (pp != ent.properties.end())
-			pitch_deg = atof(pp->second.c_str());
-
-		// Convert to GoldSrc direction vector pointing TOWARD the sun.
-		// The angle/pitch specify the direction light TRAVELS (from sun to ground).
-		// We negate to get the direction FROM ground TOWARD the sun, for visibility checks.
-		float pitch_rad = pitch_deg * 3.14159265f / 180.0f;
-		float yaw_rad = yaw_deg * 3.14159265f / 180.0f;
-		sun_dir[0] = -(cosf(pitch_rad) * cosf(yaw_rad));
-		sun_dir[1] = -(cosf(pitch_rad) * sinf(yaw_rad));
-		sun_dir[2] = -sinf(pitch_rad);
-		has_sky_light = true;
-		break; // use first light_environment only
-	}
+	// Rays that escape the map return the sky's light; one more ray toward the sun adds it.
+	const SunLight sun = find_sun(bsp_data);
+	const float *sky_color = sun.color;
+	const float *sun_dir = sun.dir;
+	const bool has_sky_light = sun.present;
 
 	// 3D texture layout: each direction gets dims[2] slices (GoldSrc Z = Godot Y),
 	// each slice is dims[0] x dims[1] (GoldSrc XY = Godot XZ), RGB8.
@@ -3344,6 +3842,13 @@ Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 	// Track which cells have valid data (non-solid, traced)
 	size_t total_cells = (size_t)dims[0] * dims[1] * dims[2];
 	vector<bool> cell_valid(total_cells, false);
+
+	// The sky's share of each cell's light, weighted by brightness over the cube's faces: what
+	// night turns down on models, the light grid's twin of the world's lm_sun.
+	const bool has_sun_fraction = !face_sun_fraction.empty();
+	vector<float> sky_weight(has_sun_fraction ? total_cells : 0, 0.0f);
+	vector<float> all_weight(has_sun_fraction ? total_cells : 0, 0.0f);
+	vector<uint8_t> sun_data(has_sun_fraction ? total_cells : 0, 0);
 
 	float max_trace_dist = 8192.0f;
 	int head_node = bsp_data.models[0].headnode[0];
@@ -3395,8 +3900,16 @@ Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 					bool reached_sky = ray_reached_sky(bsp_data, hit);
 					if (!reached_sky) {
 						float r, g, b;
+						int luxel;
 						sample_lightmap_at(bsp_data.faces[hit.face_index],
-							hit.hit_pos, bsp_data.lighting, r, g, b);
+							hit.hit_pos, bsp_data.lighting, r, g, b, &luxel);
+						if (has_sun_fraction && luxel >= 0) {
+							const auto &frac = face_sun_fraction[hit.face_index];
+							float f = (size_t)luxel < frac.size() ? layer0_sun_share(bsp_data,
+								bsp_data.faces[hit.face_index], luxel, frac[luxel] / 255.0f, sun.style) : 0.0f;
+							sky_weight[cell_idx] += (r + g + b) * f;
+							all_weight[cell_idx] += r + g + b;
+						}
 						pixel_data[d][px_ofs + 0] = (uint8_t)clamp(r, 0.0f, 255.0f);
 						pixel_data[d][px_ofs + 1] = (uint8_t)clamp(g, 0.0f, 255.0f);
 						pixel_data[d][px_ofs + 2] = (uint8_t)clamp(b, 0.0f, 255.0f);
@@ -3406,6 +3919,10 @@ Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 						float r = sky_color[0] * ambient_sky * 255.0f;
 						float g = sky_color[1] * ambient_sky * 255.0f;
 						float b = sky_color[2] * ambient_sky * 255.0f;
+						if (has_sun_fraction) {
+							sky_weight[cell_idx] += r + g + b;
+							all_weight[cell_idx] += r + g + b;
+						}
 						pixel_data[d][px_ofs + 0] = (uint8_t)clamp(r, 0.0f, 255.0f);
 						pixel_data[d][px_ofs + 1] = (uint8_t)clamp(g, 0.0f, 255.0f);
 						pixel_data[d][px_ofs + 2] = (uint8_t)clamp(b, 0.0f, 255.0f);
@@ -3434,6 +3951,10 @@ Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 							float sr = sky_color[0] * weight * 255.0f;
 							float sg = sky_color[1] * weight * 255.0f;
 							float sb = sky_color[2] * weight * 255.0f;
+							if (has_sun_fraction) {
+								sky_weight[cell_idx] += sr + sg + sb;
+								all_weight[cell_idx] += sr + sg + sb;
+							}
 							pixel_data[d][px_ofs + 0] = (uint8_t)clamp(
 								pixel_data[d][px_ofs + 0] + sr, 0.0f, 255.0f);
 							pixel_data[d][px_ofs + 1] = (uint8_t)clamp(
@@ -3446,6 +3967,9 @@ Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 			}
 		}
 	}
+
+	for (size_t i = 0; i < sun_data.size(); i++)
+		if (all_weight[i] > 0) sun_data[i] = (uint8_t)lroundf(sky_weight[i] / all_weight[i] * 255.0f);
 
 	// Flood-fill invalid (solid) cells from nearest valid neighbors.
 	// This prevents trilinear filtering from interpolating toward black at boundaries.
@@ -3466,6 +3990,7 @@ Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 						// Average all valid neighbors
 						int count = 0;
 						float accum[6][3] = {};
+						float sun_accum = 0;
 						for (int n = 0; n < 6; n++) {
 							int nx = gx + offsets[n][0];
 							int ny = gy + offsets[n][1];
@@ -3475,6 +4000,7 @@ Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 							size_t nidx = (size_t)nz * dims[0] * dims[1] + (size_t)ny * dims[0] + nx;
 							if (!cell_valid[nidx]) continue;
 							count++;
+							if (has_sun_fraction) sun_accum += sun_data[nidx];
 							size_t npx = (size_t)nz * slice_bytes + ((size_t)ny * slice_w + nx) * 3;
 							for (int d = 0; d < 6; d++) {
 								accum[d][0] += pixel_data[d][npx + 0];
@@ -3491,6 +4017,7 @@ Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 							pixel_data[d][px_ofs + 1] = (uint8_t)(accum[d][1] * inv);
 							pixel_data[d][px_ofs + 2] = (uint8_t)(accum[d][2] * inv);
 						}
+						if (has_sun_fraction) sun_data[idx] = (uint8_t)(sun_accum * inv);
 						cell_valid[idx] = true;
 						filled_this_pass++;
 					}
@@ -3536,6 +4063,18 @@ Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 	result["grid_dims"] = grid_dims;
 	result["cell_size"] = (double)(cell_size_gs * scale_factor);
 	result["dir_slices"] = dir_slices; // 6 arrays of Images for Texture3D
+	if (has_sun_fraction) {
+		size_t sun_slice_bytes = (size_t)slice_w * slice_h;
+		Array sun_slices;
+		sun_slices.resize(num_slices);
+		for (int s = 0; s < num_slices; s++) {
+			PackedByteArray pba;
+			pba.resize(sun_slice_bytes);
+			memcpy(pba.ptrw(), sun_data.data() + (size_t)s * sun_slice_bytes, sun_slice_bytes);
+			sun_slices[s] = Image::create_from_data(slice_w, slice_h, false, Image::FORMAT_L8, pba);
+		}
+		result["sun_slices"] = sun_slices; // the sky's share of each cell's light
+	}
 
 	uint64_t elapsed = Time::get_singleton()->get_ticks_msec() - t0;
 	UtilityFunctions::print("[GoldSrc] Light grid baked: ", dims[0], "x", dims[1], "x", dims[2],
@@ -3545,3 +4084,100 @@ Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 	return result;
 }
 
+
+// --- Rain floor ---
+
+// Traces from the top of the map straight down, per column. Sky faces are where rain comes
+// from, not what stops it, so the trace carries on through them; the first face that is not sky
+// is where it lands. Faces are tested from both sides, so a sealed room's ceiling stops it from
+// above even though the face only ever draws from below. Worldspawn, and func_water, which rain
+// lands on: a door or a platform overhead is not a roof to this. A column outside the map stops
+// rain at the very top.
+Dictionary GoldSrcBSP::bake_rain_floor(float cell_size_gs) const {
+	if (!parser) return Dictionary();
+	const auto &bsp_data = parser->get_data();
+	if (bsp_data.models.empty() || cell_size_gs <= 0.0f) return Dictionary();
+	uint64_t t0 = Time::get_singleton()->get_ticks_msec();
+
+	const auto &world = bsp_data.models[0];
+	int head = world.headnode[0];
+	int w = max(1, (int)ceilf((world.maxs[0] - world.mins[0]) / cell_size_gs));
+	int h = max(1, (int)ceilf((world.maxs[1] - world.mins[1]) / cell_size_gs));
+	float top = world.maxs[2] + 1.0f;
+	float span = world.maxs[2] - world.mins[2] + 2.0f;
+	static const float down[3] = {0, 0, -1};
+
+	// Rain lands on liquid, and a func_water is a brush entity whose faces are in its own model's
+	// tree, not the world's: without these a moat's floor reads as open to the sky.
+	vector<int> liquid_models;
+	for (const auto &ent : bsp_data.entities) {
+		auto cn = ent.properties.find("classname");
+		auto mdl = ent.properties.find("model");
+		if (cn == ent.properties.end() || cn->second != "func_water" || mdl == ent.properties.end()
+				|| mdl->second.size() < 2 || mdl->second[0] != '*') continue;
+		int m = atoi(mdl->second.c_str() + 1);
+		if (m > 0 && (size_t)m < bsp_data.models.size()) liquid_models.push_back(m);
+	}
+
+	auto land = [&](float x, float y) {
+		float origin[3] = {x, y, top};
+		// A column that meets nothing is outside the sealed map: no rain falls there.
+		float landed = top;
+		float t = 0.0f;
+		while (t < span) {
+			LightGridRayHit hit;
+			trace_ray_bsp(bsp_data, head, origin, down, t, span, hit);
+			if (hit.face_index < 0) break;
+			if (!goldsrc::is_sky_texture(bsp_data.faces[hit.face_index].texture_name)) {
+				landed = hit.hit_pos[2];
+				break;
+			}
+			t = hit.t + 0.5f;
+		}
+		if (landed < top) {
+			for (int m : liquid_models) {
+				const auto &liquid = bsp_data.models[m];
+				if (x < liquid.mins[0] || x > liquid.maxs[0] || y < liquid.mins[1] || y > liquid.maxs[1])
+					continue;
+				LightGridRayHit hit;
+				trace_ray_bsp(bsp_data, liquid.headnode[0], origin, down, 0.0f, span, hit, m);
+				if (hit.face_index >= 0 && hit.hit_pos[2] > landed) landed = hit.hit_pos[2];
+			}
+		}
+		return landed;
+	};
+
+	// A cell is one height, so it takes the highest of its centre and corners: a roof over any of
+	// it keeps rain out of all of it. A centre alone let rain in along every wall a cell straddled.
+	// Corners are shared, and nudged off the grid lines that walls are built on.
+	const float nudge = 0.25f;
+	vector<float> corners((size_t)(w + 1) * (h + 1));
+	for (int iy = 0; iy <= h; iy++)
+		for (int ix = 0; ix <= w; ix++)
+			corners[(size_t)iy * (w + 1) + ix] = land(world.mins[0] + ix * cell_size_gs + nudge,
+				world.mins[1] + iy * cell_size_gs + nudge);
+
+	PackedByteArray data;
+	data.resize((size_t)w * h * 4);
+	float *heights = (float *)data.ptrw();
+	int open = 0;
+	for (int iy = 0; iy < h; iy++) {
+		for (int ix = 0; ix < w; ix++) {
+			float landed = land(world.mins[0] + (ix + 0.5f) * cell_size_gs,
+				world.mins[1] + (iy + 0.5f) * cell_size_gs);
+			for (int k = 0; k < 4; k++)
+				landed = fmaxf(landed, corners[(size_t)(iy + (k >> 1)) * (w + 1) + ix + (k & 1)]);
+			if (landed >= top) open++;
+			heights[(size_t)iy * w + ix] = landed * scale_factor;
+		}
+	}
+
+	Dictionary result;
+	result["origin"] = Vector3(-world.mins[0] * scale_factor, 0.0f, world.mins[1] * scale_factor);
+	result["size"] = Vector2(w * cell_size_gs * scale_factor, h * cell_size_gs * scale_factor);
+	result["image"] = Image::create_from_data(w, h, false, Image::FORMAT_RF, data);
+	result["top"] = top * scale_factor;
+	UtilityFunctions::print("[GoldSrc] Rain floor: ", w, "x", h, " columns (", open,
+		" outside the map), ", (int64_t)(Time::get_singleton()->get_ticks_msec() - t0), "ms");
+	return result;
+}

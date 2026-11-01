@@ -22,6 +22,9 @@ A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
 - Entity properties stored as metadata on each node — classname, targetname, origin, angles, and all other key-value pairs are accessible from GDScript via `node.get_meta("entity")`
 - Entity lump parsing (key-value dictionaries accessible from GDScript)
 - Ambient cube light grid baking — traces rays in 6 directions from a 3D grid through the BSP tree, samples lightmaps at hit points, and outputs slice images for `ImageTexture3D` construction. Includes flood-fill of solid cells to prevent trilinear interpolation artifacts. Provides spatially-varying directional ambient lighting for dynamic models
+- Sun fraction — the share of each luxel's light that came from the sky, so a game can turn the sun down (night) and leave the map's own lights alone. hlrad bakes both into style 0; when the `light_environment` has a style of its own the split is exact, otherwise each luxel is re-lit by sun, sky and point-light traces and the weights that best rebuild the real lightmap decide it. Baked only when a `shader_hook` is set. Bound to world materials as `lm_sun`, handed to the hook's `goldsrc_lightmap` (below) and added to the light grid as `sun_slices`
+- Rain floor (`bake_rain_floor`) — per column, the height where something falling from the sky first lands: sky faces pass, worldspawn and `func_water` stop it, doors and platforms don't. A heightmap a game can use for precipitation, roofs and puddles
+- Shader hooks (`shader_hook`) — your own shader code in every BSP shader, for night, weather and the like, without the extension knowing about them. See [Shader Hooks](#shader-hooks)
 
 ### MDL Models
 - Skeleton3D with full bone hierarchy
@@ -74,6 +77,8 @@ All imported scenes contain only standard Godot types (Node3D, MeshInstance3D, A
 | `shader_lightstyles` | `true` | Composite the four lightmap styles in the world shader, so styles can be animated at runtime. The 64-entry style texture rides in root metadata as `lightstyle_texture` (and `lightstyle_image`). |
 | `overbright` | `2.0` | Lightmap multiplier on world materials. GoldSrc's is 2.0. |
 | `light_grid_cell_size` | `0.0` | Bake an ambient-cube light grid into root metadata as `light_grid`, for lighting models by position. Cell size in GoldSrc units; `0` skips it. |
+| `rain_floor_cell_size` | `0.0` | Bake the rain floor into root metadata as `rain_floor` (see [Shader Hooks](#shader-hooks)). Cell size in GoldSrc units; `0` skips it. |
+| `shader_hook` | `""` | A `.gdshaderinc` every shader in the map includes. See [Shader Hooks](#shader-hooks). |
 
 Every imported map's root is also stamped with `pipeline_id`, a hash of the extension's C++
 source. Godot re-tests an import only when its source or `.import` file changes, so a rebuilt
@@ -117,6 +122,100 @@ ResourceSaver.save(scene, "user://maps/mymap.scn")
 if GoldSrcBSP.scene_pipeline_id(load("user://maps/mymap.scn")) != GoldSrcBSP.get_pipeline_id():
     pass  # rebuild it
 ```
+
+## Shader Hooks
+
+The map's shaders are plain GoldSrc: texture times lightmap, warped liquid, a cubemap sky. To
+change what they draw (night, rain, a lightning flash, a damage tint), point the map at a
+`.gdshaderinc` of your own. Every shader the map is built with then includes it, with one of
+three defines set, and calls the functions that kind of shader needs:
+
+| Define | Shader | You supply |
+|--------|--------|------------|
+| `GOLDSRC_HOOK_WORLD` | world and brush-entity surfaces (opaque and `{` alpha-tested) | `vec3 goldsrc_lightmap(vec3 lm, float sun_share)` and `void goldsrc_surface(inout vec3 lit_srgb, inout vec3 albedo, vec3 world_pos, vec3 world_normal, vec3 normal_view, vec3 view)` |
+| `GOLDSRC_HOOK_LIQUID` | `!`/`*` textures and `func_water` | `vec3 goldsrc_liquid(vec3 albedo, int liquid_type)` |
+| `GOLDSRC_HOOK_SKY` | sky faces | `vec3 goldsrc_sky(vec3 color, vec3 eye_dir)` |
+
+- `goldsrc_lightmap` gets the styled lightmap as stored (gamma, before `overbright`) and
+  `sun_share`, how much of it came from the sky (the [sun fraction](#bsp-maps); 0 on a map
+  without a `light_environment`), and returns the lightmap to use.
+- `goldsrc_surface` runs last. `lit_srgb` is what the surface shows, texture × lightmap in gamma
+  space; `albedo` is what Godot's real-time lights see. `world_pos`/`world_normal` are world space;
+  `normal_view`/`view` are the fragment's `NORMAL` and `VIEW`.
+- `goldsrc_liquid` gets the liquid's final colour and its kind: 0 water, 1 slime, 2 lava.
+- `goldsrc_sky` gets the cubemap colour along `eye_dir` (world space).
+
+Your uniforms go in the same file, inside the right `#ifdef`, and you set them on the map's
+materials like any other. A minimal hook that turns the sun down and leaves the map's own lights
+burning:
+
+```glsl
+// res://shaders/night.gdshaderinc
+#ifdef GOLDSRC_HOOK_WORLD
+uniform vec3 sky_light = vec3(1.0);  // linear multiplier on the sky's part of the light
+
+vec3 goldsrc_lightmap(vec3 lm, float sun_share) {
+	// The lightmap holds pow(light, 0.55), so the multiplier goes through the same curve.
+	return lm * pow(max(mix(vec3(1.0), sky_light, sun_share), vec3(0.0)), vec3(0.55));
+}
+
+void goldsrc_surface(inout vec3 lit_srgb, inout vec3 albedo, vec3 world_pos, vec3 world_normal,
+		vec3 normal_view, vec3 view) {}
+#endif
+
+#ifdef GOLDSRC_HOOK_LIQUID
+vec3 goldsrc_liquid(vec3 albedo, int liquid_type) { return albedo; }
+#endif
+
+#ifdef GOLDSRC_HOOK_SKY
+vec3 goldsrc_sky(vec3 color, vec3 eye_dir) { return color; }
+#endif
+```
+
+Point a map at it with the importer's `shader_hook` option, or `bsp.shader_hook` before
+`build_scene()` when converting at runtime. Then drive it from GDScript:
+
+```gdscript
+func set_night(map: Node, amount: float) -> void:
+	var moon := Vector3(0.12, 0.14, 0.24)
+	for mi in map.find_children("*", "MeshInstance3D", true, false):
+		if mi.mesh == null:
+			continue
+		for i in mi.mesh.get_surface_count():
+			var mat := mi.mesh.surface_get_material(i) as ShaderMaterial
+			if mat:
+				mat.set_shader_parameter("sky_light", Vector3.ONE.lerp(moon, amount))
+```
+
+The materials are shared per texture, so that sets each once however many surfaces use it. A
+material whose shader doesn't declare the uniform ignores it.
+
+For weather, `bake_rain_floor(cell_size)` (or the importer's `rain_floor_cell_size`) gives a
+heightmap of where rain lands, as root metadata `rain_floor`: `image` (an `FORMAT_RF` image of
+heights in Godot units), `origin` (its max-X/min-Z corner in world space), `size` (its world
+extent on X/Z) and `top` (the map's ceiling). A point is under open sky when its height is above
+the floor's at its column:
+
+```glsl
+vec2 uv = vec2((rain_floor_origin.x - p.x) / rain_floor_size.x, (p.z - rain_floor_origin.z) / rain_floor_size.y);
+bool open_to_sky = p.y > textureLod(rain_floor, uv, 0.0).r - 0.1;
+```
+
+**The example.** `examples/shader_hook/` is a working one: `hook.gdshaderinc` does night, wet
+ground under open sky, dimmed liquids and a sky flash, and the demo map imports with it. Open
+`demo.tscn` and drag the `night`, `wetness` and `lightning` sliders on its root; `demo.gd` sets the
+uniforms and the map changes in the editor viewport. (The demo ships without its WADs, so the
+textures are placeholders; the lighting still shows.)
+
+**What to know:**
+- The include is resolved when a shader compiles, at load, not when the map converts. Editing
+  the file needs no reimport; renaming it or changing what it defines does, since the path and
+  the calls are baked into the map.
+- Every shader in the map compiles your code, so an error in it breaks all of them at load.
+  Check the output for shader errors after changing it.
+- A hook has to define every function its kind calls, even as a pass-through. Uniforms are per
+  kind, so declare one in each `#ifdef` that uses it (the example's `sky_light` is in all three).
+- Unset, nothing is included and the shaders are exactly as before.
 
 ## PVS Runtime Visibility Culling
 
@@ -318,6 +417,7 @@ bsp.build_mesh()
 # light_grid) on the node they return or fill.
 bsp.overbright = 2.0                   # lightmap multiplier on world materials (default 2.0)
 bsp.light_grid_cell_size = 32.0        # bake light_grid; 0 (default) skips it
+bsp.shader_hook = "res://shaders/my_hook.gdshaderinc"  # see Shader Hooks; "" (default) for none
 var missing = bsp.load_declared_wads(["res://wads"])  # worldspawn's WADs; returns those not found
 var pipeline = GoldSrcBSP.scene_pipeline_id(packed_scene)  # "" before the stamp existed
 
@@ -359,6 +459,12 @@ var grid = bsp.bake_light_grid(32.0)  # cell size in GoldSrc units
 #   dir_slices: Array of 6 Arrays of Images — one per axis direction
 #     (+X, -X, +Y, -Y, +Z, -Z), each array contains depth-slice Images
 #     for ImageTexture3D construction
+#   sun_slices: Array of L8 Images — the sky's share of each cell's light
+#     (only with a shader_hook, on maps with a light_environment)
+
+# Where rain lands, per column (see Shader Hooks)
+var rain_floor = bsp.bake_rain_floor(16.0)  # cell size in GoldSrc units
+# Returns Dictionary with image (FORMAT_RF heights), origin (max-X/min-Z corner), size, top
 ```
 
 ### VisibilityManager

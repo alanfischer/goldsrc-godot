@@ -67,6 +67,9 @@ public:
 
 	void set_shader_lightstyles(bool enabled);
 	bool get_shader_lightstyles() const;
+	// A .gdshaderinc every shader built here includes: see with_shader_hook in goldsrc_bsp.cpp.
+	void set_shader_hook(const godot::String &path);
+	godot::String get_shader_hook() const;
 
 	// Lightmap multiplier on world materials, read by build_mesh(). GoldSrc's is 2.0.
 	void set_overbright(float value);
@@ -105,7 +108,15 @@ public:
 	// Bake ambient cube light grid from BSP lightmaps.
 	// Returns Dictionary {grid_origin: Vector3, grid_dims: Vector3i, cell_size: float, images: Array[Image]}
 	// Images are 6 RGB8 images (one per axis: +X, -X, +Y, -Y, +Z, -Z in Godot coords).
+	// sun_slices, on maps with a light_environment: L8 slices of the sky's share of each cell.
 	godot::Dictionary bake_light_grid(float cell_size_gs = 32.0f) const;
+
+	// Where rain falling straight down from the sky stops, per column of the map: the first
+	// surface under the sky brushes (a roof, the ground, a pool). Returns {origin: Vector3 (the
+	// max-X/min-Z corner in Godot coords, as the light grid's), size: Vector2 (Godot X/Z extent),
+	// image: Image FORMAT_RF of Godot Y heights, one texel per column (X = GS X, Y = GS Y),
+	// top: float, the Godot Y rain falls from — what a column outside the map holds}.
+	godot::Dictionary bake_rain_floor(float cell_size_gs = 16.0f) const;
 
 private:
 	godot::Ref<godot::ImageTexture> find_texture(const std::string &name) const;
@@ -125,6 +136,8 @@ private:
 	void build_brush_convex(godot::Node3D *parent, int model_index,
 		int contents_filter = 0);
 	void rebake_lightstyle(int style_index);
+	// Fills face_sun_fraction. See the .cpp for how the sky's share is found.
+	void compute_sun_fractions();
 
 	void _collect_leaves_in_aabb(int node_idx, const float gs_min[3], const float gs_max[3],
 		godot::PackedInt32Array &result) const;
@@ -148,9 +161,13 @@ private:
 	std::vector<FaceLightmapInfo> face_lm_info;
 	std::vector<LightmapAtlasState> lm_atlases;
 	float lightstyle_values[64];
+	// Per parsed face, per luxel: the share of its light that came from the sky, 0..255.
+	// Empty when the map has no light_environment.
+	std::vector<std::vector<uint8_t>> face_sun_fraction;
 
 	// Shader-based lightstyle members
 	bool shader_lightstyles = true;
+	godot::String shader_hook;
 	godot::Ref<godot::Image> lightstyle_image;         // 64×1 FORMAT_RF
 	godot::Ref<godot::ImageTexture> lightstyle_texture; // shared across all materials
 
