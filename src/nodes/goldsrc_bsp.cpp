@@ -168,19 +168,28 @@ string str_to_lower(const string &s) {
 //              lit_srgb: texture x lightmap, gamma; albedo: what real-time lights see
 //   LIQUID vec3 goldsrc_liquid(vec3 albedo, int liquid_type)
 //   SKY    vec3 goldsrc_sky(vec3 color, vec3 eye_dir)
-static String with_shader_hook(const char *code, const String &hook, const char *kind) {
+// `variant`, if given, is one more name to #define: which build of a shared source this is.
+static String with_shader_hook(const char *code, const String &hook, const char *kind,
+		const char *variant = nullptr) {
+	String head;
+	if (variant) {
+		head += String("#define ") + variant + "\n";
+	}
+	if (!hook.is_empty()) {
+		head += String("#define GOLDSRC_HOOK_") + kind + "\n#include \"" + hook + "\"\n";
+	}
 	String src(code);
-	if (hook.is_empty()) {
+	if (head.is_empty()) {
 		return src;
 	}
 	// After render_mode: the preprocessor runs first, but shader_type must still lead.
 	int at = src.find("render_mode");
 	at = at < 0 ? src.find("shader_type") : at;
-	at = src.find("\n", at) + 1;
-	return src.insert(at, String("#define GOLDSRC_HOOK_") + kind + "\n#include \"" + hook + "\"\n");
+	return src.insert(src.find("\n", at) + 1, head);
 }
 
-// Shader source for lightstyle blending (opaque variant)
+// Shader source for lightstyle blending. Built twice: as it is, and with GOLDSRC_ALPHA_SCISSOR
+// defined for '{' textures (fences, grates).
 static const char *LIGHTSTYLE_SHADER_CODE = R"(
 shader_type spatial;
 render_mode ambient_light_disabled, specular_disabled;
@@ -208,79 +217,9 @@ vec3 gs_to_linear(vec3 c) {
 	return mix(c / 12.92, pow((max(c, vec3(0.0)) + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
 }
 
-varying vec4 style_coords;
-#ifdef GOLDSRC_HOOK_WORLD
-varying vec3 goldsrc_world_pos;
-varying vec3 goldsrc_world_normal;
-#endif
-
-void vertex() {
-	style_coords = COLOR;
-#ifdef GOLDSRC_HOOK_WORLD
-	goldsrc_world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
-	goldsrc_world_normal = normalize((MODEL_MATRIX * vec4(NORMAL, 0.0)).xyz);
-#endif
-}
-
-void fragment() {
-	vec4 albedo = texture(albedo_texture, UV);
-
-	float b0 = texture(lightstyle_tex, vec2(style_coords.r, 0.5)).r;
-	float b1 = texture(lightstyle_tex, vec2(style_coords.g, 0.5)).r;
-	float b2 = texture(lightstyle_tex, vec2(style_coords.b, 0.5)).r;
-	float b3 = texture(lightstyle_tex, vec2(style_coords.a, 0.5)).r;
-
-	vec3 lm = texture(lm_layer0, UV2).rgb * b0
-	         + texture(lm_layer1, UV2).rgb * b1
-	         + texture(lm_layer2, UV2).rgb * b2
-	         + texture(lm_layer3, UV2).rgb * b3;
-#ifdef GOLDSRC_HOOK_WORLD
-	lm = goldsrc_lightmap(lm, texture(lm_sun, UV2).r);
-#endif
-
-	// ALBEDO stays in the renderer's native space so real-time lights stay correct;
-	// only the lightmap term needs the gamma-space treatment. min() before the
-	// conversion reproduces GoldSrc's clamp, which clips differently in linear.
-	vec3 base_srgb = linear_output ? gs_to_srgb(albedo.rgb) : albedo.rgb;
-	vec3 lit_srgb = min(base_srgb * lm * overbright, vec3(1.0));
-	vec3 base = albedo.rgb;
-#ifdef GOLDSRC_HOOK_WORLD
-	goldsrc_surface(lit_srgb, base, goldsrc_world_pos, goldsrc_world_normal, NORMAL, VIEW);
-#endif
-	ALBEDO = base;
-	EMISSION = linear_output ? gs_to_linear(lit_srgb) : lit_srgb;
-	ROUGHNESS = 1.0;
-}
-)";
-
-// Alpha-scissor variant for '{' textures (fences, grates)
-static const char *LIGHTSTYLE_SHADER_ALPHA_CODE = R"(
-shader_type spatial;
-render_mode ambient_light_disabled, specular_disabled;
-
-uniform sampler2D albedo_texture : source_color, filter_linear_mipmap_anisotropic;
-uniform sampler2D lm_layer0 : filter_linear;
-uniform sampler2D lm_layer1 : filter_linear;
-uniform sampler2D lm_layer2 : filter_linear;
-uniform sampler2D lm_layer3 : filter_linear;
-uniform sampler2D lightstyle_tex : filter_nearest;
-uniform float overbright = 2.0;
-// The sky's share of each luxel's light (GoldSrcBSP::compute_sun_fractions), for the game's hook.
-uniform sampler2D lm_sun : filter_linear, hint_default_black;
-// GoldSrc composited texture x lightmap on 8-bit gamma values. The RD renderers
-// (forward+/mobile) shade in linear space and encode on output, gl_compatibility
-// shades in sRGB and does not, so the same expression lands in a different space
-// on each. Do the multiply in gamma space either way and convert once at the end.
-uniform bool linear_output = false;
-
-vec3 gs_to_srgb(vec3 c) {
-	return mix(c * 12.92, 1.055 * pow(max(c, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
-}
-
-vec3 gs_to_linear(vec3 c) {
-	return mix(c / 12.92, pow((max(c, vec3(0.0)) + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
-}
+#ifdef GOLDSRC_ALPHA_SCISSOR
 uniform float alpha_scissor_threshold : hint_range(0, 1) = 0.5;
+#endif
 
 varying vec4 style_coords;
 #ifdef GOLDSRC_HOOK_WORLD
@@ -324,8 +263,10 @@ void fragment() {
 	ALBEDO = base;
 	EMISSION = linear_output ? gs_to_linear(lit_srgb) : lit_srgb;
 	ROUGHNESS = 1.0;
+#ifdef GOLDSRC_ALPHA_SCISSOR
 	ALPHA = albedo.a;
 	ALPHA_SCISSOR_THRESHOLD = alpha_scissor_threshold;
+#endif
 }
 )";
 
@@ -1608,7 +1549,7 @@ void GoldSrcBSP::build_mesh() {
 		opaque_shader.instantiate();
 		opaque_shader->set_code(with_shader_hook(LIGHTSTYLE_SHADER_CODE, shader_hook, "WORLD"));
 		alpha_shader.instantiate();
-		alpha_shader->set_code(with_shader_hook(LIGHTSTYLE_SHADER_ALPHA_CODE, shader_hook, "WORLD"));
+		alpha_shader->set_code(with_shader_hook(LIGHTSTYLE_SHADER_CODE, shader_hook, "WORLD", "GOLDSRC_ALPHA_SCISSOR"));
 
 		Ref<Image> black_img = Image::create(1, 1, false, Image::FORMAT_RGB8);
 		black_img->set_pixel(0, 0, Color(0, 0, 0));
@@ -4155,8 +4096,11 @@ Dictionary GoldSrcBSP::bake_rain_floor(float cell_size_gs) const {
 			}
 			if (landed < top) {
 				for (int m : liquid_models) {
+					const auto &liquid = bsp_data.models[m];
+					if (origin[0] < liquid.mins[0] || origin[0] > liquid.maxs[0]
+							|| origin[1] < liquid.mins[1] || origin[1] > liquid.maxs[1]) continue;
 					LightGridRayHit hit;
-					trace_ray_bsp(bsp_data, bsp_data.models[m].headnode[0], origin, down, 0.0f, span, hit, m);
+					trace_ray_bsp(bsp_data, liquid.headnode[0], origin, down, 0.0f, span, hit, m);
 					if (hit.face_index >= 0 && hit.hit_pos[2] > landed) landed = hit.hit_pos[2];
 				}
 			}
