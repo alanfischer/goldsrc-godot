@@ -67,6 +67,9 @@ public:
 
 	void set_shader_lightstyles(bool enabled);
 	bool get_shader_lightstyles() const;
+	// A .gdshaderinc every shader built here includes: see with_shader_hook in goldsrc_bsp.cpp.
+	void set_shader_hook(const godot::String &path);
+	godot::String get_shader_hook() const;
 
 	// Lightmap multiplier on world materials, read by build_mesh(). GoldSrc's is 2.0.
 	void set_overbright(float value);
@@ -164,6 +167,7 @@ private:
 
 	// Shader-based lightstyle members
 	bool shader_lightstyles = true;
+	godot::String shader_hook;
 	godot::Ref<godot::Image> lightstyle_image;         // 64×1 FORMAT_RF
 	godot::Ref<godot::ImageTexture> lightstyle_texture; // shared across all materials
 

@@ -4,7 +4,7 @@ extends EditorImportPlugin
 ## Bump when this script changes what an import produces. Godot itself only compares it when
 ## something else already sent a file to be re-tested (its source or .import changed), so the
 ## plugin's own check is what acts on it — see import_key().
-const FORMAT_VERSION := 1
+const FORMAT_VERSION := 2
 ## Project metadata section recording, per .bsp, the import_key() it was last imported with.
 const IMPORTED_WITH := "goldsrc_bsp_imported_with"
 
@@ -114,6 +114,23 @@ func _get_import_options(_path: String, _preset_index: int) -> Array[Dictionary]
 			"property_hint": PROPERTY_HINT_RANGE,
 			"hint_string": "0.0,256.0,1.0",
 		},
+		# Bake the rain floor into the scene's "rain_floor" metadata: per column, where something
+		# falling from the sky first lands (GoldSrcBSP.bake_rain_floor). Cell size in GoldSrc
+		# units; 0 skips the bake.
+		{
+			"name": "rain_floor_cell_size",
+			"default_value": 0.0,
+			"property_hint": PROPERTY_HINT_RANGE,
+			"hint_string": "0.0,128.0,1.0",
+		},
+		# A .gdshaderinc every shader in the map includes, to add your own night, weather and
+		# the like. See "Shader hooks" in the README; examples/shader_hook/ is a working one.
+		{
+			"name": "shader_hook",
+			"default_value": "",
+			"property_hint": PROPERTY_HINT_FILE,
+			"hint_string": "*.gdshaderinc",
+		},
 	]
 
 
@@ -128,6 +145,7 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 	bsp.shader_lightstyles = options.get("shader_lightstyles", true)
 	bsp.overbright = options.get("overbright", 2.0)
 	bsp.light_grid_cell_size = options.get("light_grid_cell_size", 0.0)
+	bsp.shader_hook = options.get("shader_hook", "")
 	var err := bsp.load_bsp(source_file)
 	if err != OK:
 		bsp.free()
@@ -147,6 +165,11 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 				push_warning("BSP Importer: WAD '%s' not found for %s" % [name, source_file])
 
 	var root := bsp.build_scene()
+	var rain_cell: float = options.get("rain_floor_cell_size", 0.0)
+	if rain_cell > 0.0:
+		var rain_floor := bsp.bake_rain_floor(rain_cell)
+		if not rain_floor.is_empty():
+			root.set_meta("rain_floor", rain_floor)
 	bsp.free()
 	_instantiate_entity_models(root, options.get("model_directory", ""))
 

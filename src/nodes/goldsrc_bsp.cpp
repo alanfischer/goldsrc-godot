@@ -157,6 +157,29 @@ string str_to_lower(const string &s) {
 	return result;
 }
 
+// A game's shader hook (GoldSrcBSP.shader_hook): every shader built here stays plain GoldSrc
+// unless one is set, and then includes it with GOLDSRC_HOOK_<KIND> defined, so one file can
+// supply what each kind calls. The include is resolved when the shader compiles, at load, so
+// the game can change what it does without reconverting a map; only the calls are baked in.
+//   WORLD  vec3 goldsrc_lightmap(vec3 lm, float sun_share)
+//              lm: the styled lightmap, gamma (as stored); sun_share: lm_sun, the sky's part of it
+//          void goldsrc_surface(inout vec3 lit_srgb, inout vec3 albedo, vec3 world_pos,
+//                               vec3 world_normal, vec3 normal_view, vec3 view)
+//              lit_srgb: texture x lightmap, gamma; albedo: what real-time lights see
+//   LIQUID vec3 goldsrc_liquid(vec3 albedo, int liquid_type)
+//   SKY    vec3 goldsrc_sky(vec3 color, vec3 eye_dir)
+static String with_shader_hook(const char *code, const String &hook, const char *kind) {
+	String src(code);
+	if (hook.is_empty()) {
+		return src;
+	}
+	// After render_mode: the preprocessor runs first, but shader_type must still lead.
+	int at = src.find("render_mode");
+	at = at < 0 ? src.find("shader_type") : at;
+	at = src.find("\n", at) + 1;
+	return src.insert(at, String("#define GOLDSRC_HOOK_") + kind + "\n#include \"" + hook + "\"\n");
+}
+
 // Shader source for lightstyle blending (opaque variant)
 static const char *LIGHTSTYLE_SHADER_CODE = R"(
 shader_type spatial;
@@ -169,10 +192,8 @@ uniform sampler2D lm_layer2 : filter_linear;
 uniform sampler2D lm_layer3 : filter_linear;
 uniform sampler2D lightstyle_tex : filter_nearest;
 uniform float overbright = 2.0;
-// The sky's share of each luxel's light (GoldSrcBSP::compute_sun_fractions), and a linear-light
-// multiplier on that share: night, or a fade on a sun that shares style 0 with the lights.
+// The sky's share of each luxel's light (GoldSrcBSP::compute_sun_fractions), for the game's hook.
 uniform sampler2D lm_sun : filter_linear, hint_default_black;
-uniform vec3 sky_light = vec3(1.0);
 // GoldSrc composited texture x lightmap on 8-bit gamma values. The RD renderers
 // (forward+/mobile) shade in linear space and encode on output, gl_compatibility
 // shades in sRGB and does not, so the same expression lands in a different space
@@ -188,9 +209,17 @@ vec3 gs_to_linear(vec3 c) {
 }
 
 varying vec4 style_coords;
+#ifdef GOLDSRC_HOOK_WORLD
+varying vec3 goldsrc_world_pos;
+varying vec3 goldsrc_world_normal;
+#endif
 
 void vertex() {
 	style_coords = COLOR;
+#ifdef GOLDSRC_HOOK_WORLD
+	goldsrc_world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	goldsrc_world_normal = normalize((MODEL_MATRIX * vec4(NORMAL, 0.0)).xyz);
+#endif
 }
 
 void fragment() {
@@ -205,15 +234,20 @@ void fragment() {
 	         + texture(lm_layer1, UV2).rgb * b1
 	         + texture(lm_layer2, UV2).rgb * b2
 	         + texture(lm_layer3, UV2).rgb * b3;
-	// Lightmaps hold pow(light, 0.55), so the share is scaled before that curve, not after.
-	lm *= pow(max(mix(vec3(1.0), sky_light, texture(lm_sun, UV2).r), vec3(0.0)), vec3(0.55));
+#ifdef GOLDSRC_HOOK_WORLD
+	lm = goldsrc_lightmap(lm, texture(lm_sun, UV2).r);
+#endif
 
 	// ALBEDO stays in the renderer's native space so real-time lights stay correct;
 	// only the lightmap term needs the gamma-space treatment. min() before the
 	// conversion reproduces GoldSrc's clamp, which clips differently in linear.
 	vec3 base_srgb = linear_output ? gs_to_srgb(albedo.rgb) : albedo.rgb;
 	vec3 lit_srgb = min(base_srgb * lm * overbright, vec3(1.0));
-	ALBEDO = albedo.rgb;
+	vec3 base = albedo.rgb;
+#ifdef GOLDSRC_HOOK_WORLD
+	goldsrc_surface(lit_srgb, base, goldsrc_world_pos, goldsrc_world_normal, NORMAL, VIEW);
+#endif
+	ALBEDO = base;
 	EMISSION = linear_output ? gs_to_linear(lit_srgb) : lit_srgb;
 	ROUGHNESS = 1.0;
 }
@@ -231,10 +265,8 @@ uniform sampler2D lm_layer2 : filter_linear;
 uniform sampler2D lm_layer3 : filter_linear;
 uniform sampler2D lightstyle_tex : filter_nearest;
 uniform float overbright = 2.0;
-// The sky's share of each luxel's light (GoldSrcBSP::compute_sun_fractions), and a linear-light
-// multiplier on that share: night, or a fade on a sun that shares style 0 with the lights.
+// The sky's share of each luxel's light (GoldSrcBSP::compute_sun_fractions), for the game's hook.
 uniform sampler2D lm_sun : filter_linear, hint_default_black;
-uniform vec3 sky_light = vec3(1.0);
 // GoldSrc composited texture x lightmap on 8-bit gamma values. The RD renderers
 // (forward+/mobile) shade in linear space and encode on output, gl_compatibility
 // shades in sRGB and does not, so the same expression lands in a different space
@@ -251,9 +283,17 @@ vec3 gs_to_linear(vec3 c) {
 uniform float alpha_scissor_threshold : hint_range(0, 1) = 0.5;
 
 varying vec4 style_coords;
+#ifdef GOLDSRC_HOOK_WORLD
+varying vec3 goldsrc_world_pos;
+varying vec3 goldsrc_world_normal;
+#endif
 
 void vertex() {
 	style_coords = COLOR;
+#ifdef GOLDSRC_HOOK_WORLD
+	goldsrc_world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	goldsrc_world_normal = normalize((MODEL_MATRIX * vec4(NORMAL, 0.0)).xyz);
+#endif
 }
 
 void fragment() {
@@ -268,15 +308,20 @@ void fragment() {
 	         + texture(lm_layer1, UV2).rgb * b1
 	         + texture(lm_layer2, UV2).rgb * b2
 	         + texture(lm_layer3, UV2).rgb * b3;
-	// Lightmaps hold pow(light, 0.55), so the share is scaled before that curve, not after.
-	lm *= pow(max(mix(vec3(1.0), sky_light, texture(lm_sun, UV2).r), vec3(0.0)), vec3(0.55));
+#ifdef GOLDSRC_HOOK_WORLD
+	lm = goldsrc_lightmap(lm, texture(lm_sun, UV2).r);
+#endif
 
 	// ALBEDO stays in the renderer's native space so real-time lights stay correct;
 	// only the lightmap term needs the gamma-space treatment. min() before the
 	// conversion reproduces GoldSrc's clamp, which clips differently in linear.
 	vec3 base_srgb = linear_output ? gs_to_srgb(albedo.rgb) : albedo.rgb;
 	vec3 lit_srgb = min(base_srgb * lm * overbright, vec3(1.0));
-	ALBEDO = albedo.rgb;
+	vec3 base = albedo.rgb;
+#ifdef GOLDSRC_HOOK_WORLD
+	goldsrc_surface(lit_srgb, base, goldsrc_world_pos, goldsrc_world_normal, NORMAL, VIEW);
+#endif
+	ALBEDO = base;
 	EMISSION = linear_output ? gs_to_linear(lit_srgb) : lit_srgb;
 	ROUGHNESS = 1.0;
 	ALPHA = albedo.a;
@@ -306,20 +351,15 @@ shader_type spatial;
 render_mode unshaded, shadows_disabled, ambient_light_disabled, depth_draw_never;
 
 uniform samplerCube sky_cubemap : source_color, hint_default_black;
-// A flash lighting the sky from within, brightest toward flash_dir (world space): what lights
-// up the clouds behind a lightning strike. Black is no flash.
-uniform vec3 flash_color = vec3(0.0);
-uniform vec3 flash_dir = vec3(0.0, 1.0, 0.0);
 
 void fragment() {
 	// Reconstruct world-space eye direction matching sky_cubemap.gdshader EYEDIR.
 	// VIEW points from fragment toward camera (view space); negate and rotate to world.
 	vec3 eye_dir = normalize((INV_VIEW_MATRIX * vec4(-VIEW, 0.0)).xyz);
 	vec3 col = texture(sky_cubemap, vec3(-eye_dir.x, eye_dir.y, eye_dir.z)).rgb;
-	// Clouds have something to light and open sky only a glow, so it multiplies and then adds.
-	float toward = max(dot(eye_dir, normalize(flash_dir)), 0.0);
-	col *= vec3(1.0) + flash_color * (1.0 + 3.0 * pow(toward, 3.0));
-	col += flash_color * (0.3 + 0.9 * pow(toward, 4.0));
+#ifdef GOLDSRC_HOOK_SKY
+	col = goldsrc_sky(col, eye_dir);
+#endif
 	ALBEDO = col;
 }
 )";
@@ -510,9 +550,6 @@ uniform float tint_ceiling : hint_range(0.0, 1.0) = 0.55;  // deep water is neve
 // thing the water already had. Depth should colour the water, not replace it.
 uniform float absorb_distance : hint_range(0.1, 40.0) = 14.0;
 uniform float foam_width : hint_range(0.0, 2.0) = 0.35;       // units of shore before it whitens
-// Liquid is fullbright, so it has no lightmap share to turn down: the world's sky_light dims
-// it whole. Lava keeps its glow.
-uniform vec3 sky_light = vec3(1.0);
 
 varying vec3 wave_normal;
 )" GOLDSRC_WATER_WAVE_GLSL R"(
@@ -585,9 +622,9 @@ void fragment() {
 			ALBEDO = mix(ALBEDO, vec3(1.0), foam * 0.3);
 		}
 	}
-	if (liquid_type != 2) {
-		ALBEDO *= pow(max(sky_light, vec3(0.0)), vec3(0.55));
-	}
+#ifdef GOLDSRC_HOOK_LIQUID
+	ALBEDO = goldsrc_liquid(ALBEDO, liquid_type);
+#endif
 }
 )";
 
@@ -917,6 +954,8 @@ void GoldSrcBSP::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_face_axes", "position", "normal"), &GoldSrcBSP::get_face_axes);
 	ClassDB::bind_method(D_METHOD("set_shader_lightstyles", "enabled"), &GoldSrcBSP::set_shader_lightstyles);
 	ClassDB::bind_method(D_METHOD("get_shader_lightstyles"), &GoldSrcBSP::get_shader_lightstyles);
+	ClassDB::bind_method(D_METHOD("set_shader_hook", "path"), &GoldSrcBSP::set_shader_hook);
+	ClassDB::bind_method(D_METHOD("get_shader_hook"), &GoldSrcBSP::get_shader_hook);
 	ClassDB::bind_method(D_METHOD("bake_light_grid", "cell_size"), &GoldSrcBSP::bake_light_grid);
 	ClassDB::bind_method(D_METHOD("bake_rain_floor", "cell_size"), &GoldSrcBSP::bake_rain_floor);
 	ClassDB::bind_method(D_METHOD("set_overbright", "value"), &GoldSrcBSP::set_overbright);
@@ -925,6 +964,7 @@ void GoldSrcBSP::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_light_grid_cell_size"), &GoldSrcBSP::get_light_grid_cell_size);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "scale_factor"), "set_scale_factor", "get_scale_factor");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "shader_lightstyles"), "set_shader_lightstyles", "get_shader_lightstyles");
+	ADD_PROPERTY(PropertyInfo(Variant::STRING, "shader_hook", PROPERTY_HINT_FILE, "*.gdshaderinc"), "set_shader_hook", "get_shader_hook");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "overbright"), "set_overbright", "get_overbright");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "light_grid_cell_size"), "set_light_grid_cell_size", "get_light_grid_cell_size");
 }
@@ -1034,6 +1074,14 @@ void GoldSrcBSP::set_shader_lightstyles(bool enabled) {
 
 bool GoldSrcBSP::get_shader_lightstyles() const {
 	return shader_lightstyles;
+}
+
+void GoldSrcBSP::set_shader_hook(const String &path) {
+	shader_hook = path;
+}
+
+String GoldSrcBSP::get_shader_hook() const {
+	return shader_hook;
 }
 
 void GoldSrcBSP::set_overbright(float value) {
@@ -1525,12 +1573,12 @@ void GoldSrcBSP::build_mesh() {
 	// Sky surface shader: always created, used for all 'sky*' texture faces
 	Ref<Shader> sky_shader;
 	sky_shader.instantiate();
-	sky_shader->set_code(SKY_SURFACE_SHADER_CODE);
+	sky_shader->set_code(with_shader_hook(SKY_SURFACE_SHADER_CODE, shader_hook, "SKY"));
 
 	// Water surface shader: turbulent warp for '!' and '*' texture faces
 	Ref<Shader> water_shader;
 	water_shader.instantiate();
-	water_shader->set_code(WATER_SHADER_CODE);
+	water_shader->set_code(with_shader_hook(WATER_SHADER_CODE, shader_hook, "LIQUID"));
 
 	// Water's depth-only prepass. Carries no per-texture state, so one material is shared by
 	// every water twin in the model; RENDER_PRIORITY_LIQUID_DEPTH is what puts it ahead of the
@@ -1558,9 +1606,9 @@ void GoldSrcBSP::build_mesh() {
 		lightstyle_texture = ImageTexture::create_from_image(lightstyle_image);
 
 		opaque_shader.instantiate();
-		opaque_shader->set_code(LIGHTSTYLE_SHADER_CODE);
+		opaque_shader->set_code(with_shader_hook(LIGHTSTYLE_SHADER_CODE, shader_hook, "WORLD"));
 		alpha_shader.instantiate();
-		alpha_shader->set_code(LIGHTSTYLE_SHADER_ALPHA_CODE);
+		alpha_shader->set_code(with_shader_hook(LIGHTSTYLE_SHADER_ALPHA_CODE, shader_hook, "WORLD"));
 
 		Ref<Image> black_img = Image::create(1, 1, false, Image::FORMAT_RGB8);
 		black_img->set_pixel(0, 0, Color(0, 0, 0));
@@ -3230,7 +3278,8 @@ static void trace_ray_bsp(
 	int node_index,
 	const float origin[3], const float dir[3],
 	float t_min, float t_max,
-	LightGridRayHit &best_hit)
+	LightGridRayHit &best_hit,
+	int model_index = 0)
 {
 	if (t_min >= t_max) return;
 	if (node_index < 0) return; // leaf — hull 0 stores faces on nodes, not leaves
@@ -3248,7 +3297,7 @@ static void trace_ray_bsp(
 		if (parsed < 0) continue;
 
 		const auto &face = bsp_data.faces[parsed];
-		if (face.model_index != 0) continue; // worldspawn only
+		if (face.model_index != model_index) continue; // the tree's own model only
 		if (face.vertices.size() < 3) continue;
 
 		float t = ray_polygon_intersect(origin, dir, face);
@@ -3270,9 +3319,9 @@ static void trace_ray_bsp(
 	                plane.normal[2] * (origin[2] + dir[2] * t_max) - plane.dist;
 
 	if (d_start >= 0 && d_end >= 0) {
-		trace_ray_bsp(bsp_data, node.children[0], origin, dir, t_min, t_max, best_hit);
+		trace_ray_bsp(bsp_data, node.children[0], origin, dir, t_min, t_max, best_hit, model_index);
 	} else if (d_start < 0 && d_end < 0) {
-		trace_ray_bsp(bsp_data, node.children[1], origin, dir, t_min, t_max, best_hit);
+		trace_ray_bsp(bsp_data, node.children[1], origin, dir, t_min, t_max, best_hit, model_index);
 	} else {
 		// Ray crosses the plane — compute split point
 		float denom = plane.normal[0] * dir[0] + plane.normal[1] * dir[1] + plane.normal[2] * dir[2];
@@ -3287,8 +3336,8 @@ static void trace_ray_bsp(
 
 		int near_child = d_start >= 0 ? 0 : 1;
 		int far_child = 1 - near_child;
-		trace_ray_bsp(bsp_data, node.children[near_child], origin, dir, t_min, t_split, best_hit);
-		trace_ray_bsp(bsp_data, node.children[far_child], origin, dir, t_split, t_max, best_hit);
+		trace_ray_bsp(bsp_data, node.children[near_child], origin, dir, t_min, t_split, best_hit, model_index);
+		trace_ray_bsp(bsp_data, node.children[far_child], origin, dir, t_split, t_max, best_hit, model_index);
 	}
 }
 
@@ -4048,13 +4097,15 @@ Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 	return result;
 }
 
+
 // --- Rain floor ---
 
 // One trace per column from the top of the map straight down. Sky faces are where rain comes
 // from, not what stops it, so the trace carries on through them; the first face that is not sky
 // is where it lands. Faces are tested from both sides, so a sealed room's ceiling stops it from
-// above even though the face only ever draws from below. Worldspawn only: a door or a platform
-// overhead is not a roof to this. A column outside the map stops rain at the very top.
+// above even though the face only ever draws from below. Worldspawn, and func_water, which rain
+// lands on: a door or a platform overhead is not a roof to this. A column outside the map stops
+// rain at the very top.
 Dictionary GoldSrcBSP::bake_rain_floor(float cell_size_gs) const {
 	if (!parser) return Dictionary();
 	const auto &bsp_data = parser->get_data();
@@ -4068,6 +4119,18 @@ Dictionary GoldSrcBSP::bake_rain_floor(float cell_size_gs) const {
 	float top = world.maxs[2] + 1.0f;
 	float span = world.maxs[2] - world.mins[2] + 2.0f;
 	static const float down[3] = {0, 0, -1};
+
+	// Rain lands on liquid, and a func_water is a brush entity whose faces are in its own model's
+	// tree, not the world's: without these a moat's floor reads as open to the sky.
+	vector<int> liquid_models;
+	for (const auto &ent : bsp_data.entities) {
+		auto cn = ent.properties.find("classname");
+		auto mdl = ent.properties.find("model");
+		if (cn == ent.properties.end() || cn->second != "func_water" || mdl == ent.properties.end()
+				|| mdl->second.size() < 2 || mdl->second[0] != '*') continue;
+		int m = atoi(mdl->second.c_str() + 1);
+		if (m > 0 && (size_t)m < bsp_data.models.size()) liquid_models.push_back(m);
+	}
 
 	PackedByteArray data;
 	data.resize((size_t)w * h * 4);
@@ -4089,6 +4152,13 @@ Dictionary GoldSrcBSP::bake_rain_floor(float cell_size_gs) const {
 					break;
 				}
 				t = hit.t + 0.5f;
+			}
+			if (landed < top) {
+				for (int m : liquid_models) {
+					LightGridRayHit hit;
+					trace_ray_bsp(bsp_data, bsp_data.models[m].headnode[0], origin, down, 0.0f, span, hit, m);
+					if (hit.face_index >= 0 && hit.hit_pos[2] > landed) landed = hit.hit_pos[2];
+				}
 			}
 			if (landed >= top) open++;
 			heights[(size_t)iy * w + ix] = landed * scale_factor;
