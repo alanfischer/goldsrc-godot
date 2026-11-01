@@ -108,6 +108,13 @@ public:
 	// sun_slices, on maps with a light_environment: L8 slices of the sky's share of each cell.
 	godot::Dictionary bake_light_grid(float cell_size_gs = 32.0f) const;
 
+	// Where rain falling straight down from the sky stops, per column of the map: the first
+	// surface under the sky brushes (a roof, the ground, a pool). Returns {origin: Vector3 (the
+	// max-X/min-Z corner in Godot coords, as the light grid's), size: Vector2 (Godot X/Z extent),
+	// image: Image FORMAT_RF of Godot Y heights, one texel per column (X = GS X, Y = GS Y),
+	// top: float, the Godot Y rain falls from — what a column outside the map holds}.
+	godot::Dictionary bake_rain_floor(float cell_size_gs = 16.0f) const;
+
 private:
 	godot::Ref<godot::ImageTexture> find_texture(const std::string &name) const;
 	godot::Vector3 goldsrc_to_godot(float x, float y, float z) const;

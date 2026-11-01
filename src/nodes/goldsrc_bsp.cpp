@@ -206,7 +206,7 @@ void fragment() {
 	         + texture(lm_layer2, UV2).rgb * b2
 	         + texture(lm_layer3, UV2).rgb * b3;
 	// Lightmaps hold pow(light, 0.55), so the share is scaled before that curve, not after.
-	lm *= pow(mix(vec3(1.0), sky_light, texture(lm_sun, UV2).r), vec3(0.55));
+	lm *= pow(max(mix(vec3(1.0), sky_light, texture(lm_sun, UV2).r), vec3(0.0)), vec3(0.55));
 
 	// ALBEDO stays in the renderer's native space so real-time lights stay correct;
 	// only the lightmap term needs the gamma-space treatment. min() before the
@@ -269,7 +269,7 @@ void fragment() {
 	         + texture(lm_layer2, UV2).rgb * b2
 	         + texture(lm_layer3, UV2).rgb * b3;
 	// Lightmaps hold pow(light, 0.55), so the share is scaled before that curve, not after.
-	lm *= pow(mix(vec3(1.0), sky_light, texture(lm_sun, UV2).r), vec3(0.55));
+	lm *= pow(max(mix(vec3(1.0), sky_light, texture(lm_sun, UV2).r), vec3(0.0)), vec3(0.55));
 
 	// ALBEDO stays in the renderer's native space so real-time lights stay correct;
 	// only the lightmap term needs the gamma-space treatment. min() before the
@@ -586,7 +586,7 @@ void fragment() {
 		}
 	}
 	if (liquid_type != 2) {
-		ALBEDO *= pow(sky_light, vec3(0.55));
+		ALBEDO *= pow(max(sky_light, vec3(0.0)), vec3(0.55));
 	}
 }
 )";
@@ -918,6 +918,7 @@ void GoldSrcBSP::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_shader_lightstyles", "enabled"), &GoldSrcBSP::set_shader_lightstyles);
 	ClassDB::bind_method(D_METHOD("get_shader_lightstyles"), &GoldSrcBSP::get_shader_lightstyles);
 	ClassDB::bind_method(D_METHOD("bake_light_grid", "cell_size"), &GoldSrcBSP::bake_light_grid);
+	ClassDB::bind_method(D_METHOD("bake_rain_floor", "cell_size"), &GoldSrcBSP::bake_rain_floor);
 	ClassDB::bind_method(D_METHOD("set_overbright", "value"), &GoldSrcBSP::set_overbright);
 	ClassDB::bind_method(D_METHOD("get_overbright"), &GoldSrcBSP::get_overbright);
 	ClassDB::bind_method(D_METHOD("set_light_grid_cell_size", "value"), &GoldSrcBSP::set_light_grid_cell_size);
@@ -4047,3 +4048,59 @@ Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 	return result;
 }
 
+// --- Rain floor ---
+
+// One trace per column from the top of the map straight down. Sky faces are where rain comes
+// from, not what stops it, so the trace carries on through them; the first face that is not sky
+// is where it lands. Faces are tested from both sides, so a sealed room's ceiling stops it from
+// above even though the face only ever draws from below. Worldspawn only: a door or a platform
+// overhead is not a roof to this. A column outside the map stops rain at the very top.
+Dictionary GoldSrcBSP::bake_rain_floor(float cell_size_gs) const {
+	if (!parser) return Dictionary();
+	const auto &bsp_data = parser->get_data();
+	if (bsp_data.models.empty() || cell_size_gs <= 0.0f) return Dictionary();
+	uint64_t t0 = Time::get_singleton()->get_ticks_msec();
+
+	const auto &world = bsp_data.models[0];
+	int head = world.headnode[0];
+	int w = max(1, (int)ceilf((world.maxs[0] - world.mins[0]) / cell_size_gs));
+	int h = max(1, (int)ceilf((world.maxs[1] - world.mins[1]) / cell_size_gs));
+	float top = world.maxs[2] + 1.0f;
+	float span = world.maxs[2] - world.mins[2] + 2.0f;
+	static const float down[3] = {0, 0, -1};
+
+	PackedByteArray data;
+	data.resize((size_t)w * h * 4);
+	float *heights = (float *)data.ptrw();
+	int open = 0;
+	for (int iy = 0; iy < h; iy++) {
+		for (int ix = 0; ix < w; ix++) {
+			float origin[3] = {world.mins[0] + (ix + 0.5f) * cell_size_gs,
+				world.mins[1] + (iy + 0.5f) * cell_size_gs, top};
+			// A column that meets nothing is outside the sealed map: no rain falls there.
+			float landed = top;
+			float t = 0.0f;
+			while (t < span) {
+				LightGridRayHit hit;
+				trace_ray_bsp(bsp_data, head, origin, down, t, span, hit);
+				if (hit.face_index < 0) break;
+				if (!goldsrc::is_sky_texture(bsp_data.faces[hit.face_index].texture_name)) {
+					landed = hit.hit_pos[2];
+					break;
+				}
+				t = hit.t + 0.5f;
+			}
+			if (landed >= top) open++;
+			heights[(size_t)iy * w + ix] = landed * scale_factor;
+		}
+	}
+
+	Dictionary result;
+	result["origin"] = Vector3(-world.mins[0] * scale_factor, 0.0f, world.mins[1] * scale_factor);
+	result["size"] = Vector2(w * cell_size_gs * scale_factor, h * cell_size_gs * scale_factor);
+	result["image"] = Image::create_from_data(w, h, false, Image::FORMAT_RF, data);
+	result["top"] = top * scale_factor;
+	UtilityFunctions::print("[GoldSrc] Rain floor: ", w, "x", h, " columns (", open,
+		" outside the map), ", (int64_t)(Time::get_singleton()->get_ticks_msec() - t0), "ms");
+	return result;
+}
