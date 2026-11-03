@@ -132,13 +132,14 @@ three defines set, and calls the functions that kind of shader needs:
 
 | Define | Shader | You supply |
 |--------|--------|------------|
-| `GOLDSRC_HOOK_WORLD` | world and brush-entity surfaces (opaque and `{` alpha-tested) | `vec3 goldsrc_lightmap(vec3 lm, float sun_share)` and `void goldsrc_surface(inout vec3 lit_srgb, inout vec3 albedo, vec3 world_pos, vec3 world_normal, vec3 normal_view, vec3 view)` |
+| `GOLDSRC_HOOK_WORLD` | world and brush-entity surfaces (opaque and `{` alpha-tested) | `vec3 goldsrc_lightmap(vec3 lm, float sun_share, vec3 world_pos)` and `void goldsrc_surface(inout vec3 lit_srgb, inout vec3 albedo, vec3 world_pos, vec3 world_normal, vec3 normal_view, vec3 view)` |
 | `GOLDSRC_HOOK_LIQUID` | `!`/`*` textures and `func_water` | `vec3 goldsrc_liquid(vec3 albedo, int liquid_type)` |
 | `GOLDSRC_HOOK_SKY` | sky faces | `vec3 goldsrc_sky(vec3 color, vec3 eye_dir)` |
 
 - `goldsrc_lightmap` gets the styled lightmap as stored (gamma, before `overbright`) and
   `sun_share`, how much of it came from the sky (the [sun fraction](#bsp-maps); 0 on a map
-  without a `light_environment`), and returns the lightmap to use.
+  without a `light_environment`), and the fragment's world position (for anything that varies
+  over the map, such as cloud shadows), and returns the lightmap to use.
 - `goldsrc_surface` runs last. `lit_srgb` is what the surface shows, texture × lightmap in gamma
   space; `albedo` is what Godot's real-time lights see. `world_pos`/`world_normal` are world space;
   `normal_view`/`view` are the fragment's `NORMAL` and `VIEW`.
@@ -154,7 +155,7 @@ burning:
 #ifdef GOLDSRC_HOOK_WORLD
 uniform vec3 sky_light = vec3(1.0);  // linear multiplier on the sky's part of the light
 
-vec3 goldsrc_lightmap(vec3 lm, float sun_share) {
+vec3 goldsrc_lightmap(vec3 lm, float sun_share, vec3 world_pos) {
 	// The lightmap holds pow(light, 0.55), so the multiplier goes through the same curve.
 	return lm * pow(max(mix(vec3(1.0), sky_light, sun_share), vec3(0.0)), vec3(0.55));
 }

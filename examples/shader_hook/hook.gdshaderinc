@@ -15,7 +15,7 @@ uniform vec2 rain_floor_size = vec2(1.0);
 uniform bool has_rain_floor = false;
 
 // lm is the styled lightmap as stored (gamma); sun_share is how much of it came from the sky.
-vec3 goldsrc_lightmap(vec3 lm, float sun_share) {
+vec3 goldsrc_lightmap(vec3 lm, float sun_share, vec3 world_pos) {
 	// The lightmap holds pow(light, 0.55), so the multiplier goes through the same curve.
 	return lm * pow(max(mix(vec3(1.0), sky_light, sun_share), vec3(0.0)), vec3(0.55));
 }
