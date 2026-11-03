@@ -162,7 +162,7 @@ string str_to_lower(const string &s) {
 // unless one is set, and then includes it with GOLDSRC_HOOK_<KIND> defined, so one file can
 // supply what each kind calls. The include is resolved when the shader compiles, at load, so
 // the game can change what it does without reconverting a map; only the calls are baked in.
-//   WORLD  vec3 goldsrc_lightmap(vec3 lm, float sun_share)
+//   WORLD  vec3 goldsrc_lightmap(vec3 lm, float sun_share, vec3 world_pos)
 //              lm: the styled lightmap, gamma (as stored); sun_share: lm_sun, the sky's part of it
 //          void goldsrc_surface(inout vec3 lit_srgb, inout vec3 albedo, vec3 world_pos,
 //                               vec3 world_normal, vec3 normal_view, vec3 view)
@@ -249,7 +249,7 @@ void fragment() {
 	         + texture(lm_layer2, UV2).rgb * b2
 	         + texture(lm_layer3, UV2).rgb * b3;
 #ifdef GOLDSRC_HOOK_WORLD
-	lm = goldsrc_lightmap(lm, texture(lm_sun, UV2).r);
+	lm = goldsrc_lightmap(lm, texture(lm_sun, UV2).r, goldsrc_world_pos);
 #endif
 
 	// ALBEDO stays in the renderer's native space so real-time lights stay correct;
