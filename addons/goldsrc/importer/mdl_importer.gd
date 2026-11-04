@@ -39,7 +39,7 @@ func _get_preset_name(preset_index: int) -> String:
 ## .godot/imported/*.mdl-* by hand; the number is here so it is visible which build a cache came
 ## from.
 func _get_format_version() -> int:
-	return 3
+	return 4
 
 
 func _get_priority() -> float:
@@ -91,6 +91,13 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 	root.name = root_name
 	# GoldSrc models face -Z after axis swizzle; rotate to match GoldSrc game orientation
 	root.rotation_degrees.y = 90.0
+	# The sequences in the file's order, which a game's sequence numbers count in; the
+	# AnimationPlayer lists them by name, alphabetically.
+	var sequences := []
+	for i in mdl.get_sequence_count():
+		sequences.append({"name": mdl.get_sequence_name(i), "fps": mdl.get_sequence_fps(i),
+			"num_frames": mdl.get_sequence_num_frames(i)})
+	root.set_meta("sequences", sequences)
 
 	var children := mdl.get_children()
 	for child in children:
