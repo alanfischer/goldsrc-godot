@@ -10,6 +10,7 @@ func run() -> void:
 	if root == null:
 		return
 	_defaults(root)
+	_entities_face_their_angles(root)
 	_stamp_round_trips(root)
 	_unloaded_is_null()
 	_build_mesh_carries_the_metadata()
@@ -150,3 +151,25 @@ func _materials(root: Node) -> Array[Material]:
 			if mat:
 				out.append(mat)
 	return out
+
+
+## Point entity nodes are turned by their angles; brush entities, whose angles are a movement
+## direction, are not.
+func _entities_face_their_angles(root: Node3D) -> void:
+	var turned := 0
+	var point := 0
+	for child in root.get_children():
+		if not child.has_meta("entity"):
+			continue
+		var ent: Dictionary = child.get_meta("entity")
+		if ent.get("classname", "") == "worldspawn":
+			continue
+		var node := child as Node3D
+		if String(ent.get("model", "")).begins_with("*"):
+			check(node.basis.is_equal_approx(Basis.IDENTITY), "brush entity %s is not turned" % node.name)
+			continue
+		point += 1
+		check(node.rotation.is_equal_approx(GoldSrcBSP.entity_rotation(ent)), "%s faces its angles" % node.name)
+		if ent.has("angles") or ent.has("angle"):
+			turned += 1
+	check(point > 0 and turned > 0, "ww_ravine has turned point entities (%d of %d)" % [turned, point])

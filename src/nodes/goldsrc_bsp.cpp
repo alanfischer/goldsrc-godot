@@ -869,6 +869,7 @@ String GoldSrcBSP::scene_pipeline_id(const Ref<PackedScene> &scene) {
 void GoldSrcBSP::_bind_methods() {
 	ClassDB::bind_static_method("GoldSrcBSP", D_METHOD("get_pipeline_id"), &GoldSrcBSP::get_pipeline_id);
 	ClassDB::bind_static_method("GoldSrcBSP", D_METHOD("scene_pipeline_id", "scene"), &GoldSrcBSP::scene_pipeline_id);
+	ClassDB::bind_static_method("GoldSrcBSP", D_METHOD("entity_rotation", "entity"), &GoldSrcBSP::entity_rotation);
 	ClassDB::bind_method(D_METHOD("load_bsp", "path"), &GoldSrcBSP::load_bsp);
 	ClassDB::bind_method(D_METHOD("load_bsp_from_data", "data"), &GoldSrcBSP::load_bsp_from_data);
 	ClassDB::bind_method(D_METHOD("get_bsp_blob"), &GoldSrcBSP::get_bsp_blob);
@@ -1370,6 +1371,50 @@ Array GoldSrcBSP::get_entities() const {
 		result.push_back(dict);
 	}
 	return result;
+}
+
+namespace {
+
+// The entity's "angles" (or "angle") as GoldSrc pitch, yaw and roll in degrees.
+void entity_angles(const std::map<std::string, std::string> &props, float &pitch, float &yaw, float &roll) {
+	pitch = yaw = roll = 0.0f;
+	auto angles = props.find("angles");
+	if (angles != props.end()) {
+		sscanf(angles->second.c_str(), "%f %f %f", &pitch, &yaw, &roll);
+		return;
+	}
+	auto angle = props.find("angle");
+	if (angle == props.end()) {
+		return;
+	}
+	float a = 0.0f;
+	sscanf(angle->second.c_str(), "%f", &a);
+	if (a >= 0.0f) {
+		yaw = a;
+	} else {
+		pitch = (int)a == -1 ? -90.0f : 90.0f;
+	}
+}
+
+// The goldsrc_to_godot axis swap is a proper rotation that takes GoldSrc's +X (yaw 0) to Godot's
+// -X, so a yaw of θ is a Godot turn of θ; the extra 90° brings -Z, not -X, onto the facing.
+Vector3 rotation_from_angles(float pitch, float yaw, float roll) {
+	const float to_rad = (float)Math_PI / 180.0f;
+	return Vector3(-pitch * to_rad, (yaw + 90.0f) * to_rad, -roll * to_rad);
+}
+
+} // namespace
+
+Vector3 GoldSrcBSP::entity_rotation(const Dictionary &entity) {
+	std::map<std::string, std::string> props;
+	for (const String key : std::initializer_list<String>{ "angles", "angle" }) {
+		if (entity.has(key)) {
+			props[key.utf8().get_data()] = String(entity[key]).utf8().get_data();
+		}
+	}
+	float pitch, yaw, roll;
+	entity_angles(props, pitch, yaw, roll);
+	return rotation_from_angles(pitch, yaw, roll);
 }
 
 // Convert a GoldSrc position to Godot (Z-up → Y-up, flip X for handedness)
@@ -2590,6 +2635,9 @@ void GoldSrcBSP::build_mesh() {
 			sscanf(origin_it->second.c_str(), "%f %f %f", &x, &y, &z);
 			node->set_position(goldsrc_to_godot(x, y, z));
 		}
+		float pitch, yaw, roll;
+		entity_angles(ent.properties, pitch, yaw, roll);
+		node->set_rotation(rotation_from_angles(pitch, yaw, roll));
 
 		// Store entity properties as metadata
 		Dictionary meta;

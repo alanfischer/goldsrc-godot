@@ -4,7 +4,7 @@ extends EditorImportPlugin
 ## Bump when this script changes what an import produces. Godot itself only compares it when
 ## something else already sent a file to be re-tested (its source or .import changed), so the
 ## plugin's own check is what acts on it — see import_key().
-const FORMAT_VERSION := 2
+const FORMAT_VERSION := 3
 ## Project metadata section recording, per .bsp, the import_key() it was last imported with.
 const IMPORTED_WITH := "goldsrc_bsp_imported_with"
 
@@ -250,3 +250,19 @@ func _instantiate_entity_models(root: Node3D, model_dir: String) -> void:
 		child.add_child(instance)
 		# build_scene() owned everything it built; the model has to be owned too to be packed.
 		instance.owner = root
+		_play_first_sequence(root, instance)
+
+
+# GoldSrc draws an entity's model in its current sequence, 0 unless something sets another; a
+# model's rest pose is not one of its sequences and faces 90° off. So the model plays sequence 0.
+func _play_first_sequence(root: Node3D, instance: Node3D) -> void:
+	var sequences: Array = instance.get_meta("sequences", [])
+	var players := instance.find_children("*", "AnimationPlayer", true, false)
+	if sequences.is_empty() or players.is_empty():
+		return
+	var player := players[0] as AnimationPlayer
+	if not player.has_animation(sequences[0]["name"]):
+		return
+	# Editable, so the change to a node inside the model's scene is saved with the map.
+	root.set_editable_instance(instance, true)
+	player.autoplay = sequences[0]["name"]
