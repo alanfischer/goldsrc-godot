@@ -1,0 +1,83 @@
+name: Release
+
+# A v* tag builds the extension for every platform the .gdextension names and attaches the addon,
+# binaries included, to the tag's release as <repo>-<tag>.zip. A project that pins this repo as a
+# submodule at a tag downloads the zip instead of compiling. A pull request that touches the build
+# runs the builds without publishing anything.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths: ["build.sh", "cmake/**", "CMakeLists.txt", ".github/workflows/release.yml"]
+  workflow_dispatch:
+
+env:
+  ADDON: goldsrc
+  ZIG_VERSION: 0.16.0
+  # Uncapped, make -j runs out of memory on godot-cpp's bindings.
+  BUILD_JOBS: 4
+
+jobs:
+  # On macOS for lipo and the universal dylibs.
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - run: ./build.sh macos
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-macos
+          path: addons/${{ env.ADDON }}/bin/*.dylib
+          if-no-files-found: error
+
+  others:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - run: ANDROID_NDK="$ANDROID_NDK_LATEST_HOME" ./build.sh linux windows android
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-others
+          path: |
+            addons/${{ env.ADDON }}/bin/*.so
+            addons/${{ env.ADDON }}/bin/*.dll
+          if-no-files-found: error
+
+  release:
+    needs: [macos, others]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          merge-multiple: true
+          path: addons/${{ env.ADDON }}/bin
+      - name: Package
+        run: |
+          zip_name="${{ github.event.repository.name }}-${{ github.ref_name }}.zip"
+          echo "ZIP=$zip_name" >> "$GITHUB_ENV"
+          zip -r "$zip_name" "addons/$ADDON"
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" "$ZIP" --title "$GITHUB_REF_NAME" --generate-notes
+      - if: "!startsWith(github.ref, 'refs/tags/v')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: addon
+          path: ${{ env.ZIP }}
