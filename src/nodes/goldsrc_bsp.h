@@ -36,6 +36,13 @@ public:
 	// scene whose id differs from get_pipeline_id() came from another build and is stale.
 	static godot::String scene_pipeline_id(const godot::Ref<godot::PackedScene> &scene);
 
+	// A point entity's facing as a Node3D rotation (YXZ Euler, radians): -Z, Godot's forward,
+	// points the way the entity faces. "angles" is "pitch yaw roll" in degrees, pitch positive
+	// looking down as GoldSrc's view angles have it; "angle" alone is a yaw, but -1 is straight up
+	// and -2 straight down, as the engine reads it (ED_ParseEdict). build_scene() turns every
+	// point entity's node by this; brush entities' angles are a movement direction, not a facing.
+	static godot::Vector3 entity_rotation(const godot::Dictionary &entity);
+
 	godot::Error load_bsp(const godot::String &path);
 	godot::Error load_bsp_from_data(const godot::PackedByteArray &data);
 

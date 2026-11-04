@@ -12,6 +12,7 @@ func run() -> void:
 	_worldspawn(ents)
 	_every_entity_is_well_formed(ents)
 	_player_spawns(ents)
+	_entity_rotation()
 
 
 ## Entity 0 is worldspawn by format definition, and carries the map-wide settings.
@@ -63,3 +64,28 @@ func _player_spawns(ents: Array) -> void:
 	var first: Dictionary = spawns[0]
 	check_eq(first.get("origin", ""), "1056 1456 1984", "first team spawn origin")
 	check_eq(first.get("team_no", ""), "1", "first team spawn belongs to team 1")
+
+
+## Forward (-Z) for an entity's keys, in Godot's axes.
+func _forward(ent: Dictionary) -> Vector3:
+	return -Basis.from_euler(GoldSrcBSP.entity_rotation(ent)).z
+
+
+func _near(a: Vector3, b: Vector3, what: String) -> void:
+	check(a.is_equal_approx(b) or a.distance_to(b) < 1e-5, "%s: %s, expected %s" % [what, a, b])
+
+
+## GoldSrc's +X is Godot's -X and +Y is Godot's +Z (goldsrc_to_godot); a facing goes the same way.
+func _entity_rotation() -> void:
+	_near(_forward({}), Vector3(-1, 0, 0), "no angles faces GoldSrc +X")
+	_near(_forward({"angles": "0 90 0"}), Vector3(0, 0, 1), "yaw 90 faces GoldSrc +Y")
+	_near(_forward({"angle": "180"}), Vector3(1, 0, 0), "angle is a yaw")
+	_near(_forward({"angles": "-90 0 0"}), Vector3(0, 1, 0), "pitch -90 looks up, as view angles")
+	_near(_forward({"angles": "45 0 0"}), Vector3(-1, -1, 0).normalized(), "pitch 45 looks down")
+	_near(_forward({"angle": "-1"}), Vector3(0, 1, 0), "angle -1 is straight up")
+	_near(_forward({"angle": "-2"}), Vector3(0, -1, 0), "angle -2 is straight down")
+	_near(_forward({"angles": "0 90 0", "angle": "0"}), Vector3(0, 0, 1), "angles wins over angle")
+	var rolled := Basis.from_euler(GoldSrcBSP.entity_rotation({"angles": "0 0 90"}))
+	_near(-rolled.z, Vector3(-1, 0, 0), "roll keeps the facing")
+	# AngleVectors: up = (cr·sp·cy + sr·sy, cr·sp·sy - sr·cy, cr·cp), so roll 90 tips it to -Y.
+	_near(rolled.y, Vector3(0, 0, -1), "roll 90 tips the top to GoldSrc -Y, as AngleVectors")

@@ -18,7 +18,7 @@ A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
 - PVS (Potentially Visible Set) data parsing with RLE decompression — exposed for runtime visibility culling via `VisibilityManager`; a stripped BSP blob (PLANES, VISIBILITY, NODES, CLIPNODES, LEAFS, MODELS only) is baked into each `.scn` as `bsp_data` metadata so `VisibilityManager` can initialize without the original `.bsp`. The blob is still a valid BSP30 file, and one copy serves both the PVS reader and hull collision
 - Worldspawn spatial splitting — walks the BSP tree to group faces into spatial clusters, producing separate MeshInstance3D nodes per group for better frustum culling; each group node has `pvs_leaves` metadata (PackedInt32Array) for use with `VisibilityManager.register_leaf_set()`
 - Brush entity root nodes are AnimatableBody3D instances — meshes and collision shapes are direct children
-- Point entity root nodes are plain Node3D instances
+- Point entity root nodes are plain Node3D instances, placed at their `origin` and turned by their `angles` (or `angle`): the node's -Z, Godot's forward, points the way the entity faces. Pitch is positive looking down, as GoldSrc's view angles have it, and `angle` -1/-2 is straight up/down, as the engine reads it. `GoldSrcBSP.entity_rotation(entity)` gives the same rotation for an entity dictionary. Brush entities are not turned: their `angles` are a movement direction.
 - Entity properties stored as metadata on each node — classname, targetname, origin, angles, and all other key-value pairs are accessible from GDScript via `node.get_meta("entity")`
 - Entity lump parsing (key-value dictionaries accessible from GDScript)
 - Ambient cube light grid baking — traces rays in 6 directions from a 3D grid through the BSP tree, samples lightmaps at hit points, and outputs slice images for `ImageTexture3D` construction. Includes flood-fill of solid cells to prevent trilinear interpolation artifacts. Provides spatially-varying directional ambient lighting for dynamic models
@@ -90,7 +90,7 @@ off with the `goldsrc/import/reimport_on_extension_change` project setting.
 
 ### BSP Entity Model Instantiation
 
-The BSP importer automatically instantiates MDL/SPR scenes for point entities (monsters, props, sprites, etc.). Entity `model` keys are resolved as `res://` + the entity path, mirroring the GoldSrc layout at the project root — so `models/headcrab.mdl` maps to `res://models/headcrab.mdl`.
+The BSP importer automatically instantiates MDL/SPR scenes for point entities (monsters, props, sprites, etc.). Entity `model` keys are resolved as `res://` + the entity path, mirroring the GoldSrc layout at the project root — so `models/headcrab.mdl` maps to `res://models/headcrab.mdl`. Each model is a child of its entity's node, so it faces the way the mapper turned the entity.
 
 If the asset is not found, a small placeholder `BoxMesh` (0.3 m³) is placed at the entity position so it remains visible in the editor.
 
