@@ -4141,6 +4141,28 @@ Dictionary GoldSrcBSP::bake_light_grid(float cell_size_gs) const {
 // above even though the face only ever draws from below. Worldspawn, and func_water, which rain
 // lands on: a door or a platform overhead is not a roof to this. A column outside the map stops
 // rain at the very top.
+//
+// "under" is the open air beneath where rain lands, per cell: the underside of the roof and the
+// ground below it (Godot units, RG of an FORMAT_RGF image laid out as "image"), equal where there
+// is none. Wind blows rain in through it, under eaves and through doorways. Found by walking the
+// same trace on down, face by face, to the first stretch of empty leaf within RAIN_GAP_SEARCH of
+// the top; a wall, or a column that is solid all the way down, has none.
+static constexpr float RAIN_GAP_SEARCH = 160.0f;  // GoldSrc units: 4 m
+static constexpr float RAIN_MIN_GAP = 12.0f;      // 0.3 m
+static constexpr float RAIN_NO_GAP = -1e6f;
+
+static int world_contents(const goldsrc::BSPData &bsp, int node, float x, float y, float z) {
+	while (node >= 0) {
+		if ((size_t)node >= bsp.nodes.size()) return goldsrc::CONTENTS_SOLID;
+		const auto &n = bsp.nodes[node];
+		if (n.planenum < 0 || (size_t)n.planenum >= bsp.planes.size()) return goldsrc::CONTENTS_SOLID;
+		const auto &pl = bsp.planes[n.planenum];
+		node = pl.normal[0] * x + pl.normal[1] * y + pl.normal[2] * z >= pl.dist ? n.children[0] : n.children[1];
+	}
+	int leaf = -(node + 1);
+	return leaf >= 0 && (size_t)leaf < bsp.leafs.size() ? bsp.leafs[leaf].contents : goldsrc::CONTENTS_SOLID;
+}
+
 Dictionary GoldSrcBSP::bake_rain_floor(float cell_size_gs) const {
 	if (!parser) return Dictionary();
 	const auto &bsp_data = parser->get_data();
@@ -4167,7 +4189,29 @@ Dictionary GoldSrcBSP::bake_rain_floor(float cell_size_gs) const {
 		if (m > 0 && (size_t)m < bsp_data.models.size()) liquid_models.push_back(m);
 	}
 
-	auto land = [&](float x, float y) {
+	// The air under where rain lands at x, y (GoldSrc units): (underside, ground), or none.
+	const Vector2 no_gap(RAIN_NO_GAP, RAIN_NO_GAP);
+	auto gap_under = [&](float x, float y, float landed) {
+		float origin[3] = {x, y, top};
+		float upper = landed;
+		float t = top - landed + 0.5f;
+		for (int i = 0; i < 32 && upper > landed - RAIN_GAP_SEARCH; i++) {
+			LightGridRayHit hit;
+			trace_ray_bsp(bsp_data, head, origin, down, t, span, hit);
+			float lower = hit.face_index >= 0 ? hit.hit_pos[2] : top - span;
+			if (world_contents(bsp_data, head, x, y, (upper + lower) * 0.5f) == goldsrc::CONTENTS_EMPTY)
+				return upper - lower >= RAIN_MIN_GAP ? Vector2(upper, lower) : no_gap;
+			if (hit.face_index < 0) break;
+			upper = lower;
+			t = hit.t + 0.5f;
+		}
+		return no_gap;
+	};
+
+	// Where rain lands at x, y, and in `air` the open air under it. `capped`: solid just over the
+	// landing (a ceiling met from below, the trace having come down through the solid over a
+	// sealed room), so it is not open from there up.
+	auto land = [&](float x, float y, Vector2 &air, bool &capped) {
 		float origin[3] = {x, y, top};
 		// A column that meets nothing is outside the sealed map: no rain falls there.
 		float landed = top;
@@ -4182,6 +4226,9 @@ Dictionary GoldSrcBSP::bake_rain_floor(float cell_size_gs) const {
 			}
 			t = hit.t + 0.5f;
 		}
+		air = landed < top ? gap_under(x, y, landed) : no_gap;
+		capped = landed < top
+			&& world_contents(bsp_data, head, x, y, landed + 1.0f) == goldsrc::CONTENTS_SOLID;
 		if (landed < top) {
 			for (int m : liquid_models) {
 				const auto &liquid = bsp_data.models[m];
@@ -4189,7 +4236,10 @@ Dictionary GoldSrcBSP::bake_rain_floor(float cell_size_gs) const {
 					continue;
 				LightGridRayHit hit;
 				trace_ray_bsp(bsp_data, liquid.headnode[0], origin, down, 0.0f, span, hit, m);
-				if (hit.face_index >= 0 && hit.hit_pos[2] > landed) landed = hit.hit_pos[2];
+				if (hit.face_index >= 0 && hit.hit_pos[2] > landed) {
+					landed = hit.hit_pos[2];
+					air = no_gap;  // it lands in liquid
+				}
 			}
 		}
 		return landed;
@@ -4200,23 +4250,72 @@ Dictionary GoldSrcBSP::bake_rain_floor(float cell_size_gs) const {
 	// Corners are shared, and nudged off the grid lines that walls are built on.
 	const float nudge = 0.25f;
 	vector<float> corners((size_t)(w + 1) * (h + 1));
+	vector<Vector2> corner_air((size_t)(w + 1) * (h + 1));
+	vector<char> corner_capped((size_t)(w + 1) * (h + 1));
 	for (int iy = 0; iy <= h; iy++)
-		for (int ix = 0; ix <= w; ix++)
-			corners[(size_t)iy * (w + 1) + ix] = land(world.mins[0] + ix * cell_size_gs + nudge,
-				world.mins[1] + iy * cell_size_gs + nudge);
+		for (int ix = 0; ix <= w; ix++) {
+			size_t c = (size_t)iy * (w + 1) + ix;
+			bool capped;
+			corners[c] = land(world.mins[0] + ix * cell_size_gs + nudge,
+				world.mins[1] + iy * cell_size_gs + nudge, corner_air[c], capped);
+			corner_capped[c] = capped;
+		}
 
 	PackedByteArray data;
 	data.resize((size_t)w * h * 4);
 	float *heights = (float *)data.ptrw();
+	PackedByteArray under_data;
+	under_data.resize((size_t)w * h * 8);
+	float *under = (float *)under_data.ptrw();
 	int open = 0;
+	int sheltered = 0;
 	for (int iy = 0; iy < h; iy++) {
 		for (int ix = 0; ix < w; ix++) {
-			float landed = land(world.mins[0] + (ix + 0.5f) * cell_size_gs,
-				world.mins[1] + (iy + 0.5f) * cell_size_gs);
-			for (int k = 0; k < 4; k++)
-				landed = fmaxf(landed, corners[(size_t)(iy + (k >> 1)) * (w + 1) + ix + (k & 1)]);
+			float tops[5];
+			Vector2 airs[5];
+			bool capped[5];
+			tops[0] = land(world.mins[0] + (ix + 0.5f) * cell_size_gs,
+				world.mins[1] + (iy + 0.5f) * cell_size_gs, airs[0], capped[0]);
+			float landed = tops[0];
+			for (int k = 0; k < 4; k++) {
+				size_t c = (size_t)(iy + (k >> 1)) * (w + 1) + ix + (k & 1);
+				tops[k + 1] = corners[c];
+				airs[k + 1] = corner_air[c];
+				capped[k + 1] = corner_capped[c];
+				landed = fmaxf(landed, corners[c]);
+			}
 			if (landed >= top) open++;
 			heights[(size_t)iy * w + ix] = landed * scale_factor;
+			// As Overcast's OvercastRainFloor._cell_gap: solid where the middle or two corners
+			// are, else the air every open sample agrees on. One lower than the cell's top is out
+			// from under the roof, open from its top up, unless it is capped: then it is in the
+			// solid the cell's roof is part of.
+			int solid = 0;
+			float hi = 1e30f, lo = -1e30f;
+			bool none = false;
+			for (int k = 0; k < 5 && !none; k++) {
+				if (tops[k] >= landed - 0.5f) {
+					if (airs[k].x <= airs[k].y) {
+						if (k == 0) none = true;
+						solid++;
+						continue;
+					}
+					hi = fminf(hi, airs[k].x);
+					lo = fmaxf(lo, airs[k].y);
+				} else if (capped[k]) {
+					if (k == 0) none = true;
+					solid++;
+				} else {
+					lo = fmaxf(lo, tops[k]);
+				}
+			}
+			Vector2 cell_air = no_gap;
+			if (!none && solid < 2 && hi < 1e30f && hi - lo >= RAIN_MIN_GAP) {
+				cell_air = Vector2(hi * scale_factor, lo * scale_factor);
+				sheltered++;
+			}
+			under[((size_t)iy * w + ix) * 2] = cell_air.x;
+			under[((size_t)iy * w + ix) * 2 + 1] = cell_air.y;
 		}
 	}
 
@@ -4224,8 +4323,9 @@ Dictionary GoldSrcBSP::bake_rain_floor(float cell_size_gs) const {
 	result["origin"] = Vector3(-world.mins[0] * scale_factor, 0.0f, world.mins[1] * scale_factor);
 	result["size"] = Vector2(w * cell_size_gs * scale_factor, h * cell_size_gs * scale_factor);
 	result["image"] = Image::create_from_data(w, h, false, Image::FORMAT_RF, data);
+	result["under"] = Image::create_from_data(w, h, false, Image::FORMAT_RGF, under_data);
 	result["top"] = top * scale_factor;
 	UtilityFunctions::print("[GoldSrc] Rain floor: ", w, "x", h, " columns (", open,
-		" outside the map), ", (int64_t)(Time::get_singleton()->get_ticks_msec() - t0), "ms");
+		" outside the map, ", sheltered, " with air under cover), ", (int64_t)(Time::get_singleton()->get_ticks_msec() - t0), "ms");
 	return result;
 }

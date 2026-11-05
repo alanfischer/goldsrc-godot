@@ -23,7 +23,7 @@ A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
 - Entity lump parsing (key-value dictionaries accessible from GDScript)
 - Ambient cube light grid baking — traces rays in 6 directions from a 3D grid through the BSP tree, samples lightmaps at hit points, and outputs slice images for `ImageTexture3D` construction. Includes flood-fill of solid cells to prevent trilinear interpolation artifacts. Provides spatially-varying directional ambient lighting for dynamic models
 - Sun fraction — the share of each luxel's light that came from the sky, so a game can turn the sun down (night) and leave the map's own lights alone. hlrad bakes both into style 0; when the `light_environment` has a style of its own the split is exact, otherwise each luxel is re-lit by sun, sky and point-light traces and the weights that best rebuild the real lightmap decide it. Baked only when a `shader_hook` is set. Bound to world materials as `lm_sun`, handed to the hook's `goldsrc_lightmap` (below) and added to the light grid as `sun_slices`
-- Rain floor (`bake_rain_floor`) — per column, the height where something falling from the sky first lands: sky faces pass, worldspawn and `func_water` stop it, doors and platforms don't. A heightmap a game can use for precipitation, roofs and puddles
+- Rain floor (`bake_rain_floor`) — per column, the height where something falling from the sky first lands: sky faces pass, worldspawn and `func_water` stop it, doors and platforms don't; and the open air under it, which wind blows rain in through. A heightmap a game can use for precipitation, roofs and puddles
 - Shader hooks (`shader_hook`) — your own shader code in every BSP shader, for night, weather and the like, without the extension knowing about them. See [Shader Hooks](#shader-hooks)
 
 ### MDL Models
@@ -201,6 +201,12 @@ the floor's at its column:
 vec2 uv = vec2((rain_floor_origin.x - p.x) / rain_floor_size.x, (p.z - rain_floor_origin.z) / rain_floor_size.y);
 bool open_to_sky = p.y > textureLod(rain_floor, uv, 0.0).r - 0.1;
 ```
+
+It also has `under`, an `FORMAT_RGF` image laid out the same: the open air beneath where rain
+lands in each column, as the underside of the roof (R) and the ground below it (G), or both
+`-1e6` where there is none (open ground, a wall, a pillar). That is what wind blows rain in
+through, under eaves, through doorways and windows into a sealed room. A cell counts as solid
+when its middle or two of its corners are, so walls thinner than a cell are kept.
 
 **The example.** `examples/shader_hook/` is a working one: `hook.gdshaderinc` does night, wet
 ground under open sky, dimmed liquids and a sky flash, and the demo map imports with it. Open
