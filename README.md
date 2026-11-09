@@ -132,7 +132,7 @@ three defines set, and calls the functions that kind of shader needs:
 
 | Define | Shader | You supply |
 |--------|--------|------------|
-| `GOLDSRC_HOOK_WORLD` | world and brush-entity surfaces (opaque and `{` alpha-tested) | `vec3 goldsrc_lightmap(vec3 lm, float sun_share, vec3 world_pos)` and `void goldsrc_surface(inout vec3 lit_srgb, inout vec3 albedo, vec3 world_pos, vec3 world_normal, vec3 normal_view, vec3 view)` |
+| `GOLDSRC_HOOK_WORLD` | world and brush-entity surfaces (opaque and `{` alpha-tested) | `vec3 goldsrc_lightmap(vec3 lm, float sun_share, vec3 world_pos)` and `void goldsrc_surface(inout vec3 lit_srgb, inout vec3 albedo, vec3 light, vec3 world_pos, vec3 world_normal, vec3 normal_view, vec3 view)` |
 | `GOLDSRC_HOOK_LIQUID` | `!`/`*` textures and `func_water` | `vec3 goldsrc_liquid(vec3 albedo, int liquid_type)` |
 | `GOLDSRC_HOOK_SKY` | sky faces | `vec3 goldsrc_sky(vec3 color, vec3 eye_dir)` |
 
@@ -141,7 +141,10 @@ three defines set, and calls the functions that kind of shader needs:
   without a `light_environment`), and the fragment's world position (for anything that varies
   over the map, such as cloud shadows), and returns the lightmap to use.
 - `goldsrc_surface` runs last. `lit_srgb` is what the surface shows, texture × lightmap in gamma
-  space; `albedo` is what Godot's real-time lights see. `world_pos`/`world_normal` are world space;
+  space, clamped to 1; `albedo` is what Godot's real-time lights see. `light` is the light
+  `lit_srgb` was made with (lightmap × `overbright`, gamma, unclamped), for drawing something
+  else lit as the surface is: snow over it, say. Dividing it back out of `lit_srgb` loses it
+  where the texture is dark or the product clamps. `world_pos`/`world_normal` are world space;
   `normal_view`/`view` are the fragment's `NORMAL` and `VIEW`.
 - `goldsrc_liquid` gets the liquid's final colour and its kind: 0 water, 1 slime, 2 lava.
 - `goldsrc_sky` gets the cubemap colour along `eye_dir` (world space).
@@ -160,8 +163,8 @@ vec3 goldsrc_lightmap(vec3 lm, float sun_share, vec3 world_pos) {
 	return lm * pow(max(mix(vec3(1.0), sky_light, sun_share), vec3(0.0)), vec3(0.55));
 }
 
-void goldsrc_surface(inout vec3 lit_srgb, inout vec3 albedo, vec3 world_pos, vec3 world_normal,
-		vec3 normal_view, vec3 view) {}
+void goldsrc_surface(inout vec3 lit_srgb, inout vec3 albedo, vec3 light, vec3 world_pos,
+		vec3 world_normal, vec3 normal_view, vec3 view) {}
 #endif
 
 #ifdef GOLDSRC_HOOK_LIQUID
