@@ -42,19 +42,18 @@ func suite_name() -> String:
 
 # --- helpers ---
 
-## Node-derived GoldSrc classes are not refcounted, so anything a suite creates has to be
-## freed or the run ends with "ObjectDB instances leaked at exit". Hand them to this and
-## the runner disposes of them after run() returns.
+## A built scene is nodes, which are not refcounted, so it has to be freed or the run ends
+## with "ObjectDB instances leaked at exit". Hand it to this and the runner frees it after
+## run() returns.
 func track(n: Node) -> Node:
 	_to_free.append(n)
 	return n
 
 
-## Loads the shared map into a tracked GoldSrcBSP, failing the suite if it will not parse.
-## Returns null on failure so callers can bail out rather than assert against a blank node.
+## Loads the shared map into a GoldSrcBSP, failing the suite if it will not parse.
+## Returns null on failure so callers can bail out rather than assert against a blank one.
 func load_map() -> GoldSrcBSP:
 	var bsp := GoldSrcBSP.new()
-	track(bsp)
 	var err := bsp.load_bsp(MAP_PATH)
 	if err != OK:
 		fail("could not load %s (error %d)" % [MAP_PATH, err])

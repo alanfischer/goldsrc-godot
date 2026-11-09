@@ -17,7 +17,7 @@ func run() -> void:
 
 func _mdl_unloaded() -> void:
 	var mdl := GoldSrcMDL.new()
-	track(mdl)
+	check(mdl.build_scene() == null, "an unloaded MDL builds nothing")
 
 	check_eq(mdl.get_sequence_count(), 0, "unloaded MDL has no sequences")
 	check_eq(mdl.get_bone_count(), 0, "unloaded MDL has no bones")

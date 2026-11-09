@@ -1,6 +1,7 @@
 #pragma once
 
 #include <godot_cpp/classes/node3d.hpp>
+#include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/classes/animatable_body3d.hpp>
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
@@ -16,8 +17,8 @@
 #include <map>
 #include <memory>
 
-class GoldSrcBSP : public godot::Node3D {
-	GDCLASS(GoldSrcBSP, godot::Node3D)
+class GoldSrcBSP : public godot::RefCounted {
+	GDCLASS(GoldSrcBSP, godot::RefCounted)
 
 protected:
 	static void _bind_methods();
@@ -62,11 +63,9 @@ public:
 	// search_dirs that holds it (empty = beside the .bsp, then res://). Only the basename of
 	// each declared path is used. Returns the names found in none of the directories.
 	godot::PackedStringArray load_declared_wads(const godot::PackedStringArray &search_dirs = godot::PackedStringArray());
-	void build_mesh();
-	// build_mesh(), then hand everything it built — children and metadata (bsp_data,
-	// pipeline_id, the lightstyle image/texture with shader lightstyles, light_grid with a
-	// cell size) — to a new plain Node3D that can be packed and saved as-is: no GDExtension
-	// types, owners set. Leaves this node empty; free it after.
+	// The map as a new plain Node3D that can be packed and saved as-is: no GDExtension types,
+	// owners set, and on the root its metadata (bsp_data, pipeline_id, the lightstyle
+	// image/texture with shader lightstyles, light_grid with a cell size). Once per load.
 	godot::Node3D *build_scene();
 
 	void set_scale_factor(float scale);
@@ -78,11 +77,11 @@ public:
 	void set_shader_hook(const godot::String &path);
 	godot::String get_shader_hook() const;
 
-	// Lightmap multiplier on world materials, read by build_mesh(). GoldSrc's is 2.0.
+	// Lightmap multiplier on world materials, read by build_scene(). GoldSrc's is 2.0.
 	void set_overbright(float value);
 	float get_overbright() const;
 
-	// Cell size, in GoldSrc units, of the light grid build_mesh() bakes; 0 skips it.
+	// Cell size, in GoldSrc units, of the light grid build_scene() bakes; 0 skips it.
 	void set_light_grid_cell_size(float value);
 	float get_light_grid_cell_size() const;
 
@@ -126,6 +125,7 @@ public:
 	godot::Dictionary bake_rain_floor(float cell_size_gs = 16.0f) const;
 
 private:
+	void build_mesh(godot::Node3D *root);
 	godot::Ref<godot::ImageTexture> find_texture(const std::string &name) const;
 	godot::Vector3 goldsrc_to_godot(float x, float y, float z) const;
 	// Tags a collision body with the BSP model + scale a hull-tracing physics

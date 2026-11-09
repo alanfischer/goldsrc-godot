@@ -882,7 +882,6 @@ void GoldSrcBSP::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("add_wad", "wad"), &GoldSrcBSP::add_wad);
 	ClassDB::bind_method(D_METHOD("get_entities"), &GoldSrcBSP::get_entities);
 	ClassDB::bind_method(D_METHOD("load_declared_wads", "search_dirs"), &GoldSrcBSP::load_declared_wads, DEFVAL(PackedStringArray()));
-	ClassDB::bind_method(D_METHOD("build_mesh"), &GoldSrcBSP::build_mesh);
 	ClassDB::bind_method(D_METHOD("build_scene"), &GoldSrcBSP::build_scene);
 	ClassDB::bind_method(D_METHOD("set_scale_factor", "scale"), &GoldSrcBSP::set_scale_factor);
 	ClassDB::bind_method(D_METHOD("get_scale_factor"), &GoldSrcBSP::get_scale_factor);
@@ -1109,25 +1108,17 @@ Node3D *GoldSrcBSP::build_scene() {
 		UtilityFunctions::printerr("[GoldSrc] build_scene: no BSP loaded");
 		return nullptr;
 	}
-	build_mesh();
+	// The lightmap atlases and lightstyle state belong to the one scene built from them.
+	if (mesh_built) {
+		UtilityFunctions::printerr("[GoldSrc] build_scene: already built from this load; load again for another scene");
+		return nullptr;
+	}
+	mesh_built = true;
 
 	Node3D *root = memnew(Node3D);
 	String root_name = source_path.get_file().get_basename();
 	root->set_name(root_name.is_empty() ? String("bsp_root") : root_name);
-
-	// build_mesh() put everything a consumer reads off the map root in this node's metadata;
-	// all of it moves. (PackedByteArray and the resources are refcounted, so nothing is copied.)
-	TypedArray<StringName> keys = get_meta_list();
-	for (int64_t i = 0; i < keys.size(); i++) {
-		root->set_meta(keys[i], get_meta(keys[i]));
-	}
-
-	TypedArray<Node> children = get_children();
-	for (int64_t i = 0; i < children.size(); i++) {
-		Node *child = Object::cast_to<Node>(children[i]);
-		remove_child(child);
-		root->add_child(child);
-	}
+	build_mesh(root);
 	set_owner_recursive(root, root);
 	return root;
 }
@@ -1523,18 +1514,14 @@ static void bake_lightmap_pixels(
 
 } // anonymous namespace
 
-void GoldSrcBSP::build_mesh() {
-	if (!parser) return;
-	if (mesh_built) return;
-	mesh_built = true;
+void GoldSrcBSP::build_mesh(Node3D *root) {
 
-	// The stripped BSP rides on the tree root, once, for both the PVS reader and
-	// the hull trace. Bodies carry only a model index (see mark_bsp_carrier); a
-	// consumer walks up from a body to find this. Set before the model loop so
-	// nothing has to remember to do it afterwards. The stamp naming the build that
-	// made the tree rides with it, so a cached scene can tell it is out of date.
-	set_meta("bsp_data", get_bsp_blob());
-	set_meta("pipeline_id", get_pipeline_id());
+	// The stripped BSP rides on the root, once, for both the PVS reader and the hull
+	// trace. Bodies carry only a model index (see mark_bsp_carrier); a consumer walks up
+	// from a body to find this. The stamp naming the build that made the tree rides with
+	// it, so a cached scene can tell it is out of date.
+	root->set_meta("bsp_data", get_bsp_blob());
+	root->set_meta("pipeline_id", get_pipeline_id());
 
 	const auto &bsp_data = parser->get_data();
 	uint64_t t0 = Time::get_singleton()->get_ticks_msec();
@@ -1877,7 +1864,7 @@ void GoldSrcBSP::build_mesh() {
 			}
 		}
 
-		add_child(model_node);
+		root->add_child(model_node);
 
 		// --- Build spatial groups for worldspawn (m==0) ---
 		// For worldspawn, split faces spatially using BSP tree subtrees,
@@ -2659,7 +2646,7 @@ void GoldSrcBSP::build_mesh() {
 		node_name = node_name + "_" + String::num_int64(point_entity_count);
 		node->set_name(node_name);
 
-		add_child(node);
+		root->add_child(node);
 		point_entity_count++;
 	}
 	log_timing("point entity nodes");
@@ -2680,21 +2667,20 @@ void GoldSrcBSP::build_mesh() {
 			Node *animator = memnew(Node);
 			animator->set_name("TextureAnimationPlayer");
 			animator->set_script(script);
-			add_child(animator);
+			root->add_child(animator);
 		} else {
 			UtilityFunctions::printerr("[GoldSrc] Failed to compile texture animator script");
 		}
 	}
 
-	// The rest of the root metadata, for the same reason as bsp_data: set here, it reaches
-	// every consumer, whether it keeps this node or takes build_scene()'s root.
+	// The rest of the root metadata.
 	if (shader_lightstyles && lightstyle_image.is_valid()) {
-		set_meta("lightstyle_image", lightstyle_image);
-		set_meta("lightstyle_texture", lightstyle_texture);
+		root->set_meta("lightstyle_image", lightstyle_image);
+		root->set_meta("lightstyle_texture", lightstyle_texture);
 	}
 	if (light_grid_cell_size > 0.0f) {
 		Dictionary grid = bake_light_grid(light_grid_cell_size);
-		if (!grid.is_empty()) set_meta("light_grid", grid);
+		if (!grid.is_empty()) root->set_meta("light_grid", grid);
 	}
 }
 

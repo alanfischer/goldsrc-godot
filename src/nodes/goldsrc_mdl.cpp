@@ -26,7 +26,7 @@ using namespace std;
 
 void GoldSrcMDL::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("load_mdl", "path"), &GoldSrcMDL::load_mdl);
-	ClassDB::bind_method(D_METHOD("build_model"), &GoldSrcMDL::build_model);
+	ClassDB::bind_method(D_METHOD("build_scene"), &GoldSrcMDL::build_scene);
 	ClassDB::bind_method(D_METHOD("get_sequence_count"), &GoldSrcMDL::get_sequence_count);
 	ClassDB::bind_method(D_METHOD("get_sequence_name", "index"), &GoldSrcMDL::get_sequence_name);
 	ClassDB::bind_method(D_METHOD("get_sequence_fps", "index"), &GoldSrcMDL::get_sequence_fps);
@@ -35,7 +35,6 @@ void GoldSrcMDL::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_bodypart_name", "index"), &GoldSrcMDL::get_bodypart_name);
 	ClassDB::bind_method(D_METHOD("get_bone_count"), &GoldSrcMDL::get_bone_count);
 	ClassDB::bind_method(D_METHOD("get_skin_count"), &GoldSrcMDL::get_skin_count);
-	ClassDB::bind_method(D_METHOD("set_skin", "family"), &GoldSrcMDL::set_skin);
 	ClassDB::bind_method(D_METHOD("get_skin_info"), &GoldSrcMDL::get_skin_info);
 	ClassDB::bind_method(D_METHOD("set_scale_factor", "scale"), &GoldSrcMDL::set_scale_factor);
 	ClassDB::bind_method(D_METHOD("get_scale_factor"), &GoldSrcMDL::get_scale_factor);
@@ -61,6 +60,7 @@ Error GoldSrcMDL::load_mdl(const String &path) {
 	}
 
 	model_built = false;
+	source_path = path;
 	const auto &mdl = parser->get_data();
 	UtilityFunctions::print("[GoldSrc] Loaded MDL: ", path,
 		" (", (int64_t)mdl.bones.size(), " bones, ",
@@ -115,24 +115,6 @@ int GoldSrcMDL::get_bone_count() const {
 int GoldSrcMDL::get_skin_count() const {
 	if (!parser) return 0;
 	return parser->get_data().num_skin_families;
-}
-
-void GoldSrcMDL::set_skin(int family) {
-	if (!parser) return;
-	const auto &mdl = parser->get_data();
-	if (family < 0 || family >= mdl.num_skin_families) return;
-
-	for (const auto &ref : mesh_skin_refs) {
-		if (!ref.mesh_inst) continue;
-		int tex_idx = ref.skin_ref;
-		int table_idx = family * mdl.num_skin_ref + ref.skin_ref;
-		if (table_idx >= 0 && table_idx < (int)mdl.skin_table.size()) {
-			tex_idx = mdl.skin_table[table_idx];
-		}
-		if (tex_idx >= 0 && tex_idx < (int)stored_materials.size()) {
-			ref.mesh_inst->set_surface_override_material(ref.surface, stored_materials[tex_idx]);
-		}
-	}
 }
 
 String GoldSrcMDL::get_skin_info() const {
@@ -229,14 +211,81 @@ vector<Transform3D> GoldSrcMDL::compute_bone_world_transforms(const goldsrc::Par
 	return world;
 }
 
-void GoldSrcMDL::build_model() {
-	if (!parser || model_built) return;
+namespace {
+void set_owner_recursive(Node *node, Node *owner) {
+	TypedArray<Node> children = node->get_children();
+	for (int64_t i = 0; i < children.size(); i++) {
+		Node *child = Object::cast_to<Node>(children[i]);
+		child->set_owner(owner);
+		set_owner_recursive(child, owner);
+	}
+}
+} // namespace
+
+Node3D *GoldSrcMDL::build_scene() {
+	if (!parser) {
+		UtilityFunctions::printerr("[GoldSrc] build_scene: no MDL loaded");
+		return nullptr;
+	}
+	if (model_built) {
+		UtilityFunctions::printerr("[GoldSrc] build_scene: already built from this load; load again for another scene");
+		return nullptr;
+	}
 	model_built = true;
+
+	root = memnew(Node3D);
+	String root_name = source_path.get_file().get_basename();
+	root->set_name(root_name.is_empty() ? String("mdl_root") : root_name);
+	// GoldSrc models face -Z after the axis swizzle; turn them the way the game faces them.
+	root->set_rotation_degrees(Vector3(0, 90, 0));
 
 	build_skeleton();
 	build_hitboxes();
 	build_meshes();
 	build_animations();
+	stamp_sequences();
+	stamp_skins();
+	set_owner_recursive(root, root);
+
+	Node3D *scene = root;
+	root = nullptr;
+	skeleton = nullptr;
+	mesh_skin_refs.clear();
+	return scene;
+}
+
+// The sequences in the file's order, which a game's sequence numbers count in; the
+// AnimationPlayer lists them by name, alphabetically.
+void GoldSrcMDL::stamp_sequences() {
+	Array sequences;
+	for (int i = 0; i < get_sequence_count(); i++) {
+		Dictionary seq;
+		seq["name"] = get_sequence_name(i);
+		seq["fps"] = get_sequence_fps(i);
+		seq["num_frames"] = get_sequence_num_frames(i);
+		sequences.append(seq);
+	}
+	root->set_meta("sequences", sequences);
+}
+
+// The meshes carry skin family 0. Each other family rides on every skinned MeshInstance3D
+// as skin_<family>: one material per surface, null where the surface has no skin.
+void GoldSrcMDL::stamp_skins() {
+	const auto &mdl = parser->get_data();
+	root->set_meta("skin_count", mdl.num_skin_families);
+	for (int family = 1; family < mdl.num_skin_families; family++) {
+		std::map<MeshInstance3D *, Array> per_mesh;
+		for (const auto &ref : mesh_skin_refs) {
+			Array &mats = per_mesh[ref.mesh_inst];
+			if (mats.is_empty()) mats.resize(ref.mesh_inst->get_surface_override_material_count());
+			int tex_idx = ref.skin_ref;
+			int table_idx = family * mdl.num_skin_ref + ref.skin_ref;
+			if (table_idx >= 0 && table_idx < (int)mdl.skin_table.size()) tex_idx = mdl.skin_table[table_idx];
+			if (tex_idx >= 0 && tex_idx < (int)stored_materials.size() && ref.surface < mats.size())
+				mats[ref.surface] = stored_materials[tex_idx];
+		}
+		for (auto &[mesh_inst, mats] : per_mesh) mesh_inst->set_meta("skin_" + String::num_int64(family), mats);
+	}
 }
 
 void GoldSrcMDL::build_skeleton() {
@@ -245,7 +294,7 @@ void GoldSrcMDL::build_skeleton() {
 
 	skeleton = memnew(Skeleton3D);
 	skeleton->set_name("Skeleton3D");
-	add_child(skeleton);
+	root->add_child(skeleton);
 
 	// Add bones. Skeleton3D::add_bone() rejects names that are empty or contain
 	// ':' / '/', returning -1 without adding the bone. GoldSrc models legitimately
@@ -572,7 +621,7 @@ void GoldSrcMDL::build_meshes() {
 			skeleton->add_child(mesh_instance);
 			mesh_instance->set_skeleton_path(NodePath(".."));
 		} else {
-			add_child(mesh_instance);
+			root->add_child(mesh_instance);
 		}
 
 		for (const auto &[surface, skin_ref] : surface_skin_refs) {
@@ -631,7 +680,7 @@ void GoldSrcMDL::build_animations() {
 
 	AnimationPlayer *anim_player = memnew(AnimationPlayer);
 	anim_player->set_name("AnimationPlayer");
-	add_child(anim_player);
+	root->add_child(anim_player);
 
 	Ref<AnimationLibrary> lib;
 	lib.instantiate();

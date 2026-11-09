@@ -81,40 +81,13 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 		push_error("MDL Importer: Failed to load '%s': %s" % [source_file, error_string(err)])
 		return err
 
-	mdl.build_model()
-
-	# Reparent children to a plain Node3D so the saved scene is GDExtension-independent
-	var root := Node3D.new()
-	var root_name := source_file.get_file().get_basename()
-	if root_name.is_empty():
-		root_name = "mdl_root"
-	root.name = root_name
-	# GoldSrc models face -Z after axis swizzle; rotate to match GoldSrc game orientation
-	root.rotation_degrees.y = 90.0
-	# The sequences in the file's order, which a game's sequence numbers count in; the
-	# AnimationPlayer lists them by name, alphabetically.
-	var sequences := []
-	for i in mdl.get_sequence_count():
-		sequences.append({"name": mdl.get_sequence_name(i), "fps": mdl.get_sequence_fps(i),
-			"num_frames": mdl.get_sequence_num_frames(i)})
-	root.set_meta("sequences", sequences)
-
-	var children := mdl.get_children()
-	for child in children:
-		mdl.remove_child(child)
-		root.add_child(child)
-	_set_owner_recursive(root, root)
-
+	var root := mdl.build_scene()
 	var scene := PackedScene.new()
 	var pack_err := scene.pack(root)
+	root.free()
 	if pack_err != OK:
 		push_error("MDL Importer: Failed to pack scene: %s" % error_string(pack_err))
 		return pack_err
 
 	return ResourceSaver.save(scene, save_path + "." + _get_save_extension())
 
-
-func _set_owner_recursive(node: Node, owner: Node) -> void:
-	for child in node.get_children():
-		child.owner = owner
-		_set_owner_recursive(child, owner)
