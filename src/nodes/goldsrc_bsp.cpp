@@ -1189,6 +1189,10 @@ PackedInt32Array GoldSrcBSP::get_leaf_pvs(int leaf_index) const {
 	return result;
 }
 
+void GoldSrcBSP::visible_leaves(int leaf_index, std::vector<int> &out) const {
+	if (parser) parser->get_data().visible_leaves(leaf_index, out);
+}
+
 void GoldSrcBSP::_collect_leaves_in_aabb(int node_idx, const float gs_min[3], const float gs_max[3],
 		PackedInt32Array &result) const {
 	if (node_idx < 0) {

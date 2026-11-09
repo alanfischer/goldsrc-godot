@@ -6,6 +6,7 @@
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/packed_int32_array.hpp>
 
+#include <cstdint>
 #include <vector>
 
 #include "goldsrc_bsp.h"
@@ -55,6 +56,10 @@ public:
 	bool is_leaf_visible_to_observer(int leaf, int observer_handle) const;
 	bool is_position_visible_to_observer(godot::Vector3 pos, int observer_handle) const;
 
+	// GoldSrc's PAS: whether a sound at pos may be heard by the observer, i.e. the
+	// observer's leaf is in the PVS of some leaf visible from pos's leaf.
+	bool is_position_audible_to_observer(godot::Vector3 pos, int observer_handle) const;
+
 	// --- Entities ---
 	// An entity has a world-space AABB. The leaf set is derived by pushing
 	// the AABB through the BSP tree. Call update_entity_aabb() whenever
@@ -100,7 +105,14 @@ private:
 	std::vector<LeafSet> leaf_sets;
 	std::vector<int> leaf_set_free;
 
+	// Bit rows per leaf, pas_words uint64s each, filled on first use.
+	mutable std::vector<uint64_t> pvs_rows, pas_rows;
+	mutable std::vector<uint8_t> pvs_ready, pas_ready;
+	mutable int pas_words = 0;
+
 	void _update_observer_pvs(Observer &obs, int new_leaf);
+	const uint64_t *_pvs_row(int leaf) const;
+	const uint64_t *_pas_row(int leaf) const;
 	std::vector<int> _aabb_to_leaves(godot::AABB aabb) const;
 
 	template<typename T>

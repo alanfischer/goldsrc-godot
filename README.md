@@ -335,6 +335,8 @@ func send_updates_to_peer(peer_id: int) -> void:
             send_entity_update(peer_id, node)
 ```
 
+For a one-shot sound, filter by the PAS (Potentially Audible Set) instead, as GoldSrc did for every sound and `MSG_PAS` message: `vm.is_position_audible_to_observer(sound_pos, obs)` is true when the observer's leaf is in the PVS of any leaf visible from the sound's leaf. Each leaf's PAS row is built the first time a sound comes from it. A sound in solid or outside the map, an unknown observer, or no map at all counts as audible.
+
 ### Handle Lifetime
 
 All handles are stable integers until the matching `remove_observer` / `unregister_entity` / `unregister_leaf_set` call. Handles from removed entries are recycled internally — do not use a handle after removal.

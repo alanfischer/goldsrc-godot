@@ -102,6 +102,7 @@ public:
 	int point_to_leaf(godot::Vector3 godot_pos) const;
 	int get_leaf_count() const;
 	godot::PackedInt32Array get_leaf_pvs(int leaf_index) const;
+	void visible_leaves(int leaf_index, std::vector<int> &out) const;  // C++ only: get_leaf_pvs without the Variant array
 	godot::PackedInt32Array get_leaves_in_aabb(godot::AABB godot_aabb) const;
 
 	// Look up a texture by name from BSP embedded textures or loaded WADs

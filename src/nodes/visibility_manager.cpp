@@ -19,6 +19,7 @@ void VisibilityManager::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_observer_leaf", "handle"), &VisibilityManager::get_observer_leaf);
 	ClassDB::bind_method(D_METHOD("is_leaf_visible_to_observer", "leaf", "observer_handle"), &VisibilityManager::is_leaf_visible_to_observer);
 	ClassDB::bind_method(D_METHOD("is_position_visible_to_observer", "pos", "observer_handle"), &VisibilityManager::is_position_visible_to_observer);
+	ClassDB::bind_method(D_METHOD("is_position_audible_to_observer", "pos", "observer_handle"), &VisibilityManager::is_position_audible_to_observer);
 
 	ClassDB::bind_method(D_METHOD("register_entity", "aabb"), &VisibilityManager::register_entity);
 	ClassDB::bind_method(D_METHOD("unregister_entity", "handle"), &VisibilityManager::unregister_entity);
@@ -63,6 +64,11 @@ void VisibilityManager::teardown() {
 	entity_free.clear();
 	leaf_sets.clear();
 	leaf_set_free.clear();
+	pvs_rows.clear();
+	pas_rows.clear();
+	pvs_ready.clear();
+	pas_ready.clear();
+	pas_words = 0;
 }
 
 bool VisibilityManager::is_ready() const {
@@ -153,6 +159,53 @@ bool VisibilityManager::is_leaf_visible_to_observer(int leaf, int observer_handl
 bool VisibilityManager::is_position_visible_to_observer(Vector3 pos, int observer_handle) const {
 	if (bsp.is_null()) return true;
 	return is_leaf_visible_to_observer(bsp->point_to_leaf(pos), observer_handle);
+}
+
+bool VisibilityManager::is_position_audible_to_observer(Vector3 pos, int observer_handle) const {
+	if (bsp.is_null()) return true;
+	if (observer_handle < 0 || observer_handle >= (int)observers.size()) return true;
+	const Observer &obs = observers[observer_handle];
+	if (!obs.valid || obs.leaf <= 0) return true;
+	int leaf = bsp->point_to_leaf(pos);
+	// A sound in solid or outside the map has no PAS row worth trusting.
+	if (leaf <= 0 || leaf >= bsp->get_leaf_count()) return true;
+	return (_pas_row(leaf)[obs.leaf >> 6] >> (obs.leaf & 63)) & 1;
+}
+
+const uint64_t *VisibilityManager::_pvs_row(int leaf) const {
+	if (pas_words == 0) {
+		int n = bsp->get_leaf_count();
+		pas_words = (n + 63) / 64;
+		pvs_rows.assign((size_t)n * pas_words, 0);
+		pas_rows.assign((size_t)n * pas_words, 0);
+		pvs_ready.assign(n, 0);
+		pas_ready.assign(n, 0);
+	}
+	uint64_t *row = &pvs_rows[(size_t)leaf * pas_words];
+	if (!pvs_ready[leaf]) {
+		std::vector<int> seen;
+		bsp->visible_leaves(leaf, seen);
+		for (int l : seen)
+			row[l >> 6] |= uint64_t(1) << (l & 63);
+		pvs_ready[leaf] = 1;
+	}
+	return row;
+}
+
+// GoldSrc's CM_CalcPAS, one row at a time: the PVS of every leaf this one can see.
+const uint64_t *VisibilityManager::_pas_row(int leaf) const {
+	const uint64_t *seen = _pvs_row(leaf);
+	uint64_t *dest = &pas_rows[(size_t)leaf * pas_words];
+	if (pas_ready[leaf]) return dest;
+	for (int w = 0; w < pas_words; w++) {
+		for (uint64_t bits = seen[w]; bits; bits &= bits - 1) {
+			const uint64_t *src = _pvs_row((w << 6) + __builtin_ctzll(bits));
+			for (int l = 0; l < pas_words; l++)
+				dest[l] |= src[l];
+		}
+	}
+	pas_ready[leaf] = 1;
+	return dest;
 }
 
 

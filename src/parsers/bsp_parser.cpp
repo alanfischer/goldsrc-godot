@@ -564,24 +564,22 @@ void BSPParser::parse_entities(const uint8_t *data, size_t size) {
 	}
 }
 
-vector<bool> BSPData::decompress_pvs(int leaf_index) const {
+void BSPData::visible_leaves(int leaf_index, vector<int> &out) const {
 	int num_leafs = (int)leafs.size();
-	vector<bool> pvs(num_leafs, false);
-
-	if (leaf_index < 0 || leaf_index >= num_leafs) return pvs;
+	if (leaf_index < 0 || leaf_index >= num_leafs) return;
 
 	const auto &leaf = leafs[leaf_index];
 
 	// Leaf 0 is the solid "outside" leaf — has no PVS
-	if (leaf_index == 0) return pvs;
+	if (leaf_index == 0) return;
 
 	// visofs == -1 means all leaves are visible from this leaf
 	if (leaf.visofs < 0) {
-		pvs.assign(num_leafs, true);
-		return pvs;
+		for (int i = 0; i < num_leafs; i++) out.push_back(i);
+		return;
 	}
 
-	if (visibility.empty() || (size_t)leaf.visofs >= visibility.size()) return pvs;
+	if (visibility.empty() || (size_t)leaf.visofs >= visibility.size()) return;
 
 	// RLE decompression: each byte is either a literal (bits = visible leaves)
 	// or 0x00 followed by a count of zero-bytes to skip.
@@ -606,7 +604,7 @@ vector<bool> BSPData::decompress_pvs(int leaf_index) const {
 			for (int bit = 0; bit < 8 && (byte_idx * 8 + bit) < num_vis_leafs; bit++) {
 				if (bits & (1 << bit)) {
 					// +1 because PVS bits start at leaf 1
-					pvs[byte_idx * 8 + bit + 1] = true;
+					out.push_back(byte_idx * 8 + bit + 1);
 				}
 			}
 			byte_idx++;
@@ -615,8 +613,14 @@ vector<bool> BSPData::decompress_pvs(int leaf_index) const {
 	}
 
 	// A leaf can always see itself
-	pvs[leaf_index] = true;
+	out.push_back(leaf_index);
+}
 
+vector<bool> BSPData::decompress_pvs(int leaf_index) const {
+	vector<bool> pvs(leafs.size(), false);
+	vector<int> seen;
+	visible_leaves(leaf_index, seen);
+	for (int l : seen) pvs[l] = true;
 	return pvs;
 }
 
