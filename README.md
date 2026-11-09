@@ -1,6 +1,6 @@
 # goldsrc-godot
 
-A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP maps, MDL models, SPR sprites, and WAD texture archives.
+A Godot 4.7+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP maps, MDL models, SPR sprites, and WAD texture archives.
 
 ![TFC ravine.bsp loaded in the Godot editor](docs/ravine_godot_editor.png)
 
@@ -38,7 +38,7 @@ A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
   file states it and never inferred: a model whose boxes are all `0` carries no anatomy, and
   deciding otherwise is the consuming game's call. Both the editor importer and any runtime
   converter bake these into their output, so tag the group in the `.mdl` rather than guessing
-  downstream — Wizard Wars does this with `tools/tag_mdl_head_hitboxes.py`
+  downstream.
 
 ### SPR Sprites
 - All frame types (single and grouped)
