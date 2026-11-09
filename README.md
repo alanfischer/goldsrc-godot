@@ -1,6 +1,6 @@
 # goldsrc-godot
 
-A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP maps, MDL models, SPR sprites, and WAD texture archives.
+A Godot 4.7+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP maps, MDL models, SPR sprites, and WAD texture archives.
 
 ![TFC ravine.bsp loaded in the Godot editor](docs/ravine_godot_editor.png)
 
@@ -38,7 +38,7 @@ A Godot 4.3+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
   file states it and never inferred: a model whose boxes are all `0` carries no anatomy, and
   deciding otherwise is the consuming game's call. Both the editor importer and any runtime
   converter bake these into their output, so tag the group in the `.mdl` rather than guessing
-  downstream — Wizard Wars does this with `tools/tag_mdl_head_hitboxes.py`
+  downstream.
 
 ### SPR Sprites
 - All frame types (single and grouped)
@@ -359,11 +359,14 @@ it always did.
 
 ### Metadata Contract
 
+This table is the whole contract: hop-godot reads exactly this, and any other engine that
+wants the hulls can.
+
 | Where | Key | Type | Meaning |
 |---|---|---|---|
-| Scene root | `bsp_data` | `PackedByteArray` | The stripped BSP tree. Written once per map: it is ~800 KB on a mid-size map and a map has hundreds of brush entities, so it is never copied per body — a consumer walks up the tree from a body to find it. |
+| Scene root | `bsp_data` | `PackedByteArray` | The stripped BSP: PLANES, VISIBILITY, NODES, CLIPNODES, LEAFS and MODELS, still a valid BSP30 file. Written once per map: it is ~800 KB on a mid-size map and a map has hundreds of brush entities, so it is never copied per body — a consumer walks up the tree from a body to find it. |
 | Collision body | `bsp_model` | `int` | BSP model index whose hulls this body's shapes stand for (0 = worldspawn, 1+ = brush entities). |
-| Collision body | `bsp_scale` | `float` | Godot units per GoldSrc unit, i.e. the importer's `scale_factor`. Always written — a consumer needs it to convert queries back into map units. |
+| Collision body | `bsp_scale` | `float` | Godot units per GoldSrc unit, i.e. the importer's `scale_factor`. Always written. A consumer must not assume a default: a wrong scale traces the map at the wrong size. |
 | Collision body | `bsp_blocking` | `int` | Optional. Bitmask over `-contents` (`CONTENTS_SOLID = -2` → bit 2) of what should stop a trace. Omitted means solid-only. Only the sky body sets it, to `1 << -CONTENTS_SKY`: the compiler writes sky as solid in the clip hulls, so sky blocks players there while staying passable in hull 0 — the same split as the mesh path's separate sky collision layer. |
 
 ### Enabling it

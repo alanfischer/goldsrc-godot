@@ -1,6 +1,6 @@
 [configuration]
 entry_symbol = "goldsrc_library_init"
-compatibility_minimum = "4.6"
+compatibility_minimum = "4.7"
 reloadable = true
 
 [libraries]
