@@ -165,9 +165,10 @@ string str_to_lower(const string &s) {
 //   WORLD  vec3 goldsrc_lightmap(vec3 lm, float sun_share, vec3 world_pos)
 //              lm: the styled lightmap, gamma (as stored); sun_share: lm_sun, the sky's part of it
 //          void goldsrc_surface(inout vec3 lit_srgb, inout vec3 albedo, vec3 light,
-//                               vec3 world_pos, vec3 world_normal, vec3 normal_view, vec3 view)
+//                               float sun_share, vec3 world_pos, vec3 world_normal,
+//                               vec3 normal_view, vec3 view)
 //              lit_srgb: texture x light, gamma, clamped; albedo: what real-time lights see;
-//              light: lightmap x overbright, gamma, unclamped
+//              light: lightmap x overbright, gamma, unclamped; sun_share: as above
 //   LIQUID vec3 goldsrc_liquid(vec3 albedo, int liquid_type)
 //   SKY    vec3 goldsrc_sky(vec3 color, vec3 eye_dir)
 // `variant`, if given, is one more name to #define: which build of a shared source this is.
@@ -250,7 +251,8 @@ void fragment() {
 	         + texture(lm_layer2, UV2).rgb * b2
 	         + texture(lm_layer3, UV2).rgb * b3;
 #ifdef GOLDSRC_HOOK_WORLD
-	lm = goldsrc_lightmap(lm, texture(lm_sun, UV2).r, goldsrc_world_pos);
+	float sun_share = texture(lm_sun, UV2).r;
+	lm = goldsrc_lightmap(lm, sun_share, goldsrc_world_pos);
 #endif
 
 	// ALBEDO stays in the renderer's native space so real-time lights stay correct;
@@ -261,7 +263,7 @@ void fragment() {
 	vec3 lit_srgb = min(base_srgb * light, vec3(1.0));
 	vec3 base = albedo.rgb;
 #ifdef GOLDSRC_HOOK_WORLD
-	goldsrc_surface(lit_srgb, base, light, goldsrc_world_pos, goldsrc_world_normal, NORMAL, VIEW);
+	goldsrc_surface(lit_srgb, base, light, sun_share, goldsrc_world_pos, goldsrc_world_normal, NORMAL, VIEW);
 #endif
 	ALBEDO = base;
 	EMISSION = linear_output ? gs_to_linear(lit_srgb) : lit_srgb;
