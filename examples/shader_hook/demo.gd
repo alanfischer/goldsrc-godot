@@ -33,19 +33,19 @@ func _apply() -> void:
 		return
 	var sky_light := Vector3.ONE.lerp(MOON, night) + Vector3.ONE * lightning
 	var map := get_child(0) if get_child_count() > 0 else null
-	var rain_floor: Dictionary = map.get_meta("rain_floor", {}) if map else {}
+	var below_sky: Dictionary = map.get_meta("surface_below_sky", {}) if map else {}
 	var floor_tex: Texture2D = null
 	for mat in _materials(map, []):
 		mat.set_shader_parameter("sky_light", sky_light)
 		mat.set_shader_parameter("flash_color", Vector3.ONE * lightning)
 		mat.set_shader_parameter("wetness", wetness)
-		if not rain_floor.is_empty() and mat.get_shader_parameter("rain_floor") == null:
+		if not below_sky.is_empty() and mat.get_shader_parameter("below_sky") == null:
 			if floor_tex == null:
-				floor_tex = ImageTexture.create_from_image(rain_floor["image"])
-			mat.set_shader_parameter("rain_floor", floor_tex)
-			mat.set_shader_parameter("rain_floor_origin", rain_floor["origin"])
-			mat.set_shader_parameter("rain_floor_size", rain_floor["size"])
-			mat.set_shader_parameter("has_rain_floor", true)
+				floor_tex = ImageTexture.create_from_image(below_sky["image"])
+			mat.set_shader_parameter("below_sky", floor_tex)
+			mat.set_shader_parameter("below_sky_origin", below_sky["origin"])
+			mat.set_shader_parameter("below_sky_size", below_sky["size"])
+			mat.set_shader_parameter("has_below_sky", true)
 
 
 ## Every ShaderMaterial under `node`, once each: the importer shares one per texture.

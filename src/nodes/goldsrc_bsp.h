@@ -13,6 +13,7 @@
 #include <godot_cpp/variant/packed_byte_array.hpp>
 
 #include "../parsers/bsp_parser.h"
+#include "../bake/sun_fraction.h"
 #include "goldsrc_wad.h"
 #include <map>
 #include <memory>
@@ -118,12 +119,10 @@ public:
 	// sun_slices, on maps with a light_environment: L8 slices of the sky's share of each cell.
 	godot::Dictionary bake_light_grid(float cell_size_gs = 32.0f) const;
 
-	// Where rain falling straight down from the sky stops, per column of the map: the first
-	// surface under the sky brushes (a roof, the ground, a pool). Returns {origin: Vector3 (the
-	// max-X/min-Z corner in Godot coords, as the light grid's), size: Vector2 (Godot X/Z extent),
-	// image: Image FORMAT_RF of Godot Y heights, one texel per column (X = GS X, Y = GS Y),
-	// top: float, the Godot Y rain falls from — what a column outside the map holds}.
-	godot::Dictionary bake_rain_floor(float cell_size_gs = 16.0f) const;
+	// Per column of the map, the first surface under the sky brushes going straight down (a
+	// roof, the ground, a pool), and the open air under it: where rain lands, and what has a
+	// roof over it. See src/bake/surface_below_sky.h for the Dictionary it returns.
+	godot::Dictionary bake_surface_below_sky(float cell_size_gs = 16.0f) const;
 
 private:
 	void build_mesh(godot::Node3D *root);
@@ -144,8 +143,6 @@ private:
 	void build_brush_convex(godot::Node3D *parent, int model_index,
 		int contents_filter = 0);
 	void rebake_lightstyle(int style_index);
-	// Fills face_sun_fraction. See the .cpp for how the sky's share is found.
-	void compute_sun_fractions();
 
 	void _collect_leaves_in_aabb(int node_idx, const float gs_min[3], const float gs_max[3],
 		godot::PackedInt32Array &result) const;
@@ -169,9 +166,8 @@ private:
 	std::vector<FaceLightmapInfo> face_lm_info;
 	std::vector<LightmapAtlasState> lm_atlases;
 	float lightstyle_values[64];
-	// Per parsed face, per luxel: the share of its light that came from the sky, 0..255.
-	// Empty when the map has no light_environment.
-	std::vector<std::vector<uint8_t>> face_sun_fraction;
+	// Baked only for a shader hook, which is all that reads it. See src/bake/sun_fraction.h.
+	goldsrc::SunFraction face_sun_fraction;
 
 	// Shader-based lightstyle members
 	bool shader_lightstyles = true;

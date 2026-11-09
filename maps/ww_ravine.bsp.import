@@ -20,5 +20,5 @@ model_directory=""
 shader_lightstyles=true
 overbright=2.0
 light_grid_cell_size=0.0
-rain_floor_cell_size=16.0
+surface_below_sky_cell_size=16.0
 shader_hook="res://examples/shader_hook/hook.gdshaderinc"
