@@ -7,12 +7,13 @@
 // A linear-light multiplier on the sky's part of each luxel: (1,1,1) is the map as compiled, a dim
 // blue is moonlight. The map's own lights are not the sky's, so they stay lit.
 uniform vec3 sky_light = vec3(1.0);
-// 0 dry, 1 soaked. Only ground under open sky gets wet: the rain floor says where that is.
+// 0 dry, 1 soaked. Only ground under open sky gets wet: the map's surface below the sky says
+// where that is.
 uniform float wetness = 0.0;
-uniform sampler2D rain_floor : filter_nearest;
-uniform vec3 rain_floor_origin;  // the rain floor's "origin": its max-X/min-Z corner
-uniform vec2 rain_floor_size = vec2(1.0);
-uniform bool has_rain_floor = false;
+uniform sampler2D below_sky : filter_nearest;
+uniform vec3 below_sky_origin;  // its "origin": the max-X/min-Z corner
+uniform vec2 below_sky_size = vec2(1.0);
+uniform bool has_below_sky = false;
 
 // lm is the styled lightmap as stored (gamma); sun_share is how much of it came from the sky.
 vec3 goldsrc_lightmap(vec3 lm, float sun_share, vec3 world_pos) {
@@ -21,12 +22,12 @@ vec3 goldsrc_lightmap(vec3 lm, float sun_share, vec3 world_pos) {
 }
 
 bool open_to_sky(vec3 p) {
-	if (!has_rain_floor) {
+	if (!has_below_sky) {
 		return true;
 	}
-	vec2 uv = vec2((rain_floor_origin.x - p.x) / rain_floor_size.x, (p.z - rain_floor_origin.z) / rain_floor_size.y);
+	vec2 uv = vec2((below_sky_origin.x - p.x) / below_sky_size.x, (p.z - below_sky_origin.z) / below_sky_size.y);
 	return uv.x >= 0.0 && uv.y >= 0.0 && uv.x < 1.0 && uv.y < 1.0
-		&& p.y > textureLod(rain_floor, uv, 0.0).r - 0.1;
+		&& p.y > textureLod(below_sky, uv, 0.0).r - 0.1;
 }
 
 // lit_srgb is texture x light (gamma, what the surface shows); albedo is what real-time lights

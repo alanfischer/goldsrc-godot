@@ -114,11 +114,11 @@ func _get_import_options(_path: String, _preset_index: int) -> Array[Dictionary]
 			"property_hint": PROPERTY_HINT_RANGE,
 			"hint_string": "0.0,256.0,1.0",
 		},
-		# Bake the rain floor into the scene's "rain_floor" metadata: per column, where something
-		# falling from the sky first lands (GoldSrcBSP.bake_rain_floor). Cell size in GoldSrc
-		# units; 0 skips the bake.
+		# Bake the surface below the sky into the scene's "surface_below_sky" metadata: per
+		# column, the first surface going straight down under the sky brushes
+		# (GoldSrcBSP.bake_surface_below_sky). Cell size in GoldSrc units; 0 skips the bake.
 		{
-			"name": "rain_floor_cell_size",
+			"name": "surface_below_sky_cell_size",
 			"default_value": 0.0,
 			"property_hint": PROPERTY_HINT_RANGE,
 			"hint_string": "0.0,128.0,1.0",
@@ -164,11 +164,11 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 				push_warning("BSP Importer: WAD '%s' not found for %s" % [name, source_file])
 
 	var root := bsp.build_scene()
-	var rain_cell: float = options.get("rain_floor_cell_size", 0.0)
-	if rain_cell > 0.0:
-		var rain_floor := bsp.bake_rain_floor(rain_cell)
-		if not rain_floor.is_empty():
-			root.set_meta("rain_floor", rain_floor)
+	var below_cell: float = options.get("surface_below_sky_cell_size", 0.0)
+	if below_cell > 0.0:
+		var below := bsp.bake_surface_below_sky(below_cell)
+		if not below.is_empty():
+			root.set_meta("surface_below_sky", below)
 	_instantiate_entity_models(root, options.get("model_directory", ""))
 
 	var scene := PackedScene.new()

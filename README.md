@@ -23,7 +23,7 @@ A Godot 4.7+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
 - Entity lump parsing (key-value dictionaries accessible from GDScript)
 - Ambient cube light grid baking — traces rays in 6 directions from a 3D grid through the BSP tree, samples lightmaps at hit points, and outputs slice images for `ImageTexture3D` construction. Includes flood-fill of solid cells to prevent trilinear interpolation artifacts. Provides spatially-varying directional ambient lighting for dynamic models
 - Sun fraction — the share of each luxel's light that came from the sky, so a game can turn the sun down (night) and leave the map's own lights alone. hlrad bakes both into style 0; when the `light_environment` has a style of its own the split is exact, otherwise each luxel is re-lit by sun, sky and point-light traces and the weights that best rebuild the real lightmap decide it. Baked only when a `shader_hook` is set. Bound to world materials as `lm_sun`, handed to the hook's `goldsrc_lightmap` (below) and added to the light grid as `sun_slices`
-- Rain floor (`bake_rain_floor`) — per column, the height where something falling from the sky first lands: sky faces pass, worldspawn and `func_water` stop it, doors and platforms don't; and the open air under it, which wind blows rain in through. A heightmap a game can use for precipitation, roofs and puddles
+- Surface below the sky (`bake_surface_below_sky`) — per column, the first surface a trace straight down from the top of the map meets: sky faces pass, worldspawn and `func_water` stop it, doors and platforms don't; and the open air under it, under eaves and through doorways. A heightmap a game can use for where rain lands, what is under a roof, and puddles
 - Shader hooks (`shader_hook`) — your own shader code in every BSP shader, for night, weather and the like, without the extension knowing about them. See [Shader Hooks](#shader-hooks)
 
 ### MDL Models
@@ -83,7 +83,7 @@ All imported scenes contain only standard Godot types (Node3D, MeshInstance3D, A
 | `shader_lightstyles` | `true` | Composite the four lightmap styles in the world shader, so styles can be animated at runtime. The 64-entry style texture rides in root metadata as `lightstyle_texture` (and `lightstyle_image`). |
 | `overbright` | `2.0` | Lightmap multiplier on world materials. GoldSrc's is 2.0. |
 | `light_grid_cell_size` | `0.0` | Bake an ambient-cube light grid into root metadata as `light_grid`, for lighting models by position. Cell size in GoldSrc units; `0` skips it. |
-| `rain_floor_cell_size` | `0.0` | Bake the rain floor into root metadata as `rain_floor` (see [Shader Hooks](#shader-hooks)). Cell size in GoldSrc units; `0` skips it. |
+| `surface_below_sky_cell_size` | `0.0` | Bake the surface below the sky into root metadata as `surface_below_sky` (see [Shader Hooks](#shader-hooks)). Cell size in GoldSrc units; `0` skips it. |
 | `shader_hook` | `""` | A `.gdshaderinc` every shader in the map includes. See [Shader Hooks](#shader-hooks). |
 
 Every imported map's root is also stamped with `pipeline_id`, a hash of the extension's C++
@@ -201,19 +201,19 @@ func set_night(map: Node, amount: float) -> void:
 The materials are shared per texture, so that sets each once however many surfaces use it. A
 material whose shader doesn't declare the uniform ignores it.
 
-For weather, `bake_rain_floor(cell_size)` (or the importer's `rain_floor_cell_size`) gives a
-heightmap of where rain lands, as root metadata `rain_floor`: `image` (an `FORMAT_RF` image of
-heights in Godot units), `origin` (its max-X/min-Z corner in world space), `size` (its world
-extent on X/Z) and `top` (the map's ceiling). A point is under open sky when its height is above
-the floor's at its column:
+For weather, `bake_surface_below_sky(cell_size)` (or the importer's `surface_below_sky_cell_size`)
+gives a heightmap of the first surface under the sky, where rain lands, as root metadata
+`surface_below_sky`: `image` (an `FORMAT_RF` image of heights in Godot units), `origin` (its
+max-X/min-Z corner in world space), `size` (its world extent on X/Z) and `top` (the map's
+ceiling). A point is under open sky when its height is above the surface's at its column:
 
 ```glsl
-vec2 uv = vec2((rain_floor_origin.x - p.x) / rain_floor_size.x, (p.z - rain_floor_origin.z) / rain_floor_size.y);
-bool open_to_sky = p.y > textureLod(rain_floor, uv, 0.0).r - 0.1;
+vec2 uv = vec2((below_sky_origin.x - p.x) / below_sky_size.x, (p.z - below_sky_origin.z) / below_sky_size.y);
+bool open_to_sky = p.y > textureLod(below_sky, uv, 0.0).r - 0.1;
 ```
 
-It also has `under`, an `FORMAT_RGF` image laid out the same: the open air beneath where rain
-lands in each column, as the underside of the roof (R) and the ground below it (G), or both
+It also has `under`, an `FORMAT_RGF` image laid out the same: the open air beneath the
+surface in each column, as the underside of the roof (R) and the ground below it (G), or both
 `-1e6` where there is none (open ground, a wall, a pillar). That is what wind blows rain in
 through, under eaves, through doorways and windows into a sealed room. A cell counts as solid
 when its middle or two of its corners are, so walls thinner than a cell are kept.
@@ -485,9 +485,10 @@ var grid = bsp.bake_light_grid(32.0)  # cell size in GoldSrc units
 #   sun_slices: Array of L8 Images — the sky's share of each cell's light
 #     (only with a shader_hook, on maps with a light_environment)
 
-# Where rain lands, per column (see Shader Hooks)
-var rain_floor = bsp.bake_rain_floor(16.0)  # cell size in GoldSrc units
-# Returns Dictionary with image (FORMAT_RF heights), origin (max-X/min-Z corner), size, top
+# The first surface under the sky, per column (see Shader Hooks)
+var below_sky = bsp.bake_surface_below_sky(16.0)  # cell size in GoldSrc units
+# Returns Dictionary with image (FORMAT_RF heights), origin (max-X/min-Z corner), size, top,
+# under (FORMAT_RGF: the open air beneath the surface)
 ```
 
 ### VisibilityManager
