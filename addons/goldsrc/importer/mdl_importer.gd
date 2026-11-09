@@ -32,14 +32,23 @@ func _get_preset_name(preset_index: int) -> String:
 
 ## What shape of scene this importer builds. 1: meshes merged into one MeshInstance3D per
 ## bodypart. 2: triangle corners welded back into shared vertices. 3: animation keys cut to the
-## ones interpolation can't reproduce, skins stored as lossless WebP.
+## ones interpolation can't reproduce, skins stored as lossless WebP. 5: GoldSrcMDL.build_scene()
+## builds the root, with the skin families and sequences on it.
 ##
-## Godot records it in each .import file but does not act on a bump — neither --import nor an
-## editor session reimports on its own (checked on 4.7). Changing the built scene means clearing
-## .godot/imported/*.mdl-* by hand; the number is here so it is visible which build a cache came
-## from.
+## Godot records it in each .import file but does not act on a bump (checked on 4.7), so
+## plugin.gd reimports any model recorded with another import_key().
+const FORMAT_VERSION := 5
+## Project metadata section recording, per .mdl, the import_key() it was last imported with.
+const IMPORTED_WITH := "goldsrc_mdl_imported_with"
+
+
 func _get_format_version() -> int:
-	return 4
+	return FORMAT_VERSION
+
+
+## What an import made now would be built by: this extension build and this script's version.
+static func import_key() -> String:
+	return "%s/%d" % [GoldSrcBSP.get_pipeline_id(), FORMAT_VERSION]
 
 
 func _get_priority() -> float:
@@ -89,5 +98,7 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 		push_error("MDL Importer: Failed to pack scene: %s" % error_string(pack_err))
 		return pack_err
 
-	return ResourceSaver.save(scene, save_path + "." + _get_save_extension())
-
+	var save_err := ResourceSaver.save(scene, save_path + "." + _get_save_extension())
+	if save_err == OK:
+		EditorInterface.get_editor_settings().set_project_metadata(IMPORTED_WITH, source_file, import_key())
+	return save_err
