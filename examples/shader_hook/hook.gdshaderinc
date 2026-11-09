@@ -30,10 +30,10 @@ bool open_to_sky(vec3 p) {
 }
 
 // lit_srgb is texture x light (gamma, what the surface shows); albedo is what real-time lights
-// see; light is the lightmap x overbright it was lit with. Normals and view are the fragment's
-// own, in view space.
-void goldsrc_surface(inout vec3 lit_srgb, inout vec3 albedo, vec3 light, vec3 world_pos,
-		vec3 world_normal, vec3 normal_view, vec3 view) {
+// see; light is the lightmap x overbright it was lit with, sun_share the sky's part of it. Normals
+// and view are the fragment's own, in view space.
+void goldsrc_surface(inout vec3 lit_srgb, inout vec3 albedo, vec3 light, float sun_share,
+		vec3 world_pos, vec3 world_normal, vec3 normal_view, vec3 view) {
 	if (wetness <= 0.0 || world_normal.y < 0.7 || !open_to_sky(world_pos)) {
 		return;
 	}
