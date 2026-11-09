@@ -212,6 +212,8 @@ struct BSPData {
 	// Decompress PVS bitfield for a leaf. Returns a vector of bools, one per leaf.
 	// pvs[i] == true means leaf i is potentially visible from the given leaf.
 	std::vector<bool> decompress_pvs(int leaf_index) const;
+	// The same set as leaf indices, appended to out.
+	void visible_leaves(int leaf_index, std::vector<int> &out) const;
 };
 
 class BSPParser {
