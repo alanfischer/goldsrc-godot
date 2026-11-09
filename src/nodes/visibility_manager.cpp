@@ -4,6 +4,17 @@
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
+#ifdef _MSC_VER
+#include <intrin.h>
+static inline int ctz64(uint64_t x) {
+	unsigned long i;
+	_BitScanForward64(&i, x);
+	return (int)i;
+}
+#else
+static inline int ctz64(uint64_t x) { return __builtin_ctzll(x); }
+#endif
+
 using namespace godot;
 
 void VisibilityManager::_bind_methods() {
@@ -199,7 +210,7 @@ const uint64_t *VisibilityManager::_pas_row(int leaf) const {
 	if (pas_ready[leaf]) return dest;
 	for (int w = 0; w < pas_words; w++) {
 		for (uint64_t bits = seen[w]; bits; bits &= bits - 1) {
-			const uint64_t *src = _pvs_row((w << 6) + __builtin_ctzll(bits));
+			const uint64_t *src = _pvs_row((w << 6) + ctz64(bits));
 			for (int l = 0; l < pas_words; l++)
 				dest[l] |= src[l];
 		}
