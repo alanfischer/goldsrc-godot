@@ -35,11 +35,10 @@ void VisibilityManager::_bind_methods() {
 
 int VisibilityManager::setup(String bsp_path, float scale_factor) {
 	teardown();
-	bsp = memnew(GoldSrcBSP);
+	bsp.instantiate();
 	bsp->set_scale_factor(scale_factor);
 	if (bsp->load_bsp(bsp_path) != Error::OK) {
-		memdelete(bsp);
-		bsp = nullptr;
+		bsp.unref();
 		return 0;
 	}
 	return bsp->get_leaf_count();
@@ -47,21 +46,17 @@ int VisibilityManager::setup(String bsp_path, float scale_factor) {
 
 int VisibilityManager::setup_from_data(PackedByteArray pvs_blob, float scale_factor) {
 	teardown();
-	bsp = memnew(GoldSrcBSP);
+	bsp.instantiate();
 	bsp->set_scale_factor(scale_factor);
 	if (bsp->load_bsp_from_data(pvs_blob) != Error::OK) {
-		memdelete(bsp);
-		bsp = nullptr;
+		bsp.unref();
 		return 0;
 	}
 	return bsp->get_leaf_count();
 }
 
 void VisibilityManager::teardown() {
-	if (bsp) {
-		memdelete(bsp);
-		bsp = nullptr;
-	}
+	bsp.unref();
 	observers.clear();
 	observer_free.clear();
 	entities.clear();
@@ -71,11 +66,11 @@ void VisibilityManager::teardown() {
 }
 
 bool VisibilityManager::is_ready() const {
-	return bsp != nullptr;
+	return bsp.is_valid();
 }
 
 int VisibilityManager::get_leaf_count() const {
-	return bsp ? bsp->get_leaf_count() : 0;
+	return bsp.is_valid() ? bsp->get_leaf_count() : 0;
 }
 
 
@@ -121,7 +116,7 @@ int VisibilityManager::add_observer(int peer_id, Vector3 pos) {
 	Observer &obs = observers[idx];
 	obs.peer_id = peer_id;
 	obs.valid = true;
-	if (bsp) {
+	if (bsp.is_valid()) {
 		obs.pvs.assign(bsp->get_leaf_count(), false);
 		_update_observer_pvs(obs, bsp->point_to_leaf(pos));
 	}
@@ -137,7 +132,7 @@ void VisibilityManager::remove_observer(int handle) {
 void VisibilityManager::update_observer_position(int handle, Vector3 pos) {
 	if (handle < 0 || handle >= (int)observers.size()) return;
 	Observer &obs = observers[handle];
-	if (!obs.valid || !bsp) return;
+	if (!obs.valid || bsp.is_null()) return;
 	_update_observer_pvs(obs, bsp->point_to_leaf(pos));
 }
 
@@ -147,7 +142,7 @@ int VisibilityManager::get_observer_leaf(int handle) const {
 }
 
 bool VisibilityManager::is_leaf_visible_to_observer(int leaf, int observer_handle) const {
-	if (!bsp) return true;
+	if (bsp.is_null()) return true;
 	if (observer_handle < 0 || observer_handle >= (int)observers.size()) return true;
 	const Observer &obs = observers[observer_handle];
 	if (!obs.valid || obs.leaf < 0) return true;
@@ -156,7 +151,7 @@ bool VisibilityManager::is_leaf_visible_to_observer(int leaf, int observer_handl
 }
 
 bool VisibilityManager::is_position_visible_to_observer(Vector3 pos, int observer_handle) const {
-	if (!bsp) return true;
+	if (bsp.is_null()) return true;
 	return is_leaf_visible_to_observer(bsp->point_to_leaf(pos), observer_handle);
 }
 
@@ -164,7 +159,7 @@ bool VisibilityManager::is_position_visible_to_observer(Vector3 pos, int observe
 // --- Entities ---
 
 std::vector<int> VisibilityManager::_aabb_to_leaves(AABB aabb) const {
-	if (!bsp) return {};
+	if (bsp.is_null()) return {};
 	PackedInt32Array arr = bsp->get_leaves_in_aabb(aabb);
 	std::vector<int> result(arr.size());
 	for (int i = 0; i < arr.size(); i++)
@@ -194,7 +189,7 @@ void VisibilityManager::update_entity_aabb(int handle, AABB aabb) {
 }
 
 bool VisibilityManager::is_entity_visible_to_observer(int entity_handle, int observer_handle) const {
-	if (!bsp) return true;
+	if (bsp.is_null()) return true;
 	if (entity_handle < 0 || entity_handle >= (int)entities.size()) return true;
 	const Entity &e = entities[entity_handle];
 	if (!e.valid) return false;
@@ -221,7 +216,7 @@ void VisibilityManager::unregister_leaf_set(int handle) {
 }
 
 bool VisibilityManager::is_leaf_set_visible_to_observer(int set_handle, int observer_handle) const {
-	if (!bsp) return true;
+	if (bsp.is_null()) return true;
 	if (set_handle < 0 || set_handle >= (int)leaf_sets.size()) return true;
 	const LeafSet &ls = leaf_sets[set_handle];
 	if (!ls.valid) return false;

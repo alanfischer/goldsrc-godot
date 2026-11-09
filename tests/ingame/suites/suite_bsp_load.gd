@@ -20,7 +20,6 @@ func run() -> void:
 ## reach for them before checking.
 func _unloaded_node_is_inert() -> void:
 	var bsp := GoldSrcBSP.new()
-	track(bsp)
 
 	check_eq(bsp.get_leaf_count(), 0, "unloaded: leaf count")
 	check_eq(bsp.get_entities().size(), 0, "unloaded: entity count")
@@ -43,7 +42,6 @@ func _loads_the_shipped_map() -> void:
 
 func _rejection_paths() -> void:
 	var bsp := GoldSrcBSP.new()
-	track(bsp)
 
 	check_eq(bsp.load_bsp("res://maps/does_not_exist.bsp"), ERR_FILE_NOT_FOUND,
 		"missing file is reported as not found")
@@ -65,7 +63,6 @@ func _rejection_paths() -> void:
 ## by loading a real v29 map, not reachable from a synthetic header here.
 func _accepts_quake_version() -> void:
 	var bsp := GoldSrcBSP.new()
-	track(bsp)
 
 	# A header-sized, otherwise-empty buffer is valid enough to reach — and pass — the version gate.
 	var v29 := PackedByteArray()
@@ -95,7 +92,6 @@ func _both_entry_points_agree() -> void:
 	f.close()
 
 	var from_data := GoldSrcBSP.new()
-	track(from_data)
 	check_eq(from_data.load_bsp_from_data(bytes), OK, "the same bytes load from memory")
 	check_eq(from_data.get_leaf_count(), from_path.get_leaf_count(),
 		"both entry points agree on leaf count")

@@ -148,7 +148,6 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 	bsp.shader_hook = options.get("shader_hook", "")
 	var err := bsp.load_bsp(source_file)
 	if err != OK:
-		bsp.free()
 		return err
 
 	# An explicit wad_directory loads every WAD in it. Otherwise the WADs worldspawn declares
@@ -170,7 +169,6 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 		var rain_floor := bsp.bake_rain_floor(rain_cell)
 		if not rain_floor.is_empty():
 			root.set_meta("rain_floor", rain_floor)
-	bsp.free()
 	_instantiate_entity_models(root, options.get("model_directory", ""))
 
 	var scene := PackedScene.new()

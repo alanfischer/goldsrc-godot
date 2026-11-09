@@ -8,7 +8,7 @@
 
 #include <vector>
 
-class GoldSrcBSP;
+#include "goldsrc_bsp.h"
 
 /// BSP PVS visibility manager for GoldSrc maps.
 ///
@@ -91,7 +91,7 @@ private:
 		bool valid = false;
 	};
 
-	GoldSrcBSP *bsp = nullptr;
+	godot::Ref<GoldSrcBSP> bsp;
 
 	std::vector<Observer> observers;
 	std::vector<int> observer_free;

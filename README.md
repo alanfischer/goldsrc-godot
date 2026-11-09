@@ -29,7 +29,13 @@ A Godot 4.7+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
 ### MDL Models
 - Skeleton3D with full bone hierarchy
 - Skinned meshes with per-vertex bone weights
-- All animation sequences as AnimationPlayer tracks
+- All animation sequences as AnimationPlayer tracks, and as root metadata `sequences`: one
+  `{name, fps, num_frames}` per sequence in the file's order, which a game's sequence numbers
+  count in (the AnimationPlayer lists them alphabetically)
+- Skin families: the meshes carry family 0, the root `skin_count`, and every skinned
+  `MeshInstance3D` `skin_<n>` for each other family, one material per surface (null where the
+  surface has no skin). Swap a family in with `set_surface_override_material`
+- Turned to face the way the game faces them (90° about Y from the file's axes)
 - Chrome and additive material flags
 - Configurable scale factor
 - Hit boxes as `BoneAttachment3D` + queryable-only `Area3D` on collision layer 10, each carrying
@@ -112,7 +118,6 @@ bsp.light_grid_cell_size = 32.0
 bsp.load_bsp("res://maps/mymap.bsp")
 bsp.load_declared_wads()          # beside the .bsp, then res://; returns any it couldn't find
 var root := bsp.build_scene()     # plain Node3D, owners set, metadata on the root
-bsp.free()
 
 var scene := PackedScene.new()
 scene.pack(root)
@@ -249,7 +254,7 @@ BSP maps are divided into convex regions called *leaves*. During map compilation
                   └─ VisibilityManager ready — no .bsp file needed at runtime
 ```
 
-The `bsp_data` blob is written by `build_mesh()`, so every converted map carries it. Retrieve it from the instantiated map scene:
+The `bsp_data` blob is written by `build_scene()`, so every converted map carries it. Retrieve it from the instantiated map scene:
 
 ```gdscript
 var pvs_blob: PackedByteArray = map_root.get_meta("bsp_data", PackedByteArray())
@@ -424,19 +429,20 @@ wad.load_wad("textures.wad")
 bsp.add_wad(wad)
 
 bsp.load_bsp("map.bsp")
-bsp.build_mesh()
 
-# build_scene() instead of build_mesh() gives a plain, owned Node3D to pack and save
-# (see Runtime Conversion). Both put the root metadata (bsp_data, pipeline_id, lightstyles,
-# light_grid) on the node they return or fill.
+# GoldSrcBSP is a RefCounted loader: it frees itself, and nothing it builds keeps it.
+# build_scene() returns the map as a plain, owned Node3D to add or to pack and save (see
+# Runtime Conversion), with the root metadata (bsp_data, pipeline_id, lightstyles,
+# light_grid) on it. Once per load: load again for another scene.
+var root = bsp.build_scene()
 bsp.overbright = 2.0                   # lightmap multiplier on world materials (default 2.0)
 bsp.light_grid_cell_size = 32.0        # bake light_grid; 0 (default) skips it
 bsp.shader_hook = "res://shaders/my_hook.gdshaderinc"  # see Shader Hooks; "" (default) for none
 var missing = bsp.load_declared_wads(["res://wads"])  # worldspawn's WADs; returns those not found
 var pipeline = GoldSrcBSP.scene_pipeline_id(packed_scene)  # "" before the stamp existed
 
-# Entity data is on the child nodes as metadata:
-for child in bsp.get_children():
+# Entity data is on the scene's nodes as metadata:
+for child in root.get_children():
     if child.has_meta("entity"):
         var ent = child.get_meta("entity")  # Dictionary
         print(ent.get("classname", ""))
@@ -457,14 +463,14 @@ var aabb_leaves = bsp.get_leaves_in_aabb(my_aabb)      # PackedInt32Array of lea
 var bsp_blob: PackedByteArray = bsp.get_bsp_blob()
 # get_pvs_blob() is a deprecated alias for the same call.
 
-# build_mesh() already parks this blob on the node, so prefer reading it back —
+# build_scene() already parks this blob on the root, so prefer reading it back —
 # PackedByteArray is copy-on-write, so this is a refcount rather than a second copy.
-var same_blob: PackedByteArray = bsp.get_meta("bsp_data", PackedByteArray())
+var same_blob: PackedByteArray = root.get_meta("bsp_data", PackedByteArray())
 
-# Load a stripped blob for PVS/hull queries (no WADs or build_mesh needed)
+# Load a stripped blob for PVS/hull queries (no WADs or build_scene needed)
 bsp.load_bsp_from_data(bsp_blob)
 
-# Bake ambient cube light grid (call after build_mesh)
+# Bake ambient cube light grid (after build_scene, for sun_slices)
 var grid = bsp.bake_light_grid(32.0)  # cell size in GoldSrc units
 # Returns Dictionary with:
 #   grid_origin: Vector3 — world-space origin in Godot coords
@@ -527,10 +533,10 @@ vm.teardown()
 ### GoldSrcMDL
 
 ```gdscript
-var mdl = GoldSrcMDL.new()
+var mdl = GoldSrcMDL.new()     # a RefCounted loader, like GoldSrcBSP
 mdl.scale_factor = 0.025
 mdl.load_mdl("model.mdl")
-mdl.build_model()
+var model = mdl.build_scene()  # plain, owned Node3D; once per load
 
 print(mdl.get_sequence_count())    # Number of animations
 print(mdl.get_sequence_name(0))    # First animation name

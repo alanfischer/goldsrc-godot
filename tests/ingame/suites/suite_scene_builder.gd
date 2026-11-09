@@ -1,8 +1,8 @@
 extends "res://tests/ingame/suite.gd"
 ## GoldSrcBSP.build_scene(): what a converted map carries on its root, what each property
 ## changes, and the pipeline_id stamp that tells a consumer the scene came from another build.
-## The properties are read by build_mesh()/build_scene(), not load_bsp(), so they can be set
-## on load_map()'s node after loading.
+## The properties are read by build_scene(), not load_bsp(), so they can be set on
+## load_map()'s GoldSrcBSP after loading.
 
 
 func run() -> void:
@@ -13,7 +13,6 @@ func run() -> void:
 	_entities_face_their_angles(root)
 	_stamp_round_trips(root)
 	_unloaded_is_null()
-	_build_mesh_carries_the_metadata()
 	_declared_wads()
 	_properties()
 
@@ -26,7 +25,6 @@ func _build(props: Dictionary) -> Node3D:
 	for key in props:
 		bsp.set(key, props[key])
 	var root := bsp.build_scene()
-	check_eq(bsp.get_child_count(), 0, "build_scene() leaves the GoldSrcBSP empty")
 	if root == null:
 		fail("build_scene() returned null with %s" % props)
 		return null
@@ -36,7 +34,7 @@ func _build(props: Dictionary) -> Node3D:
 
 func _defaults(root: Node3D) -> void:
 	check_eq(String(root.name), "ww_ravine", "the root is named after the map")
-	check(root.get_child_count() > 0, "the BSP's nodes are moved under the root")
+	check(root.get_child_count() > 0, "the map's nodes are under the root")
 	check(root.find_children("*", "GoldSrcBSP", true, false).is_empty(),
 		"no GoldSrcBSP survives in the scene, so it loads without the extension")
 	check(root.find_children("*", "", true, false).all(func(n): return n.owner == root),
@@ -78,18 +76,6 @@ func _stamp_round_trips(root: Node3D) -> void:
 func _unloaded_is_null() -> void:
 	var bsp := GoldSrcBSP.new()
 	check(bsp.build_scene() == null, "build_scene() with nothing loaded builds nothing")
-	bsp.free()
-
-
-## A caller that keeps the GoldSrcBSP in its tree instead gets the same metadata on it.
-func _build_mesh_carries_the_metadata() -> void:
-	var bsp := load_map()
-	if bsp == null:
-		return
-	bsp.build_mesh()
-	check_eq(bsp.get_meta("pipeline_id", ""), GoldSrcBSP.get_pipeline_id(), "build_mesh() stamps its own node")
-	check(bsp.has_meta("bsp_data") and bsp.has_meta("lightstyle_texture"),
-		"build_mesh() puts the rest of the root metadata on its own node too")
 
 
 ## The repo carries no WADs, so every one ww_ravine declares comes back missing.

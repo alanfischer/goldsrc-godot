@@ -14,8 +14,8 @@ func _not_baked_without_a_hook() -> void:
 	var bsp := load_map()
 	if bsp == null:
 		return
-	bsp.build_mesh()
-	check_eq(_lm_sun_means(bsp, false).size(), 0, "no hook, no lm_sun on any surface")
+	var root := track(bsp.build_scene())
+	check_eq(_lm_sun_means(root, false).size(), 0, "no hook, no lm_sun on any surface")
 	check(not bsp.bake_light_grid(64.0).has("sun_slices"), "no hook, no sun_slices in the grid")
 
 
@@ -26,8 +26,8 @@ func _brush_entities_get_the_sun() -> void:
 	if bsp == null:
 		return
 	bsp.shader_hook = HOOK
-	bsp.build_mesh()
-	var means := _lm_sun_means(bsp, true)
+	var root := track(bsp.build_scene())
+	var means := _lm_sun_means(root, true)
 	check(means.size() > 0, "ww_ravine's brush entities have lm_sun surfaces")
 	var lit := means.filter(func(m: float) -> bool: return m > 0.05).size()
 	check(lit > means.size() / 2,
@@ -36,9 +36,9 @@ func _brush_entities_get_the_sun() -> void:
 
 
 ## Mean lm_sun under each surface's vertices, over brush entities (or every node).
-func _lm_sun_means(bsp: GoldSrcBSP, brush_only: bool) -> Array[float]:
+func _lm_sun_means(root: Node, brush_only: bool) -> Array[float]:
 	var means: Array[float] = []
-	for child in bsp.get_children():
+	for child in root.get_children():
 		if brush_only and child.name == "worldspawn":
 			continue
 		for mi: MeshInstance3D in child.find_children("*", "MeshInstance3D", true, false):

@@ -1,19 +1,18 @@
 extends "res://tests/ingame/suite.gd"
-## build_mesh: the 3,500-line half of goldsrc_bsp.cpp that turns parsed faces into a Godot
-## scene tree. Nothing outside an engine can call it at all, which is the reason this
+## build_scene: the half of goldsrc_bsp.cpp that turns parsed faces into a Godot scene
+## tree. Nothing outside an engine can call it at all, which is the reason this
 ## harness exists.
 
 
 func run() -> void:
 	_scale_factor()
 	_builds_a_scene_tree()
-	_is_idempotent()
+	_builds_once_per_load()
 	_face_axes()
 
 
 func _scale_factor() -> void:
 	var bsp := GoldSrcBSP.new()
-	track(bsp)
 
 	check_near(bsp.get_scale_factor(), 0.025, 1e-6,
 		"default scale is the GoldSrc-to-metres factor")
@@ -27,19 +26,21 @@ func _builds_a_scene_tree() -> void:
 	if bsp == null:
 		return
 
-	check_eq(bsp.get_child_count(), 0, "nothing is built until build_mesh is called")
-	bsp.build_mesh()
+	var root := bsp.build_scene()
+	if not check(root != null, "a loaded map builds"):
+		return
+	track(root)
 
 	# One child per entity: worldspawn plus every brush entity.
-	check_eq(bsp.get_child_count(), 75, "build_mesh emits a node per entity")
+	check_eq(root.get_child_count(), 75, "build_scene emits a node per entity")
 
-	var worldspawn := bsp.get_node_or_null("worldspawn")
+	var worldspawn := root.get_node_or_null("worldspawn")
 	check(worldspawn != null, "worldspawn is present by name")
 	if worldspawn != null:
 		check(worldspawn.get_child_count() > 0,
 			"worldspawn is split into spatial groups")
 
-	var stats := _walk(bsp)
+	var stats := _walk(root)
 	check(stats.meshes > 0, "the tree contains MeshInstance3D nodes (got %d)" % stats.meshes)
 	check_eq(stats.meshes_without_surfaces, 0,
 		"every emitted mesh has at least one surface")
@@ -47,17 +48,24 @@ func _builds_a_scene_tree() -> void:
 		"the tree contains collision bodies (got %d)" % stats.bodies)
 
 
-## Rebuilding must replace the tree, not append to it. Getting this wrong doubles a map's
-## geometry every time a level reloads, which is invisible until frame rate collapses.
-func _is_idempotent() -> void:
+## The lightmap atlases and lightstyles belong to the one scene built from them, so a second
+## build_scene() from the same load builds nothing; loading again builds the same scene.
+func _builds_once_per_load() -> void:
 	var bsp := load_map()
 	if bsp == null:
 		return
 
-	bsp.build_mesh()
-	var first := bsp.get_child_count()
-	bsp.build_mesh()
-	check_eq(bsp.get_child_count(), first, "building twice does not duplicate the tree")
+	var first := bsp.build_scene()
+	if not check(first != null, "the first build_scene() builds"):
+		return
+	track(first)
+	check(bsp.build_scene() == null, "a second build_scene() from the same load builds nothing")
+	check_eq(bsp.load_bsp(MAP_PATH), OK, "the map loads again")
+	var again := bsp.build_scene()
+	if not check(again != null, "a fresh load builds again"):
+		return
+	track(again)
+	check_eq(again.get_child_count(), first.get_child_count(), "and builds the same tree")
 
 
 ## get_face_axes returns the texture S and T axes for the face under a point, used to align
