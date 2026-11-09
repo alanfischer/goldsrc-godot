@@ -164,9 +164,10 @@ string str_to_lower(const string &s) {
 // the game can change what it does without reconverting a map; only the calls are baked in.
 //   WORLD  vec3 goldsrc_lightmap(vec3 lm, float sun_share, vec3 world_pos)
 //              lm: the styled lightmap, gamma (as stored); sun_share: lm_sun, the sky's part of it
-//          void goldsrc_surface(inout vec3 lit_srgb, inout vec3 albedo, vec3 world_pos,
-//                               vec3 world_normal, vec3 normal_view, vec3 view)
-//              lit_srgb: texture x lightmap, gamma; albedo: what real-time lights see
+//          void goldsrc_surface(inout vec3 lit_srgb, inout vec3 albedo, vec3 light,
+//                               vec3 world_pos, vec3 world_normal, vec3 normal_view, vec3 view)
+//              lit_srgb: texture x light, gamma, clamped; albedo: what real-time lights see;
+//              light: lightmap x overbright, gamma, unclamped
 //   LIQUID vec3 goldsrc_liquid(vec3 albedo, int liquid_type)
 //   SKY    vec3 goldsrc_sky(vec3 color, vec3 eye_dir)
 // `variant`, if given, is one more name to #define: which build of a shared source this is.
@@ -256,10 +257,11 @@ void fragment() {
 	// only the lightmap term needs the gamma-space treatment. min() before the
 	// conversion reproduces GoldSrc's clamp, which clips differently in linear.
 	vec3 base_srgb = linear_output ? gs_to_srgb(albedo.rgb) : albedo.rgb;
-	vec3 lit_srgb = min(base_srgb * lm * overbright, vec3(1.0));
+	vec3 light = lm * overbright;
+	vec3 lit_srgb = min(base_srgb * light, vec3(1.0));
 	vec3 base = albedo.rgb;
 #ifdef GOLDSRC_HOOK_WORLD
-	goldsrc_surface(lit_srgb, base, goldsrc_world_pos, goldsrc_world_normal, NORMAL, VIEW);
+	goldsrc_surface(lit_srgb, base, light, goldsrc_world_pos, goldsrc_world_normal, NORMAL, VIEW);
 #endif
 	ALBEDO = base;
 	EMISSION = linear_output ? gs_to_linear(lit_srgb) : lit_srgb;
