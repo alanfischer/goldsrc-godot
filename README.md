@@ -89,10 +89,11 @@ All imported scenes contain only standard Godot types (Node3D, MeshInstance3D, A
 Every imported map's root is also stamped with `pipeline_id`, a hash of the extension's C++
 source. Godot re-tests an import only when its source or `.import` file changes, so a rebuilt
 extension (or a changed importer) would otherwise leave every map as the old build made it. The
-importer records what built each map in the editor's project metadata, and the plugin reimports
-any map recorded with something else on editor start and after an extension hot reload. A
-project that converts maps itself at runtime and never loads the imported scenes can turn this
-off with the `goldsrc/import/reimport_on_extension_change` project setting.
+BSP and MDL importers record what built each file in the editor's project metadata, and the
+plugin reimports any map or model recorded with something else on editor start and after an
+extension hot reload. A project that converts maps and models itself at runtime and never loads
+the imported scenes can turn this off with the `goldsrc/import/reimport_on_extension_change`
+project setting.
 
 ### BSP Entity Model Instantiation
 

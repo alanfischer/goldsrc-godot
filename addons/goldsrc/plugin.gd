@@ -1,10 +1,12 @@
 @tool
 extends EditorPlugin
 
-## Off in a project that converts maps itself at runtime and never loads the imported scenes,
-## which would otherwise pay for a full reimport of every map each time the extension changes.
+## Off in a project that converts maps and models itself at runtime and never loads the imported
+## scenes, which would otherwise pay for a full reimport of every one each time the extension
+## changes.
 const REIMPORT_SETTING := "goldsrc/import/reimport_on_extension_change"
 const BspImporter := preload("res://addons/goldsrc/importer/bsp_importer.gd")
+const MdlImporter := preload("res://addons/goldsrc/importer/mdl_importer.gd")
 
 var bsp_importer: EditorImportPlugin
 var mdl_importer: EditorImportPlugin
@@ -14,7 +16,7 @@ var wad_importer: EditorImportPlugin
 
 func _enter_tree() -> void:
 	bsp_importer = BspImporter.new()
-	mdl_importer = preload("res://addons/goldsrc/importer/mdl_importer.gd").new()
+	mdl_importer = MdlImporter.new()
 	spr_importer = preload("res://addons/goldsrc/importer/spr_importer.gd").new()
 	wad_importer = preload("res://addons/goldsrc/importer/wad_importer.gd").new()
 	add_import_plugin(bsp_importer)
@@ -22,13 +24,13 @@ func _enter_tree() -> void:
 	add_import_plugin(spr_importer)
 	add_import_plugin(wad_importer)
 	_declare_settings()
-	_reimport_stale_maps.call_deferred()
+	_reimport_stale.call_deferred()
 	# goldsrc.gdextension is reloadable, so a rebuild can land without an editor restart.
-	GDExtensionManager.extensions_reloaded.connect(_reimport_stale_maps)
+	GDExtensionManager.extensions_reloaded.connect(_reimport_stale)
 
 
 func _exit_tree() -> void:
-	GDExtensionManager.extensions_reloaded.disconnect(_reimport_stale_maps)
+	GDExtensionManager.extensions_reloaded.disconnect(_reimport_stale)
 	remove_import_plugin(bsp_importer)
 	remove_import_plugin(mdl_importer)
 	remove_import_plugin(spr_importer)
@@ -47,10 +49,11 @@ func _declare_settings() -> void:
 
 
 ## Godot re-tests an import only when its source or .import file changes, so neither a rebuilt
-## extension nor a bumped importer would ever reach a map imported before. The importer records
-## the key each map was built with in project metadata; any map recorded with another key (or
-## none) is reimported here, on editor start and on an extension hot reload.
-func _reimport_stale_maps() -> void:
+## extension nor a bumped importer would ever reach a map or model imported before. The importers
+## record the key each file was built with in project metadata; any file recorded with another
+## key (or none) is reimported here, on editor start and on an extension hot reload. Godot
+## reimports in importer order, so models are rebuilt before the maps that place them.
+func _reimport_stale() -> void:
 	if not ProjectSettings.get_setting(REIMPORT_SETTING, true):
 		return
 	var fs := EditorInterface.get_resource_filesystem()
@@ -58,21 +61,24 @@ func _reimport_stale_maps() -> void:
 		await fs.filesystem_changed
 
 	var stale := PackedStringArray()
-	_collect_stale_maps(fs.get_filesystem(), BspImporter.import_key(), stale)
+	_collect_stale(fs.get_filesystem(), stale)
 	if stale.is_empty():
 		return
-	print("GoldSrc: reimporting %d map(s) imported by another build of the extension or importer: %s"
+	print("GoldSrc: reimporting %d file(s) imported by another build of the extension or importer: %s"
 			% [stale.size(), ", ".join(stale)])
 	fs.reimport_files(stale)
 
 
-func _collect_stale_maps(dir: EditorFileSystemDirectory, key: String, out: PackedStringArray) -> void:
+func _collect_stale(dir: EditorFileSystemDirectory, out: PackedStringArray) -> void:
 	var settings := EditorInterface.get_editor_settings()
+	var imported_with := {"bsp": BspImporter.IMPORTED_WITH, "mdl": MdlImporter.IMPORTED_WITH}
+	var keys := {"bsp": BspImporter.import_key(), "mdl": MdlImporter.import_key()}
 	for i in dir.get_file_count():
 		var path := dir.get_file_path(i)
-		if path.get_extension().to_lower() != "bsp" or not dir.get_file_import_is_valid(i):
+		var ext := path.get_extension().to_lower()
+		if not ext in keys or not dir.get_file_import_is_valid(i):
 			continue
-		if settings.get_project_metadata(BspImporter.IMPORTED_WITH, path, "") != key:
+		if settings.get_project_metadata(imported_with[ext], path, "") != keys[ext]:
 			out.append(path)
 	for i in dir.get_subdir_count():
-		_collect_stale_maps(dir.get_subdir(i), key, out)
+		_collect_stale(dir.get_subdir(i), out)
