@@ -31,6 +31,9 @@ func _enter_tree() -> void:
 
 func _exit_tree() -> void:
 	GDExtensionManager.extensions_reloaded.disconnect(_reimport_stale)
+	var fs := EditorInterface.get_resource_filesystem()
+	if fs.filesystem_changed.is_connected(_reimport_stale):
+		fs.filesystem_changed.disconnect(_reimport_stale)
 	remove_import_plugin(bsp_importer)
 	remove_import_plugin(mdl_importer)
 	remove_import_plugin(spr_importer)
@@ -57,8 +60,12 @@ func _reimport_stale() -> void:
 	if not ProjectSettings.get_setting(REIMPORT_SETTING, true):
 		return
 	var fs := EditorInterface.get_resource_filesystem()
-	while fs.is_scanning():
-		await fs.filesystem_changed
+	# A connection, not an await: a headless export frees the plugin mid-scan, and an await would
+	# then resume on a freed instance. Godot drops a freed object's connections itself.
+	if fs.is_scanning():
+		if not fs.filesystem_changed.is_connected(_reimport_stale):
+			fs.filesystem_changed.connect(_reimport_stale, CONNECT_ONE_SHOT)
+		return
 
 	var stale := PackedStringArray()
 	_collect_stale(fs.get_filesystem(), stale)
