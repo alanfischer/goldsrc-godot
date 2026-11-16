@@ -153,8 +153,9 @@ three defines set, and calls the functions that kind of shader needs:
   float overbright)`: `diffuse` is `DIFFUSE_LIGHT`, `light` and `lit_srgb` are as
   `goldsrc_surface` left them, and the rest are `light()`'s own. With it, a hook that takes the
   direct sun out in `goldsrc_lightmap` can add a `DirectionalLight3D` back the way hlrad would
-  have, shadows included. World faces cast shadows from both sides (the map's shell faces in,
-  away from the sun); sky and liquid faces cast none.
+  have, shadows included. What hlrad let block the sun casts shadows: the world, and brush
+  entities flagged opaque (`zhlt_lightflags` 2), from both sides (the map's shell faces in, away
+  from the sun). Sky and liquid faces and other brush entities cast none.
 - `goldsrc_surface` runs last. `lit_srgb` is what the surface shows, texture × lightmap in gamma
   space, clamped to 1; `albedo` is what Godot's real-time lights see. `light` is the light
   `lit_srgb` was made with (lightmap × `overbright`, gamma, unclamped), for drawing something
@@ -494,8 +495,8 @@ var grid = bsp.bake_light_grid(32.0)  # cell size in GoldSrc units
 #   sun_slices: Array of RG8 Images — the sky's share of each cell's light in r, and in g
 #     whether the sun reached the cell (only with a shader_hook, on maps with a
 #     light_environment)
-#   sun_color, sun_dir: the direct sun as the faces took it, sun_color (gamma) by each face's
-#     alignment with sun_dir (Godot space, toward the sun), where g says it reached
+#   sun_color: the direct sun as the faces took it (gamma), by each face's alignment with the
+#     root "sun" meta's dir, where g says it reached
 
 # The first surface under the sky, per column (see Shader Hooks)
 var below_sky = bsp.bake_surface_below_sky(16.0)  # cell size in GoldSrc units
