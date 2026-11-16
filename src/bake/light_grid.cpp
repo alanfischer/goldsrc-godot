@@ -82,6 +82,9 @@ Dictionary bake_light_grid(const BSPData &bsp_data, const SunFraction &face_sun_
 	vector<float> sky_weight(has_sun_fraction ? total_cells : 0, 0.0f);
 	vector<float> all_weight(has_sun_fraction ? total_cells : 0, 0.0f);
 	vector<uint8_t> sun_data(has_sun_fraction ? total_cells : 0, 0);
+	// Whether the sun reached the cell: what a game lighting the sun itself takes back out of the
+	// faces (sun_color by the faces' alignment with sun_dir, as added below).
+	vector<uint8_t> sunlit_data(has_sun_fraction ? total_cells : 0, 0);
 
 	float max_trace_dist = 8192.0f;
 	int head_node = bsp_data.models[0].headnode[0];
@@ -137,7 +140,7 @@ Dictionary bake_light_grid(const BSPData &bsp_data, const SunFraction &face_sun_
 						sample_lightmap_at(bsp_data.faces[hit.face_index],
 							hit.hit_pos, bsp_data.lighting, r, g, b, &luxel);
 						if (has_sun_fraction && luxel >= 0) {
-							const auto &frac = face_sun_fraction[hit.face_index];
+							const auto &frac = face_sun_fraction.sky[hit.face_index];
 							float f = (size_t)luxel < frac.size() ? layer0_sun_share(bsp_data,
 								bsp_data.faces[hit.face_index], luxel, frac[luxel] / 255.0f, sun.style) : 0.0f;
 							sky_weight[cell_idx] += (r + g + b) * f;
@@ -173,6 +176,7 @@ Dictionary bake_light_grid(const BSPData &bsp_data, const SunFraction &face_sun_
 
 					if (ray_reached_sky(bsp_data, sun_hit)) {
 						cells_sunlit++;
+						if (has_sun_fraction) sunlit_data[cell_idx] = 255;
 						// Cell has direct sunlight — distribute sun color to cube faces
 						// weighted by alignment toward the sun
 						for (int d = 0; d < 6; d++) {
@@ -223,7 +227,7 @@ Dictionary bake_light_grid(const BSPData &bsp_data, const SunFraction &face_sun_
 						// Average all valid neighbors
 						int count = 0;
 						float accum[6][3] = {};
-						float sun_accum = 0;
+						float sun_accum = 0, sunlit_accum = 0;
 						for (int n = 0; n < 6; n++) {
 							int nx = gx + offsets[n][0];
 							int ny = gy + offsets[n][1];
@@ -233,7 +237,10 @@ Dictionary bake_light_grid(const BSPData &bsp_data, const SunFraction &face_sun_
 							size_t nidx = (size_t)nz * dims[0] * dims[1] + (size_t)ny * dims[0] + nx;
 							if (!cell_valid[nidx]) continue;
 							count++;
-							if (has_sun_fraction) sun_accum += sun_data[nidx];
+							if (has_sun_fraction) {
+								sun_accum += sun_data[nidx];
+								sunlit_accum += sunlit_data[nidx];
+							}
 							size_t npx = (size_t)nz * slice_bytes + ((size_t)ny * slice_w + nx) * 3;
 							for (int d = 0; d < 6; d++) {
 								accum[d][0] += pixel_data[d][npx + 0];
@@ -250,7 +257,10 @@ Dictionary bake_light_grid(const BSPData &bsp_data, const SunFraction &face_sun_
 							pixel_data[d][px_ofs + 1] = (uint8_t)(accum[d][1] * inv);
 							pixel_data[d][px_ofs + 2] = (uint8_t)(accum[d][2] * inv);
 						}
-						if (has_sun_fraction) sun_data[idx] = (uint8_t)(sun_accum * inv);
+						if (has_sun_fraction) {
+							sun_data[idx] = (uint8_t)(sun_accum * inv);
+							sunlit_data[idx] = (uint8_t)(sunlit_accum * inv);
+						}
 						cell_valid[idx] = true;
 						filled_this_pass++;
 					}
@@ -297,16 +307,24 @@ Dictionary bake_light_grid(const BSPData &bsp_data, const SunFraction &face_sun_
 	result["cell_size"] = (double)(cell_size_gs * scale_factor);
 	result["dir_slices"] = dir_slices; // 6 arrays of Images for Texture3D
 	if (has_sun_fraction) {
-		size_t sun_slice_bytes = (size_t)slice_w * slice_h;
+		size_t cells_per_slice = (size_t)slice_w * slice_h;
 		Array sun_slices;
 		sun_slices.resize(num_slices);
 		for (int s = 0; s < num_slices; s++) {
 			PackedByteArray pba;
-			pba.resize(sun_slice_bytes);
-			memcpy(pba.ptrw(), sun_data.data() + (size_t)s * sun_slice_bytes, sun_slice_bytes);
-			sun_slices[s] = Image::create_from_data(slice_w, slice_h, false, Image::FORMAT_L8, pba);
+			pba.resize(cells_per_slice * 2);
+			uint8_t *dst = pba.ptrw();
+			for (size_t c = 0; c < cells_per_slice; c++) {
+				dst[c * 2] = sun_data[(size_t)s * cells_per_slice + c];
+				dst[c * 2 + 1] = sunlit_data[(size_t)s * cells_per_slice + c];
+			}
+			sun_slices[s] = Image::create_from_data(slice_w, slice_h, false, Image::FORMAT_RG8, pba);
 		}
-		result["sun_slices"] = sun_slices; // the sky's share of each cell's light
+		// r: the sky's share of each cell's light; g: whether the sun reached it.
+		result["sun_slices"] = sun_slices;
+		// The direct sun as the faces took it: sun_color (gamma 0..1) by each face's alignment
+		// with the sun (the root's "sun" meta holds its direction).
+		result["sun_color"] = Color(sky_color[0], sky_color[1], sky_color[2]);
 	}
 
 	uint64_t elapsed = Time::get_singleton()->get_ticks_msec() - t0;

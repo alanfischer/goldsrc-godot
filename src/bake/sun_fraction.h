@@ -7,9 +7,18 @@
 
 namespace goldsrc {
 
-// Per parsed face, per luxel: the share of its light that came from the sky, 0..255. Empty when
-// the map has no light_environment.
-using SunFraction = std::vector<std::vector<uint8_t>>;
+// Per parsed face, per luxel, 0..255: the share of its light that came from the sky, sun
+// included (`sky`), and the sun's direct share alone (`direct`), which a game lighting the sun
+// itself takes back out. Empty when the map has no light_environment.
+struct SunFraction {
+	std::vector<std::vector<uint8_t>> sky;
+	std::vector<std::vector<uint8_t>> direct;
+	// The sun's light on a luxel facing it square, linear lightmap units (0..1 is 0..255 before
+	// hlrad's gamma), as the fit found it: the brightness to light the sun with at runtime.
+	float sun_light = 0.0f;
+	bool empty() const { return sky.empty(); }
+	void clear() { sky.clear(); direct.clear(); sun_light = 0.0f; }
+};
 
 // How much of each luxel's light came from the sky.
 //
