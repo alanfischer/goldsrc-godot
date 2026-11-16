@@ -1696,6 +1696,9 @@ void GoldSrcBSP::build_mesh(Node3D *root) {
 		string classname = "worldspawn";
 		string targetname;
 		string model_key = (m > 0) ? string("*") + std::to_string(m) : "";
+		// What blocks a sun's light, by hlrad's rule: the world, and brush entities flagged
+		// opaque (zhlt_lightflags 2).
+		bool blocks_sun = m == 0;
 		if (m > 0) {
 			auto ent_it = model_entities.find(model_key);
 			if (ent_it != model_entities.end()) {
@@ -1703,6 +1706,8 @@ void GoldSrcBSP::build_mesh(Node3D *root) {
 				if (cn != ent_it->second->properties.end()) classname = cn->second;
 				auto tn = ent_it->second->properties.find("targetname");
 				if (tn != ent_it->second->properties.end()) targetname = tn->second;
+				auto lf = ent_it->second->properties.find("zhlt_lightflags");
+				if (lf != ent_it->second->properties.end()) blocks_sun = (atoi(lf->second.c_str()) & 2) != 0;
 			}
 		}
 
@@ -2485,9 +2490,9 @@ void GoldSrcBSP::build_mesh(Node3D *root) {
 			mesh_instance->set_name(tex_name.empty() ? String("unnamed") : String(tex_name.c_str()));
 			mesh_instance->set_mesh(arr_mesh);
 			mesh_instance->set_layer_mask(2); // Layer 2 only — map lights (layer 1) skip BSP, weapon lights (layers 1+2) hit it
-			// For a sun with shadows: the sun shines in through sky faces, and the map's shell faces
-			// inward, away from it, so the rest cast from both sides.
-			mesh_instance->set_cast_shadows_setting(is_sky_surface || is_water
+			// For a sun with shadows: what hlrad let block it. The sun shines in through sky faces,
+			// and the map's shell faces inward, away from it, so the rest cast from both sides.
+			mesh_instance->set_cast_shadows_setting(is_sky_surface || is_water || !blocks_sun
 					? GeometryInstance3D::SHADOW_CASTING_SETTING_OFF
 					: GeometryInstance3D::SHADOW_CASTING_SETTING_DOUBLE_SIDED);
 			if (is_sky_surface) {

@@ -323,9 +323,8 @@ Dictionary bake_light_grid(const BSPData &bsp_data, const SunFraction &face_sun_
 		// r: the sky's share of each cell's light; g: whether the sun reached it.
 		result["sun_slices"] = sun_slices;
 		// The direct sun as the faces took it: sun_color (gamma 0..1) by each face's alignment
-		// with sun_dir (Godot space, toward the sun).
+		// with the sun (the root's "sun" meta holds its direction).
 		result["sun_color"] = Color(sky_color[0], sky_color[1], sky_color[2]);
-		result["sun_dir"] = Vector3(-sun_dir[0], sun_dir[2], sun_dir[1]).normalized();
 	}
 
 	uint64_t elapsed = Time::get_singleton()->get_ticks_msec() - t0;

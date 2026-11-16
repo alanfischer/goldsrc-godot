@@ -72,7 +72,8 @@ func _the_direct_sun_is_split_out() -> void:
 				if img.get_pixel(x, y).g > 0.5:
 					sunlit = true
 		break
-	check(grid.has("sun_color") and grid.has("sun_dir"), "the grid says how it baked the sun")
+	check(grid.has("sun_color") and (root.get_meta("sun", {}) as Dictionary).has("dir"),
+		"the grid says how it baked the sun, the root where it is")
 	var sky_casts := 0
 	var world_casts := 0
 	for mi: MeshInstance3D in root.find_children("*", "MeshInstance3D", true, false):
@@ -82,6 +83,14 @@ func _the_direct_sun_is_split_out() -> void:
 			world_casts += int(mi.cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_DOUBLE_SIDED)
 	check_eq(sky_casts, 0, "the sun shines in through sky faces")
 	check(world_casts > 0, "and the world casts from both sides")
+	var entity_casts := 0
+	for child in root.get_children():
+		var ent: Dictionary = child.get_meta("entity", {})
+		if child.name == "worldspawn" or int(ent.get("zhlt_lightflags", "0")) & 2:
+			continue
+		for mi: MeshInstance3D in child.find_children("*", "MeshInstance3D", true, false):
+			entity_casts += int(mi.cast_shadow != GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
+	check_eq(entity_casts, 0, "brush entities block no sun unless flagged opaque, as in hlrad")
 	if not sunlit:
 		check(true, "(the lowest grid slice is all in shade)")
 
