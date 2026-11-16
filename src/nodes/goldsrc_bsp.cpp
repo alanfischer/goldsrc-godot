@@ -1,6 +1,7 @@
 #include "goldsrc_bsp.h"
 #include "goldsrc_pipeline_id.h"
 #include "../bake/light_grid.h"
+#include "../bake/bsp_trace.h"
 #include "../bake/surface_below_sky.h"
 
 #include <godot_cpp/classes/file_access.hpp>
@@ -163,13 +164,19 @@ string str_to_lower(const string &s) {
 // unless one is set, and then includes it with GOLDSRC_HOOK_<KIND> defined, so one file can
 // supply what each kind calls. The include is resolved when the shader compiles, at load, so
 // the game can change what it does without reconverting a map; only the calls are baked in.
-//   WORLD  vec3 goldsrc_lightmap(vec3 lm, float sun_share, vec3 world_pos)
-//              lm: the styled lightmap, gamma (as stored); sun_share: lm_sun, the sky's part of it
+//   WORLD  vec3 goldsrc_lightmap(vec3 lm, vec2 sun_share, vec3 world_pos)
+//              lm: the styled lightmap, gamma (as stored); sun_share: lm_sun, the sky's part of
+//              it in x and the sun's direct part in y
 //          void goldsrc_surface(inout vec3 lit_srgb, inout vec3 albedo, vec3 light,
 //                               float sun_share, vec3 world_pos, vec3 world_normal,
 //                               vec3 normal_view, vec3 view)
 //              lit_srgb: texture x light, gamma, clamped; albedo: what real-time lights see;
 //              light: lightmap x overbright, gamma, unclamped; sun_share: as above
+//          and, if the hook #defines GOLDSRC_LIGHT, the world shader's light():
+//          void goldsrc_light(inout vec3 diffuse, vec3 light_dir, vec3 light_color,
+//                             float attenuation, bool directional, vec3 normal, vec3 albedo,
+//                             vec3 light, vec3 lit_srgb, vec3 world_pos, float overbright)
+//              light and lit_srgb: as goldsrc_surface left them; the rest is light()'s own
 //   LIQUID vec3 goldsrc_liquid(vec3 albedo, int liquid_type)
 //   SKY    vec3 goldsrc_sky(vec3 color, vec3 eye_dir)
 // `variant`, if given, is one more name to #define: which build of a shared source this is.
@@ -205,7 +212,8 @@ uniform sampler2D lm_layer2 : filter_linear;
 uniform sampler2D lm_layer3 : filter_linear;
 uniform sampler2D lightstyle_tex : filter_nearest;
 uniform float overbright = 2.0;
-// The sky's share of each luxel's light (src/bake/sun_fraction.h), for the game's hook.
+// The sky's share of each luxel's light in r, the sun's direct share in g (src/bake/sun_fraction.h),
+// for the game's hook.
 uniform sampler2D lm_sun : filter_linear, hint_default_black;
 // GoldSrc composited texture x lightmap on 8-bit gamma values. The RD renderers
 // (forward+/mobile) shade in linear space and encode on output, gl_compatibility
@@ -230,6 +238,10 @@ varying vec4 style_coords;
 varying vec3 goldsrc_world_pos;
 varying vec3 goldsrc_world_normal;
 #endif
+#ifdef GOLDSRC_LIGHT
+varying vec3 goldsrc_light_in;
+varying vec3 goldsrc_lit_in;
+#endif
 
 void vertex() {
 	style_coords = COLOR;
@@ -252,7 +264,7 @@ void fragment() {
 	         + texture(lm_layer2, UV2).rgb * b2
 	         + texture(lm_layer3, UV2).rgb * b3;
 #ifdef GOLDSRC_HOOK_WORLD
-	float sun_share = texture(lm_sun, UV2).r;
+	vec2 sun_share = texture(lm_sun, UV2).rg;
 	lm = goldsrc_lightmap(lm, sun_share, goldsrc_world_pos);
 #endif
 
@@ -264,7 +276,11 @@ void fragment() {
 	vec3 lit_srgb = min(base_srgb * light, vec3(1.0));
 	vec3 base = albedo.rgb;
 #ifdef GOLDSRC_HOOK_WORLD
-	goldsrc_surface(lit_srgb, base, light, sun_share, goldsrc_world_pos, goldsrc_world_normal, NORMAL, VIEW);
+	goldsrc_surface(lit_srgb, base, light, sun_share.x, goldsrc_world_pos, goldsrc_world_normal, NORMAL, VIEW);
+#endif
+#ifdef GOLDSRC_LIGHT
+	goldsrc_light_in = light;
+	goldsrc_lit_in = lit_srgb;
 #endif
 	ALBEDO = base;
 	EMISSION = linear_output ? gs_to_linear(lit_srgb) : lit_srgb;
@@ -274,6 +290,13 @@ void fragment() {
 	ALPHA_SCISSOR_THRESHOLD = alpha_scissor_threshold;
 #endif
 }
+
+#ifdef GOLDSRC_LIGHT
+void light() {
+	goldsrc_light(DIFFUSE_LIGHT, LIGHT, LIGHT_COLOR, ATTENUATION, LIGHT_IS_DIRECTIONAL, NORMAL,
+		ALBEDO, goldsrc_light_in, goldsrc_lit_in, goldsrc_world_pos, overbright);
+}
+#endif
 )";
 
 // Where the transparent queue's back rows sort. Godot draws low priority first, so these run
@@ -2071,21 +2094,27 @@ void GoldSrcBSP::build_mesh(Node3D *root) {
 				}
 
 				if (!face_sun_fraction.empty()) {
+					// r: the sky's share, g: the sun's direct share (sun_fraction.h).
 					PackedByteArray sun_pixels;
-					sun_pixels.resize(pg.w * pg.h);
+					sun_pixels.resize(pg.w * pg.h * 2);
 					memset(sun_pixels.ptrw(), 0, sun_pixels.size());
 					uint8_t *dst = sun_pixels.ptrw();
 					for (int gi : pg.face_indices) {
-						const auto &frac = face_sun_fraction[gi];
-						if (frac.empty()) continue;
+						const auto &sky = face_sun_fraction.sky[gi];
+						const auto &direct = face_sun_fraction.direct[gi];
+						if (sky.empty()) continue;
 						const FacePack &fp = face_pack_by_index[gi];
 						const auto *face = &bsp_data.faces[gi];
-						for (int y = 0; y < face->lightmap_height; y++)
-							memcpy(dst + (size_t)(fp.atlas_y + y) * pg.w + fp.atlas_x,
-								frac.data() + (size_t)y * face->lightmap_width, face->lightmap_width);
+						for (int y = 0; y < face->lightmap_height; y++) {
+							uint8_t *row = dst + ((size_t)(fp.atlas_y + y) * pg.w + fp.atlas_x) * 2;
+							for (int x = 0; x < face->lightmap_width; x++) {
+								row[x * 2] = sky[(size_t)y * face->lightmap_width + x];
+								row[x * 2 + 1] = direct[(size_t)y * face->lightmap_width + x];
+							}
+						}
 					}
 					pg.sun_texture = ImageTexture::create_from_image(
-						Image::create_from_data(pg.w, pg.h, false, Image::FORMAT_L8, sun_pixels));
+						Image::create_from_data(pg.w, pg.h, false, Image::FORMAT_RG8, sun_pixels));
 				}
 				// Unused layers stay null — they get black_1x1 at material build
 			} else {
@@ -2456,6 +2485,11 @@ void GoldSrcBSP::build_mesh(Node3D *root) {
 			mesh_instance->set_name(tex_name.empty() ? String("unnamed") : String(tex_name.c_str()));
 			mesh_instance->set_mesh(arr_mesh);
 			mesh_instance->set_layer_mask(2); // Layer 2 only — map lights (layer 1) skip BSP, weapon lights (layers 1+2) hit it
+			// For a sun with shadows: the sun shines in through sky faces, and the map's shell faces
+			// inward, away from it, so the rest cast from both sides.
+			mesh_instance->set_cast_shadows_setting(is_sky_surface || is_water
+					? GeometryInstance3D::SHADOW_CASTING_SETTING_OFF
+					: GeometryInstance3D::SHADOW_CASTING_SETTING_DOUBLE_SIDED);
 			if (is_sky_surface) {
 				mesh_instance->set_meta("is_sky_surface", true);
 			}
@@ -2686,6 +2720,18 @@ void GoldSrcBSP::build_mesh(Node3D *root) {
 	if (light_grid_cell_size > 0.0f) {
 		Dictionary grid = bake_light_grid(light_grid_cell_size);
 		if (!grid.is_empty()) root->set_meta("light_grid", grid);
+	}
+	// For a game that lights the sun itself and takes lm_sun's direct share back out: where the
+	// sun is, its colour (linear, mean 1), and its brightness on a luxel facing it, in linear
+	// lightmap units.
+	if (!face_sun_fraction.empty()) {
+		goldsrc::SunLight sun = goldsrc::find_sun(bsp_data);
+		float mean = (sun.color[0] + sun.color[1] + sun.color[2]) / 3.0f;
+		Dictionary info;
+		info["dir"] = Vector3(-sun.dir[0], sun.dir[2], sun.dir[1]).normalized();
+		info["color"] = mean > 0 ? Color(sun.color[0] / mean, sun.color[1] / mean, sun.color[2] / mean) : Color(1, 1, 1);
+		info["light"] = face_sun_fraction.sun_light;
+		root->set_meta("sun", info);
 	}
 }
 
