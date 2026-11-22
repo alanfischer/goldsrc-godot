@@ -53,6 +53,7 @@ int VisibilityManager::setup(String bsp_path, float scale_factor) {
 		bsp.unref();
 		return 0;
 	}
+	_decode_pvs();
 	return bsp->get_leaf_count();
 }
 
@@ -64,6 +65,7 @@ int VisibilityManager::setup_from_data(PackedByteArray pvs_blob, float scale_fac
 		bsp.unref();
 		return 0;
 	}
+	_decode_pvs();
 	return bsp->get_leaf_count();
 }
 
@@ -201,6 +203,14 @@ const uint64_t *VisibilityManager::_pvs_row(int leaf) const {
 		pvs_ready[leaf] = 1;
 	}
 	return row;
+}
+
+// Decoding is what a PAS row pays for on first use (one PVS row per visible leaf), so do all of it
+// at setup; the merge itself stays lazy.
+void VisibilityManager::_decode_pvs() {
+	int n = bsp->get_leaf_count();
+	for (int leaf = 1; leaf < n; leaf++)
+		_pvs_row(leaf);
 }
 
 // GoldSrc's CM_CalcPAS, one row at a time: the PVS of every leaf this one can see.
