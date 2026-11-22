@@ -8,6 +8,10 @@ func run() -> void:
 	_unloaded_is_inert()
 	_loads_the_shipped_sprite()
 	_frame_access_is_bounds_checked()
+	_scene_is_a_flipbook()
+	_looping_play_runs_on_the_shader_clock()
+	_one_shot_steps_and_finishes()
+	_restyle_and_unique_material()
 
 
 func _unloaded_is_inert() -> void:
@@ -52,3 +56,89 @@ func _frame_access_is_bounds_checked() -> void:
 	check(spr.get_frame_texture(-1) == null, "a negative frame has no texture")
 	check_eq(spr.get_frame_origin(999), Vector2i(0, 0),
 		"a frame past the end has a zero origin")
+
+
+func _built() -> Sprite3D:
+	var spr := GoldSrcSPR.new()
+	if spr.load_spr(SPRITE_PATH) != OK:
+		fail("could not load %s" % SPRITE_PATH)
+		return null
+	return track(spr.build_scene()) as Sprite3D
+
+
+func _scene_is_a_flipbook() -> void:
+	var sprite := _built()
+	if sprite == null:
+		return
+	var mat := sprite.material_override as ShaderMaterial
+	check(mat != null, "the sprite draws with the flipbook ShaderMaterial")
+	if mat == null:
+		return
+	var sap := sprite.get_node(^"SpriteAnimationPlayer")
+	check_eq(sap.layers.size(), 15, "the scene carries all 15 frames as Images")
+	sap._ensure_frames()
+	var frames := mat.get_shader_parameter(&"frames") as Texture2DArray
+	check(frames != null and frames.get_layers() == 15, "they become the layers of one array")
+	# fire.spr's frames share one 32x96 rect at origin (-16, 48), so the canvas is that rect, centred.
+	check_eq(sprite.texture.get_size(), Vector2(32, 96), "the canvas is the union of the frame rects")
+	check_eq(sprite.offset, Vector2(0, 0), "the canvas sits where frame 0 did")
+	check(mat.shader.code.contains("blend_add"), "an additive SPR draws additively")
+	check(mat.shader.code.contains("MAIN_CAM_INV_VIEW_MATRIX"), "a parallel-oriented SPR billboards")
+
+
+func _looping_play_runs_on_the_shader_clock() -> void:
+	var built := _built()
+	if built == null:
+		return
+	# Two instances of one packed scene, as an imported sprite is used.
+	var scene := PackedScene.new()
+	scene.pack(built)
+	var sprite := track(scene.instantiate()) as Sprite3D
+	var sap := sprite.get_node(^"SpriteAnimationPlayer")
+	check_eq(sap.layers.size(), 15, "a packed sprite keeps its frames")
+	sap.fps = 12.0
+	sap.play()
+	check(not sap.is_processing(), "a looping play runs no per-frame script")
+	var mat := sprite.material_override as ShaderMaterial
+	check_eq(mat.get_shader_parameter(&"fps"), 12.0, "the shader clocks the loop at the sprite's fps")
+	var other := track(scene.instantiate()) as Sprite3D
+	var osap := other.get_node(^"SpriteAnimationPlayer")
+	osap.fps = 12.0
+	osap.play()
+	check(other.material_override == mat, "sprites looping at one rate share a material")
+
+
+func _one_shot_steps_and_finishes() -> void:
+	var sprite := _built()
+	if sprite == null:
+		return
+	var sap := sprite.get_node(^"SpriteAnimationPlayer")
+	sap.loop_animation = false
+	var finished := []
+	sap.animation_finished.connect(func(n: String) -> void: finished.append(n))
+	sap.play()
+	var mat := sprite.material_override as ShaderMaterial
+	check_eq(mat.get_shader_parameter(&"fps"), 0.0, "a one-shot is not on the shader clock")
+	sap._step()
+	check_eq(mat.get_shader_parameter(&"frame"), 1.0, "a step shows the next frame")
+	for i in 13:
+		sap._step()
+	check(finished.is_empty() and sprite.visible, "still playing on the last frame")
+	sap._step()
+	check_eq(finished, ["default"], "stepping past the last frame finishes the animation")
+	check(not sprite.visible and not sap.is_playing(), "a finished one-shot hides and stops")
+
+
+func _restyle_and_unique_material() -> void:
+	var sprite := _built()
+	if sprite == null:
+		return
+	var sap := sprite.get_node(^"SpriteAnimationPlayer")
+	var shared := sprite.material_override
+	var own: ShaderMaterial = sap.unique_material()
+	check(own != shared, "unique_material gives the sprite its own copy")
+	sap.restyle(BaseMaterial3D.BILLBOARD_FIXED_Y, BaseMaterial3D.BLEND_MODE_MIX, false)
+	check(sprite.material_override == own, "restyling keeps the sprite's own material")
+	check(own.shader.code.contains("blend_mix") and own.shader.code.contains("fog_disabled"),
+		"restyle swaps the blend and fog")
+	check(own.shader.code.contains("vec4(0.0, 1.0, 0.0, 0.0)"), "restyle swaps the billboard")

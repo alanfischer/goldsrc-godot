@@ -26,8 +26,9 @@ public:
 	int get_type() const;
 	int get_texture_format() const;
 
-	/// Build a Sprite3D scene node with tex_anim_frames metadata and an inline
-	/// GDScript animator (if multi-frame). Caller takes ownership and must free().
+	/// Build a Sprite3D scene node: every frame in one Texture2DArray drawn by a flipbook
+	/// ShaderMaterial, tex_anim_frames metadata, and an inline GDScript animator that drives
+	/// it. Caller takes ownership and must free().
 	godot::Sprite3D *build_scene() const;
 
 private:
