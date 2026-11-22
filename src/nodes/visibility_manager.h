@@ -105,7 +105,7 @@ private:
 	std::vector<LeafSet> leaf_sets;
 	std::vector<int> leaf_set_free;
 
-	// Bit rows per leaf, pas_words uint64s each, filled on first use.
+	// Bit rows per leaf, pas_words uint64s each: PVS decoded at setup, PAS filled on first use.
 	mutable std::vector<uint64_t> pvs_rows, pas_rows;
 	mutable std::vector<uint8_t> pvs_ready, pas_ready;
 	mutable int pas_words = 0;
@@ -113,6 +113,7 @@ private:
 	void _update_observer_pvs(Observer &obs, int new_leaf);
 	const uint64_t *_pvs_row(int leaf) const;
 	const uint64_t *_pas_row(int leaf) const;
+	void _decode_pvs();
 	std::vector<int> _aabb_to_leaves(godot::AABB aabb) const;
 
 	template<typename T>
