@@ -33,6 +33,7 @@ struct PointLight {
 struct LuxelTerms {
 	float lit;    // style-0 light, linear
 	float other;  // every other style's light, linear (switchable lights, a styled sun)
+	float target; // the layer the sun is in: lit, or a styled sun's own
 	float sun, sky, point;
 	bool valid;
 };
@@ -166,12 +167,8 @@ static void sun_fraction_face(void *userdata, uint32_t face_index) {
 				if (s == 0 && face.styles[0] == 0) lt.lit = layer_lum[s];
 				else lt.other += layer_lum[s];
 			}
-			if (sun_layer >= 0) {
-				// Exact: the sun has a layer of its own.
-				lt.sun = layer_lum[sun_layer];
-				continue;
-			}
-			if (job.sun->style != 0 || job.lights->empty()) continue;
+			// A styled sun has a layer of its own (sun and sky, no lights); else it shares style 0.
+			lt.target = job.sun->style != 0 ? (sun_layer >= 0 ? layer_lum[sun_layer] : 0.0f) : lt.lit;
 
 			float p[3];
 			if (!luxel_to_world(face, (face.lm_mins_s + x) * 16.0f, (face.lm_mins_t + y) * 16.0f, p))
@@ -343,19 +340,20 @@ SunFraction compute_sun_fractions(const BSPData &bsp) {
 		-1, true, "sun fraction");
 	pool->wait_for_group_task_completion(group);
 
-	// Weights that best rebuild the style-0 lightmap from the three terms. Fitted on the world
-	// alone: brush entities only take the result.
+	// Weights that best rebuild the sun's layer from the three terms: always the sun and sky
+	// apart, and the lights where they share it. Fitted on the world alone: brush entities only
+	// take the result.
 	double w[3] = {1, 0, 0};
 	bool estimated = sun.style == 0 && !lights.empty();
-	if (estimated) {
+	{
 		double ata[3][3] = {}, atb[3] = {};
 		for (size_t fi = 0; fi < terms.size(); fi++) {
 			if (bsp.faces[fi].model_index != 0) continue;
 			for (const auto &lt : terms[fi]) {
-				if (!lt.valid || lt.lit <= lin(2) || lt.lit >= lin(250)) continue;
-				double col[3] = {lt.sun, lt.sky, lt.point};
+				if (!lt.valid || lt.target <= lin(2) || lt.target >= lin(250)) continue;
+				double col[3] = {lt.sun, lt.sky, estimated ? lt.point : 0.0};
 				for (int i = 0; i < 3; i++) {
-					atb[i] += col[i] * lt.lit;
+					atb[i] += col[i] * lt.target;
 					for (int j = 0; j < 3; j++) ata[i][j] += col[i] * col[j];
 				}
 			}
@@ -376,58 +374,65 @@ SunFraction compute_sun_fractions(const BSPData &bsp) {
 	}
 	double sky_share = estimated ? (all_total > 0 ? sky_total / all_total : 1.0) : 1.0;
 
-	fractions.resize(bsp.faces.size());
+	fractions.sky.resize(bsp.faces.size());
+	fractions.direct.resize(bsp.faces.size());
+	fractions.sun_light = (float)w[0];
 	int64_t luxels = 0;
 	for (size_t fi = 0; fi < terms.size(); fi++) {
 		const auto &ft = terms[fi];
 		if (ft.empty()) continue;
 		const auto &face = bsp.faces[fi];
 		int W = face.lightmap_width, H = face.lightmap_height;
-		vector<float> f(ft.size(), 0.0f);
+		vector<float> f(ft.size(), 0.0f), g(ft.size(), 0.0f);
 		for (size_t px = 0; px < ft.size(); px++) {
 			const LuxelTerms &lt = ft[px];
 			float total = lt.lit + lt.other;
 			if (total <= 0) continue;
+			float sun_part = (float)(w[0] * lt.sun);
+			float s = sun_part + (float)(w[1] * lt.sky);
+			float p = estimated ? (float)(w[2] * lt.point) : 0.0f;
+			float predicted = s + p;
+			// What the terms don't explain (bounce, texture lights) is never the sun direct.
+			float excess = lt.valid ? fmaxf(0.0f, lt.target - predicted) : lt.target;
+			float explained = lt.target - excess;
 			float sky_part;
-			if (sun.style != 0) {
-				sky_part = lt.sun;
-			} else if (!estimated) {
-				sky_part = lt.lit;
+			if (!estimated) {
+				sky_part = lt.target;
 			} else {
-				float s = (float)(w[0] * lt.sun + w[1] * lt.sky);
-				float p = (float)(w[2] * lt.point);
-				float excess = lt.valid ? fmaxf(0.0f, lt.lit - s - p) : lt.lit;
-				float predicted = s + p;
 				sky_part = (float)(excess * sky_share);
-				if (predicted > 0) sky_part += (lt.lit - excess) * s / predicted;
+				if (predicted > 0) sky_part += explained * s / predicted;
 			}
 			f[px] = fminf(1.0f, sky_part / total);
+			g[px] = predicted > 0 ? fminf(f[px], explained * sun_part / predicted / total) : 0.0f;
 		}
-		// 3x3 blur inside the face: the hemisphere is a dozen rays.
-		auto &dst = fractions[fi];
-		dst.resize(ft.size());
-		for (int y = 0; y < H; y++) {
-			for (int x = 0; x < W; x++) {
-				float sum = 0;
-				int n = 0;
-				for (int dy = -1; dy <= 1; dy++) {
-					for (int dx = -1; dx <= 1; dx++) {
-						int xx = x + dx, yy = y + dy;
-						if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
-						sum += f[(size_t)yy * W + xx];
-						n++;
+		// 3x3 blur inside the face: the hemisphere is a dozen rays, and hlrad's sun is soft-edged.
+		auto blur = [&](const vector<float> &src, vector<uint8_t> &dst) {
+			dst.resize(src.size());
+			for (int y = 0; y < H; y++) {
+				for (int x = 0; x < W; x++) {
+					float sum = 0;
+					int n = 0;
+					for (int dy = -1; dy <= 1; dy++) {
+						for (int dx = -1; dx <= 1; dx++) {
+							int xx = x + dx, yy = y + dy;
+							if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+							sum += src[(size_t)yy * W + xx];
+							n++;
+						}
 					}
+					dst[(size_t)y * W + x] = (uint8_t)lroundf(sum / n * 255.0f);
 				}
-				dst[(size_t)y * W + x] = (uint8_t)lroundf(sum / n * 255.0f);
 			}
-		}
+		};
+		blur(f, fractions.sky[fi]);
+		blur(g, fractions.direct[fi]);
 		luxels += (int64_t)ft.size();
 	}
 
 	UtilityFunctions::print("[GoldSrc] Sun fraction: ", luxels, " luxels, ",
 		(int64_t)lights.size(), " lights, ",
 		sun.style != 0 ? String("sun on style ") + String::num_int64(sun.style) :
-			!estimated ? String("sky-lit only") :
+			!estimated ? String("sky-lit only, fit sun ") + String::num(w[0], 4) + " sky " + String::num(w[1], 4) :
 			String("fit sun ") + String::num(w[0], 4) + " sky " + String::num(w[1], 4) +
 			" point " + String::num(w[2], 6) + ", sky share " + String::num(sky_share, 3),
 		", ", (int64_t)(Time::get_singleton()->get_ticks_msec() - t0), "ms");
