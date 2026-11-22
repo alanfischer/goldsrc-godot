@@ -179,11 +179,11 @@ string str_to_lower(const string &s) {
 //              light and lit_srgb: as goldsrc_surface left them; the rest is light()'s own
 //   LIQUID vec3 goldsrc_liquid(vec3 albedo, int liquid_type)
 //   SKY    vec3 goldsrc_sky(vec3 color, vec3 eye_dir)
-// `variant`, if given, is one more name to #define: which build of a shared source this is.
+// `variants` are more names to #define: which build of a shared source this is.
 static String with_shader_hook(const char *code, const String &hook, const char *kind,
-		const char *variant = nullptr) {
+		std::initializer_list<const char *> variants = {}) {
 	String head;
-	if (variant) {
+	for (const char *variant : variants) {
 		head += String("#define ") + variant + "\n";
 	}
 	if (!hook.is_empty()) {
@@ -199,13 +199,20 @@ static String with_shader_hook(const char *code, const String &hook, const char 
 	return src.insert(src.find("\n", at) + 1, head);
 }
 
-// Shader source for lightstyle blending. Built twice: as it is, and with GOLDSRC_ALPHA_SCISSOR
-// defined for '{' textures (fences, grates).
+// Shader source for lightstyle blending. Built as it is, with GOLDSRC_ALPHA_SCISSOR defined for
+// '{' textures (fences, grates), and with GOLDSRC_ANIMATED for a +0..+9 sequence, whose frames are
+// layers of albedo_frames picked on the shader clock at GoldSrc's 10 fps (anim_fps).
 static const char *LIGHTSTYLE_SHADER_CODE = R"(
 shader_type spatial;
 render_mode ambient_light_disabled, specular_disabled;
 
 uniform sampler2D albedo_texture : source_color, filter_linear_mipmap_anisotropic;
+#ifdef GOLDSRC_ANIMATED
+uniform sampler2DArray albedo_frames : source_color, filter_linear_mipmap_anisotropic;
+uniform float anim_frame_count = 1.0;
+uniform float anim_fps = 10.0;
+uniform float anim_frame = 0.0;
+#endif
 uniform sampler2D lm_layer0 : filter_linear;
 uniform sampler2D lm_layer1 : filter_linear;
 uniform sampler2D lm_layer2 : filter_linear;
@@ -252,7 +259,12 @@ void vertex() {
 }
 
 void fragment() {
+#ifdef GOLDSRC_ANIMATED
+	float frame = anim_fps > 0.0 ? mod(floor(TIME * anim_fps), anim_frame_count) : anim_frame;
+	vec4 albedo = texture(albedo_frames, vec3(UV, frame));
+#else
 	vec4 albedo = texture(albedo_texture, UV);
+#endif
 
 	float b0 = texture(lightstyle_tex, vec2(style_coords.r, 0.5)).r;
 	float b1 = texture(lightstyle_tex, vec2(style_coords.g, 0.5)).r;
@@ -671,76 +683,94 @@ void fragment() {
 }
 )";
 
-// Inline GDScript for animated texture cycling. Embedded into the scene by
-// build_mesh() so it self-starts on load with no external file dependency.
-// Named TextureAnimationPlayer to mirror the SPR SpriteAnimationPlayer convention.
-// Exposes a subset of the AnimationPlayer API (play/pause/stop/seek/speed_scale)
-// so BSP and SPR animations can be driven identically from game code.
-static const char *TEXTURE_ANIMATION_PLAYER_SCRIPT =
-	"extends Node\n"
-	"@export var fps: float = 10.0\n"
-	"var speed_scale: float = 1.0\n"
-	"var _playing: bool = false\n"
-	"var _animated := []\n"
-	"var _tick := 0.0\n"
-	"var _last_frame_idx := -1\n"
-	"\n"
-	"func _ready() -> void:\n"
-	"\t_find_animated(get_parent())\n"
-	"\tif not _animated.is_empty():\n"
-	"\t\tplay()\n"
-	"\n"
-	"func play(_anim_name: String = \"\", _blend: float = -1.0, _speed: float = 1.0, _from_end: bool = false) -> void:\n"
-	"\t_playing = true\n"
-	"\tset_process(true)\n"
-	"\n"
-	"func pause() -> void:\n"
-	"\t_playing = false\n"
-	"\tset_process(false)\n"
-	"\n"
-	"func stop(keep_state: bool = true) -> void:\n"
-	"\t_playing = false\n"
-	"\tset_process(false)\n"
-	"\tif not keep_state:\n"
-	"\t\t_tick = 0.0\n"
-	"\t\t_last_frame_idx = -1\n"
-	"\n"
-	"func is_playing() -> bool:\n"
-	"\treturn _playing\n"
-	"\n"
-	"func seek(seconds: float, update: bool = false) -> void:\n"
-	"\t_tick = seconds\n"
-	"\t_last_frame_idx = -1\n"
-	"\tif update:\n"
-	"\t\t_tick_frame()\n"
-	"\n"
-	"func _find_animated(node: Node) -> void:\n"
-	"\tfor child in node.get_children():\n"
-	"\t\tif child == self:\n"
-	"\t\t\tcontinue\n"
-	"\t\tif child is MeshInstance3D and child.has_meta(\"tex_anim_frames\"):\n"
-	"\t\t\t_animated.append({mi = child, frames = child.get_meta(\"tex_anim_frames\")})\n"
-	"\t\t_find_animated(child)\n"
-	"\n"
-	"func _process(delta: float) -> void:\n"
-	"\t_tick += delta * speed_scale\n"
-	"\t_tick_frame()\n"
-	"\n"
-	"func _tick_frame() -> void:\n"
-	"\tvar frame_idx := int(_tick * fps)\n"
-	"\tif frame_idx == _last_frame_idx:\n"
-	"\t\treturn\n"
-	"\t_last_frame_idx = frame_idx\n"
-	"\tfor entry in _animated:\n"
-	"\t\t_apply_frame(entry.mi, entry.frames[frame_idx % entry.frames.size()])\n"
-	"\n"
-	"func _apply_frame(mi: MeshInstance3D, tex: ImageTexture) -> void:\n"
-	"\tfor s in mi.mesh.get_surface_count():\n"
-	"\t\tvar mat := mi.get_active_material(s)\n"
-	"\t\tif mat is ShaderMaterial:\n"
-	"\t\t\tmat.set_shader_parameter(\"albedo_texture\", tex)\n"
-	"\t\telif mat is StandardMaterial3D:\n"
-	"\t\t\tmat.set_texture(BaseMaterial3D.TEXTURE_ALBEDO, tex)\n";
+// Inline GDScript embedded into the scene by build_mesh(), named to mirror the SPR
+// SpriteAnimationPlayer. A lightstyle material animates in its shader; this builds each one's
+// frame array once at load (a Texture2DArray made under a headless conversion saves empty, so the
+// frames are kept as Images) and sets the clock. Animated surfaces on any other material (legacy
+// StandardMaterial3D, liquids) are still stepped from _process. Exposes a subset of the AnimationPlayer API.
+static const char *TEXTURE_ANIMATION_PLAYER_SCRIPT = R"GD(extends Node
+@export var fps: float = 10.0
+var speed_scale: float = 1.0
+var _playing: bool = false
+var _materials: Array[ShaderMaterial] = []
+var _legacy := []
+var _tick := 0.0
+var _last_frame_idx := -1
+
+func _ready() -> void:
+	set_process(false)
+	_find_animated(get_parent())
+	for mat in _materials:
+		if mat.get_shader_parameter(&"albedo_frames") == null:
+			var array := Texture2DArray.new()
+			array.create_from_images(mat.get_meta(&"tex_anim_images"))
+			mat.set_shader_parameter(&"albedo_frames", array)
+	if not _materials.is_empty() or not _legacy.is_empty():
+		play()
+
+func play(_anim_name: String = "", _blend: float = -1.0, _speed: float = 1.0, _from_end: bool = false) -> void:
+	_playing = true
+	_sync()
+
+func pause() -> void:
+	_playing = false
+	_sync()
+
+func stop(keep_state: bool = true) -> void:
+	_playing = false
+	if not keep_state:
+		_tick = 0.0
+		_last_frame_idx = -1
+	_sync()
+
+func is_playing() -> bool:
+	return _playing
+
+func seek(seconds: float, update: bool = false) -> void:
+	_tick = seconds
+	_last_frame_idx = -1
+	if update:
+		_sync()
+
+func _sync() -> void:
+	for mat in _materials:
+		mat.set_shader_parameter(&"anim_fps", fps * speed_scale if _playing else 0.0)
+		mat.set_shader_parameter(&"anim_frame", float(int(_tick * fps)))
+	set_process(_playing and not _legacy.is_empty())
+	if not _legacy.is_empty():
+		_tick_frame()
+
+func _find_animated(node: Node) -> void:
+	for child in node.get_children():
+		if child == self:
+			continue
+		if child is MeshInstance3D:
+			for s in child.mesh.get_surface_count():
+				var mat := child.get_active_material(s) as ShaderMaterial
+				if mat and mat.has_meta(&"tex_anim_images") and not _materials.has(mat):
+					_materials.append(mat)
+			if child.has_meta(&"tex_anim_frames"):
+				_legacy.append({mi = child, frames = child.get_meta(&"tex_anim_frames")})
+		_find_animated(child)
+
+func _process(delta: float) -> void:
+	_tick += delta * speed_scale
+	_tick_frame()
+
+func _tick_frame() -> void:
+	var frame_idx := int(_tick * fps)
+	if frame_idx == _last_frame_idx:
+		return
+	_last_frame_idx = frame_idx
+	for entry in _legacy:
+		var tex: Texture2D = entry.frames[frame_idx % entry.frames.size()]
+		for s in entry.mi.mesh.get_surface_count():
+			var mat = entry.mi.get_active_material(s)
+			if mat is ShaderMaterial:
+				mat.set_shader_parameter(&"albedo_texture", tex)
+			elif mat is StandardMaterial3D:
+				mat.set_texture(BaseMaterial3D.TEXTURE_ALBEDO, tex)
+)GD";
 
 // Write raw (unweighted) lightmap data for a single layer into an atlas
 static void write_layer_pixels(
@@ -1606,6 +1636,8 @@ void GoldSrcBSP::build_mesh(Node3D *root) {
 	// Create shared lightstyle brightness texture for shader path
 	Ref<Shader> opaque_shader;
 	Ref<Shader> alpha_shader;
+	Ref<Shader> opaque_anim_shader;
+	Ref<Shader> alpha_anim_shader;
 	Ref<ImageTexture> black_1x1;  // shared black texture for unused layers
 	if (shader_lightstyles) {
 		lightstyle_image = Image::create(64, 1, false, Image::FORMAT_RF);
@@ -1617,7 +1649,12 @@ void GoldSrcBSP::build_mesh(Node3D *root) {
 		opaque_shader.instantiate();
 		opaque_shader->set_code(with_shader_hook(LIGHTSTYLE_SHADER_CODE, shader_hook, "WORLD"));
 		alpha_shader.instantiate();
-		alpha_shader->set_code(with_shader_hook(LIGHTSTYLE_SHADER_CODE, shader_hook, "WORLD", "GOLDSRC_ALPHA_SCISSOR"));
+		alpha_shader->set_code(with_shader_hook(LIGHTSTYLE_SHADER_CODE, shader_hook, "WORLD", {"GOLDSRC_ALPHA_SCISSOR"}));
+		opaque_anim_shader.instantiate();
+		opaque_anim_shader->set_code(with_shader_hook(LIGHTSTYLE_SHADER_CODE, shader_hook, "WORLD", {"GOLDSRC_ANIMATED"}));
+		alpha_anim_shader.instantiate();
+		alpha_anim_shader->set_code(with_shader_hook(LIGHTSTYLE_SHADER_CODE, shader_hook, "WORLD",
+				{"GOLDSRC_ALPHA_SCISSOR", "GOLDSRC_ANIMATED"}));
 
 		Ref<Image> black_img = Image::create(1, 1, false, Image::FORMAT_RGB8);
 		black_img->set_pixel(0, 0, Color(0, 0, 0));
@@ -2370,6 +2407,28 @@ void GoldSrcBSP::build_mesh(Node3D *root) {
 			arr_mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
 
 			Ref<ImageTexture> texture = find_texture(tex_name);
+			// Animated texture: +0name..+9name (primary) or +aname..+jname (alternate).
+			Array anim_frames;
+			if (tex_name.size() >= 2 && tex_name[0] == '+') {
+				unsigned char c1 = (unsigned char)tex_name[1];
+				bool is_primary = isdigit(c1) != 0;
+				bool is_alt = (toupper(c1) >= 'A' && toupper(c1) <= 'J');
+				std::string base = tex_name.substr(2);
+				if ((is_primary || is_alt) && !base.empty()) {
+					for (int n = 0; n < 10; n++) {
+						std::string frame_name = "+" + (is_primary ? std::to_string(n) : std::string(1, (char)('a' + n))) + base;
+						Ref<ImageTexture> frame_tex = find_texture(frame_name);
+						if (frame_tex.is_null()) {
+							break;
+						}
+						anim_frames.push_back(frame_tex);
+					}
+				}
+				if (anim_frames.size() < 2) {
+					anim_frames.clear();
+				}
+			}
+			bool anim_in_shader = false;
 			bool is_sky_surface = goldsrc::is_sky_texture(tex_name);
 			bool is_water = !is_sky_surface && (ent_is_liquid
 					|| (!tex_name.empty() && (tex_name[0] == '!' || tex_name[0] == '*')));
@@ -2425,6 +2484,27 @@ void GoldSrcBSP::build_mesh(Node3D *root) {
 					material->set_shader_parameter("albedo_texture", texture);
 				}
 
+				// An animated sequence draws from a frame array. Its frames ride along as Images,
+				// for TextureAnimationPlayer to build the array from at load.
+				if (!anim_frames.is_empty()) {
+					TypedArray<Image> images;
+					Ref<Image> first = Ref<ImageTexture>(anim_frames[0])->get_image();
+					for (int f = 0; f < anim_frames.size(); f++) {
+						Ref<Image> img = Ref<ImageTexture>(anim_frames[f])->get_image();
+						if (img.is_null() || img->get_size() != first->get_size() || img->get_format() != first->get_format()
+								|| img->has_mipmaps() != first->has_mipmaps()) {
+							images.clear();
+							break;
+						}
+						images.push_back(img);
+					}
+					if (!images.is_empty()) {
+						material->set_shader(is_alpha_scissor ? alpha_anim_shader : opaque_anim_shader);
+						material->set_shader_parameter("anim_frame_count", (float)images.size());
+						material->set_meta("tex_anim_images", images);
+					}
+				}
+
 				// Assign layer textures (use black_1x1 for layers without data)
 				for (int l = 0; l < 4; l++) {
 					String param = String("lm_layer") + String::num_int64(l);
@@ -2475,6 +2555,12 @@ void GoldSrcBSP::build_mesh(Node3D *root) {
 				material_cache[cache_key] = material;
 			}
 
+			if (!anim_frames.is_empty()) {
+				Ref<Material> surface_mat = arr_mesh->surface_get_material(0);
+				anim_in_shader = surface_mat.is_valid() && surface_mat->has_meta("tex_anim_images");
+				has_anim = true;
+			}
+
 			// Sky collision rides the rendering mesh, so it is per-MESH, not per-material —
 			// it must still happen on a cache hit, unlike the material construction above.
 			if (is_sky_surface && sky_body) {
@@ -2502,46 +2588,9 @@ void GoldSrcBSP::build_mesh(Node3D *root) {
 				mesh_instance->set_meta("is_water_surface", true);
 			}
 
-			// Animated texture: +0name–+9name (primary) or +aname–+jname (alternate).
-			// Collect all frame textures and store as metadata so the runtime
-			// TextureAnimator can cycle them without the WAD being loaded.
-			if (tex_name.size() >= 2 && tex_name[0] == '+') {
-				unsigned char c1 = (unsigned char)tex_name[1];
-				bool is_primary = isdigit(c1) != 0;
-				bool is_alt = (toupper(c1) >= 'A' && toupper(c1) <= 'J');
-				if (is_primary || is_alt) {
-					std::string base = tex_name.substr(2);
-					if (!base.empty()) {
-						Array frames;
-						if (is_primary) {
-							// Primary sequence: +0 through +9
-							for (int n = 0; n < 10; n++) {
-								std::string frame_name = "+" + std::to_string(n) + base;
-								Ref<ImageTexture> frame_tex = find_texture(frame_name);
-								if (frame_tex.is_valid()) {
-									frames.push_back(frame_tex);
-								} else {
-									break;
-								}
-							}
-						} else {
-							// Alternate sequence: +a through +j (A=0, B=1, ..., J=9)
-							for (int n = 0; n < 10; n++) {
-								std::string frame_name = "+" + std::string(1, (char)('a' + n)) + base;
-								Ref<ImageTexture> frame_tex = find_texture(frame_name);
-								if (frame_tex.is_valid()) {
-									frames.push_back(frame_tex);
-								} else {
-									break;
-								}
-							}
-						}
-						if (frames.size() >= 2) {
-							mesh_instance->set_meta("tex_anim_frames", frames);
-							has_anim = true;
-						}
-					}
-				}
+			// Animated surfaces whose material cannot pick frames itself are stepped from script.
+			if (!anim_frames.is_empty() && !anim_in_shader) {
+				mesh_instance->set_meta("tex_anim_frames", anim_frames);
 			}
 
 			group_parent->add_child(mesh_instance);
