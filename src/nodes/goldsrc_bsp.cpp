@@ -179,29 +179,32 @@ string str_to_lower(const string &s) {
 //              light and lit_srgb: as goldsrc_surface left them; the rest is light()'s own
 //   LIQUID vec3 goldsrc_liquid(vec3 albedo, int liquid_type)
 //   SKY    vec3 goldsrc_sky(vec3 color, vec3 eye_dir)
-// `variants` are more names to #define: which build of a shared source this is.
+// `variants` are more names to #define: which build of a shared source this is. They go right after
+// shader_type, so a variant can pick the render_mode; the hook goes after render_mode.
 static String with_shader_hook(const char *code, const String &hook, const char *kind,
 		std::initializer_list<const char *> variants = {}) {
-	String head;
-	for (const char *variant : variants) {
-		head += String("#define ") + variant + "\n";
-	}
-	if (!hook.is_empty()) {
-		head += String("#define GOLDSRC_HOOK_") + kind + "\n#include \"" + hook + "\"\n";
-	}
 	String src(code);
-	if (head.is_empty()) {
-		return src;
+	if (!hook.is_empty()) {
+		int at = src.find("render_mode");
+		at = at < 0 ? src.find("shader_type") : at;
+		src = src.insert(src.find("\n", at) + 1,
+				String("#define GOLDSRC_HOOK_") + kind + "\n#include \"" + hook + "\"\n");
 	}
-	// After render_mode: the preprocessor runs first, but shader_type must still lead.
-	int at = src.find("render_mode");
-	at = at < 0 ? src.find("shader_type") : at;
-	return src.insert(src.find("\n", at) + 1, head);
+	String defines;
+	for (const char *variant : variants) {
+		defines += String("#define ") + variant + "\n";
+	}
+	if (!defines.is_empty()) {
+		src = src.insert(src.find("\n", src.find("shader_type")) + 1, defines);
+	}
+	return src;
 }
 
 // Shader source for lightstyle blending. Built as it is, with GOLDSRC_ALPHA_SCISSOR defined for
 // '{' textures (fences, grates), and with GOLDSRC_ANIMATED for a +0..+9 sequence, whose frames are
-// layers of albedo_frames picked on the shader clock at GoldSrc's 10 fps (anim_fps).
+// layers of albedo_frames picked on the shader clock at GoldSrc's 10 fps (anim_fps). The other
+// sequence (+a..+j for a +0 texture, and the reverse) follows in the same array, drawn while the
+// mesh's entity_frame instance uniform is nonzero, as GoldSrc does for an entity's pev->frame.
 static const char *LIGHTSTYLE_SHADER_CODE = R"(
 shader_type spatial;
 render_mode ambient_light_disabled, specular_disabled;
@@ -210,8 +213,10 @@ uniform sampler2D albedo_texture : source_color, filter_linear_mipmap_anisotropi
 #ifdef GOLDSRC_ANIMATED
 uniform sampler2DArray albedo_frames : source_color, filter_linear_mipmap_anisotropic;
 uniform float anim_frame_count = 1.0;
+uniform float anim_alt_count = 0.0;
 uniform float anim_fps = 10.0;
 uniform float anim_frame = 0.0;
+instance uniform float entity_frame = 0.0;
 #endif
 uniform sampler2D lm_layer0 : filter_linear;
 uniform sampler2D lm_layer1 : filter_linear;
@@ -260,8 +265,10 @@ void vertex() {
 
 void fragment() {
 #ifdef GOLDSRC_ANIMATED
-	float frame = anim_fps > 0.0 ? mod(floor(TIME * anim_fps), anim_frame_count) : anim_frame;
-	vec4 albedo = texture(albedo_frames, vec3(UV, frame));
+	bool alt = entity_frame != 0.0 && anim_alt_count > 0.0;
+	float count = alt ? anim_alt_count : anim_frame_count;
+	float frame = mod(anim_fps > 0.0 ? floor(TIME * anim_fps) : anim_frame, count);
+	vec4 albedo = texture(albedo_frames, vec3(UV, (alt ? anim_frame_count : 0.0) + frame));
 #else
 	vec4 albedo = texture(albedo_texture, UV);
 #endif
@@ -309,6 +316,50 @@ void light() {
 		ALBEDO, goldsrc_light_in, goldsrc_lit_in, goldsrc_world_pos, overbright);
 }
 #endif
+)";
+
+// A brush entity drawn in a GoldSrc render mode: the world shader's texture, unlit (GoldSrc skips
+// the lightmap for these), tinted and faded per mesh by the entity_rendercolor (gamma) and
+// entity_renderamt instance uniforms. GOLDSRC_RENDER_ADD blends additively, else it mixes.
+// GOLDSRC_ANIMATED reads the same frame array, with the same uniforms, as the world shader.
+// A world shader's sibling builds ride on it as the meta "render_shaders": {"mix", "add"}.
+static const char *RENDER_MODE_SHADER_CODE = R"(
+shader_type spatial;
+#ifdef GOLDSRC_RENDER_ADD
+render_mode unshaded, blend_add, shadows_disabled, ambient_light_disabled, specular_disabled;
+#else
+render_mode unshaded, blend_mix, shadows_disabled, ambient_light_disabled, specular_disabled;
+#endif
+
+uniform sampler2D albedo_texture : source_color, filter_linear_mipmap_anisotropic;
+#ifdef GOLDSRC_ANIMATED
+uniform sampler2DArray albedo_frames : source_color, filter_linear_mipmap_anisotropic;
+uniform float anim_frame_count = 1.0;
+uniform float anim_alt_count = 0.0;
+uniform float anim_fps = 10.0;
+uniform float anim_frame = 0.0;
+instance uniform float entity_frame = 0.0;
+#endif
+instance uniform float entity_renderamt = 1.0;
+instance uniform vec3 entity_rendercolor = vec3(1.0);
+uniform bool linear_output = false;
+
+vec3 gs_to_linear(vec3 c) {
+	return mix(c / 12.92, pow((max(c, vec3(0.0)) + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+}
+
+void fragment() {
+#ifdef GOLDSRC_ANIMATED
+	bool alt = entity_frame != 0.0 && anim_alt_count > 0.0;
+	float count = alt ? anim_alt_count : anim_frame_count;
+	float frame = mod(anim_fps > 0.0 ? floor(TIME * anim_fps) : anim_frame, count);
+	vec4 albedo = texture(albedo_frames, vec3(UV, (alt ? anim_frame_count : 0.0) + frame));
+#else
+	vec4 albedo = texture(albedo_texture, UV);
+#endif
+	ALBEDO = albedo.rgb * (linear_output ? gs_to_linear(entity_rendercolor) : entity_rendercolor);
+	ALPHA = albedo.a * entity_renderamt;
+}
 )";
 
 // Where the transparent queue's back rows sort. Godot draws low priority first, so these run
@@ -697,14 +748,20 @@ var _legacy := []
 var _tick := 0.0
 var _last_frame_idx := -1
 
-func _ready() -> void:
-	set_process(false)
+# In _enter_tree, which runs before any node's _ready, so an entity that copies a material in its
+# own _ready (for a render mode) copies the built array.
+func _enter_tree() -> void:
+	if not _materials.is_empty() or not _legacy.is_empty():
+		return
 	_find_animated(get_parent())
 	for mat in _materials:
 		if mat.get_shader_parameter(&"albedo_frames") == null:
 			var array := Texture2DArray.new()
 			array.create_from_images(mat.get_meta(&"tex_anim_images"))
 			mat.set_shader_parameter(&"albedo_frames", array)
+
+func _ready() -> void:
+	set_process(false)
 	if not _materials.is_empty() or not _legacy.is_empty():
 		play()
 
@@ -1656,6 +1713,24 @@ void GoldSrcBSP::build_mesh(Node3D *root) {
 		alpha_anim_shader->set_code(with_shader_hook(LIGHTSTYLE_SHADER_CODE, shader_hook, "WORLD",
 				{"GOLDSRC_ALPHA_SCISSOR", "GOLDSRC_ANIMATED"}));
 
+		// The render-mode builds, found from whichever world shader a surface has.
+		auto render_shader = [](std::initializer_list<const char *> variants) {
+			Ref<Shader> shader;
+			shader.instantiate();
+			shader->set_code(with_shader_hook(RENDER_MODE_SHADER_CODE, "", "WORLD", variants));
+			return shader;
+		};
+		Dictionary still;
+		still["mix"] = render_shader({});
+		still["add"] = render_shader({"GOLDSRC_RENDER_ADD"});
+		Dictionary animated;
+		animated["mix"] = render_shader({"GOLDSRC_ANIMATED"});
+		animated["add"] = render_shader({"GOLDSRC_ANIMATED", "GOLDSRC_RENDER_ADD"});
+		opaque_shader->set_meta("render_shaders", still);
+		alpha_shader->set_meta("render_shaders", still);
+		opaque_anim_shader->set_meta("render_shaders", animated);
+		alpha_anim_shader->set_meta("render_shaders", animated);
+
 		Ref<Image> black_img = Image::create(1, 1, false, Image::FORMAT_RGB8);
 		black_img->set_pixel(0, 0, Color(0, 0, 0));
 		black_1x1 = ImageTexture::create_from_image(black_img);
@@ -2407,24 +2482,33 @@ void GoldSrcBSP::build_mesh(Node3D *root) {
 			arr_mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
 
 			Ref<ImageTexture> texture = find_texture(tex_name);
-			// Animated texture: +0name..+9name (primary) or +aname..+jname (alternate).
+			// Animated texture: +0name..+9name (primary) or +aname..+jname (alternate). anim_frames is
+			// the face's own sequence, alt_frames the other one, which GoldSrc swaps in while the
+			// entity's frame is nonzero (Mod_LoadTextures' alternate_anims).
 			Array anim_frames;
+			Array alt_frames;
 			if (tex_name.size() >= 2 && tex_name[0] == '+') {
 				unsigned char c1 = (unsigned char)tex_name[1];
 				bool is_primary = isdigit(c1) != 0;
 				bool is_alt = (toupper(c1) >= 'A' && toupper(c1) <= 'J');
 				std::string base = tex_name.substr(2);
-				if ((is_primary || is_alt) && !base.empty()) {
+				auto collect = [&](bool digits) {
+					Array frames;
 					for (int n = 0; n < 10; n++) {
-						std::string frame_name = "+" + (is_primary ? std::to_string(n) : std::string(1, (char)('a' + n))) + base;
+						std::string frame_name = "+" + (digits ? std::to_string(n) : std::string(1, (char)('a' + n))) + base;
 						Ref<ImageTexture> frame_tex = find_texture(frame_name);
 						if (frame_tex.is_null()) {
 							break;
 						}
-						anim_frames.push_back(frame_tex);
+						frames.push_back(frame_tex);
 					}
+					return frames;
+				};
+				if ((is_primary || is_alt) && !base.empty()) {
+					anim_frames = collect(is_primary);
+					alt_frames = collect(!is_primary);
 				}
-				if (anim_frames.size() < 2) {
+				if (anim_frames.size() < 2 && alt_frames.is_empty()) {
 					anim_frames.clear();
 				}
 			}
@@ -2484,23 +2568,29 @@ void GoldSrcBSP::build_mesh(Node3D *root) {
 					material->set_shader_parameter("albedo_texture", texture);
 				}
 
-				// An animated sequence draws from a frame array. Its frames ride along as Images,
-				// for TextureAnimationPlayer to build the array from at load.
+				// An animated sequence draws from a frame array, its own frames then the alternates.
+				// They ride along as Images, for TextureAnimationPlayer to build the array from at load.
 				if (!anim_frames.is_empty()) {
-					TypedArray<Image> images;
 					Ref<Image> first = Ref<ImageTexture>(anim_frames[0])->get_image();
-					for (int f = 0; f < anim_frames.size(); f++) {
-						Ref<Image> img = Ref<ImageTexture>(anim_frames[f])->get_image();
-						if (img.is_null() || img->get_size() != first->get_size() || img->get_format() != first->get_format()
-								|| img->has_mipmaps() != first->has_mipmaps()) {
-							images.clear();
-							break;
+					auto layers = [&](const Array &frames) {
+						TypedArray<Image> images;
+						for (int f = 0; f < frames.size(); f++) {
+							Ref<Image> img = Ref<ImageTexture>(frames[f])->get_image();
+							if (img.is_null() || first.is_null() || img->get_size() != first->get_size()
+									|| img->get_format() != first->get_format() || img->has_mipmaps() != first->has_mipmaps()) {
+								return TypedArray<Image>();
+							}
+							images.push_back(img);
 						}
-						images.push_back(img);
-					}
-					if (!images.is_empty()) {
+						return images;
+					};
+					TypedArray<Image> images = layers(anim_frames);
+					TypedArray<Image> alt_images = layers(alt_frames);
+					if (!images.is_empty() && (images.size() >= 2 || !alt_images.is_empty())) {
 						material->set_shader(is_alpha_scissor ? alpha_anim_shader : opaque_anim_shader);
 						material->set_shader_parameter("anim_frame_count", (float)images.size());
+						material->set_shader_parameter("anim_alt_count", (float)alt_images.size());
+						images.append_array(alt_images);
 						material->set_meta("tex_anim_images", images);
 					}
 				}
@@ -2558,7 +2648,7 @@ void GoldSrcBSP::build_mesh(Node3D *root) {
 			if (!anim_frames.is_empty()) {
 				Ref<Material> surface_mat = arr_mesh->surface_get_material(0);
 				anim_in_shader = surface_mat.is_valid() && surface_mat->has_meta("tex_anim_images");
-				has_anim = true;
+				has_anim = has_anim || anim_in_shader || anim_frames.size() >= 2;
 			}
 
 			// Sky collision rides the rendering mesh, so it is per-MESH, not per-material —
@@ -2588,8 +2678,9 @@ void GoldSrcBSP::build_mesh(Node3D *root) {
 				mesh_instance->set_meta("is_water_surface", true);
 			}
 
-			// Animated surfaces whose material cannot pick frames itself are stepped from script.
-			if (!anim_frames.is_empty() && !anim_in_shader) {
+			// Animated surfaces whose material cannot pick frames itself are stepped from script,
+			// without their alternates.
+			if (anim_frames.size() >= 2 && !anim_in_shader) {
 				mesh_instance->set_meta("tex_anim_frames", anim_frames);
 			}
 
