@@ -7,6 +7,7 @@ extends EditorPlugin
 const REIMPORT_SETTING := "goldsrc/import/reimport_on_extension_change"
 const BspImporter := preload("res://addons/goldsrc/importer/bsp_importer.gd")
 const MdlImporter := preload("res://addons/goldsrc/importer/mdl_importer.gd")
+const SprImporter := preload("res://addons/goldsrc/importer/spr_importer.gd")
 
 var bsp_importer: EditorImportPlugin
 var mdl_importer: EditorImportPlugin
@@ -17,7 +18,7 @@ var wad_importer: EditorImportPlugin
 func _enter_tree() -> void:
 	bsp_importer = BspImporter.new()
 	mdl_importer = MdlImporter.new()
-	spr_importer = preload("res://addons/goldsrc/importer/spr_importer.gd").new()
+	spr_importer = SprImporter.new()
 	wad_importer = preload("res://addons/goldsrc/importer/wad_importer.gd").new()
 	add_import_plugin(bsp_importer)
 	add_import_plugin(mdl_importer)
@@ -78,8 +79,10 @@ func _reimport_stale() -> void:
 
 func _collect_stale(dir: EditorFileSystemDirectory, out: PackedStringArray) -> void:
 	var settings := EditorInterface.get_editor_settings()
-	var imported_with := {"bsp": BspImporter.IMPORTED_WITH, "mdl": MdlImporter.IMPORTED_WITH}
-	var keys := {"bsp": BspImporter.import_key(), "mdl": MdlImporter.import_key()}
+	var imported_with := {"bsp": BspImporter.IMPORTED_WITH, "mdl": MdlImporter.IMPORTED_WITH,
+			"spr": SprImporter.IMPORTED_WITH}
+	var keys := {"bsp": BspImporter.import_key(), "mdl": MdlImporter.import_key(),
+			"spr": SprImporter.import_key()}
 	for i in dir.get_file_count():
 		var path := dir.get_file_path(i)
 		var ext := path.get_extension().to_lower()

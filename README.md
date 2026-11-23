@@ -52,7 +52,7 @@ A Godot 4.7+ GDExtension for loading GoldSrc (Half-Life 1) engine assets: BSP ma
 - Texture formats: normal, additive, index-alpha, alpha-test
 - Sprite types: parallel, facing-upright, oriented, etc.
 - Frame textures and origins accessible individually from GDScript
-- `build_scene()` produces a self-animating Sprite3D with a `SpriteAnimationPlayer` child (GDScript node, no C++ dependency at runtime) — exported properties: `fps` (default 10.0), `loop_animation` (default true), `autoplay` (default "default"); non-looping animations auto-hide the sprite on completion
+- `build_scene()` produces a self-animating Sprite3D with a `SpriteAnimationPlayer` child (GDScript node, no C++ dependency at runtime) — exported properties: `fps` (default 10.0), `loop_animation` (default true), `autoplay` (default "default"); non-looping animations auto-hide the sprite on completion. See [Sprite animation](#sprite-animation)
 
 ### WAD Textures
 - WAD2/WAD3 format support
@@ -582,6 +582,40 @@ sap.loop_animation = false
 #   sprite.get_meta("tex_anim_frames")   # Array[ImageTexture]
 #   sprite.get_meta("tex_anim_origins")  # Array of [ox, oy] pairs
 ```
+
+#### Sprite animation
+
+The frames sit on one `Texture2DArray`, and the sprite's material picks the layer from two
+instance uniforms on the Sprite3D: `fps` (nonzero runs the shader clock, looping, at no
+per-frame cost) and `frame` (the layer shown while `fps` is 0). Sprites share one material per
+look (billboard, blend, fog), whatever their rate. The `SpriteAnimationPlayer` builds the array
+and puts that material on the sprite as it enters the tree; it is not an `AnimationPlayer`, but
+has the same `play`/`pause`/`stop`/`seek` calls and signals. `restyle()` changes the look, and
+`unique_material()` gives the sprite a material of its own for `render_priority` or the `albedo`
+tint uniform.
+
+To drive a sprite with a real `AnimationPlayer` instead, use the `AnimationLibrary` in the
+sprite's `animation_library` meta. Its tracks are relative to the sprite, so add the player as
+the sprite's child, leave the `SpriteAnimationPlayer` in place (it still owns the material) with
+`autoplay` cleared, and:
+
+```gdscript
+var player := AnimationPlayer.new()
+sprite.add_child(player)
+player.add_animation_library(&"", sprite.get_meta(&"animation_library"))
+player.play(&"loop")   # or &"once"
+```
+
+- `loop` sets `fps` and ends at once: the GPU loops for free, so the player reports the animation
+  finished while the sprite keeps looping, and `speed_scale` or a pause has no effect on it.
+- `once` steps `frame` through every frame, then hides the sprite; it costs a player update per
+  frame while it runs, and follows `speed_scale`.
+- Both are baked at the importer's `animation_fps`. For another loop rate, set the `fps` instance
+  uniform yourself.
+
+To swap textures per frame the old way, remove the `SpriteAnimationPlayer`: the sprite is then a
+plain Sprite3D (frame 0, billboarded as the SPR says) and `tex_anim_frames` / `tex_anim_origins`
+give each frame's texture and offset.
 
 ### GoldSrcWAD
 
