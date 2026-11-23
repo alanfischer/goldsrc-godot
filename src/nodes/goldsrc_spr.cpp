@@ -18,9 +18,12 @@ using namespace std;
 // Inline GDScript embedded into the .scn produced by build_scene(). @tool so bake() runs inside
 // the editor's importer; playback stays off in the editor.
 // Mirrors the AnimationPlayer API so SPR and MDL scenes can be driven identically. The frames are
-// one Texture2DArray and the sprite's ShaderMaterial picks the layer: a looping play runs on the
-// shader clock and costs nothing per frame; one-shots, pauses and seeks step a frame uniform from
-// a Timer. No C++ plugin dependency at runtime: pure GDScript baked into the .scn.
+// one Texture2DArray and the sprite's ShaderMaterial picks the layer by the sprite's fps and frame
+// instance uniforms: a looping play runs on the shader clock and costs nothing per frame; one-shots,
+// pauses and seeks step the frame uniform from a Timer. Sprites share a material per look, whatever
+// their rate. The animator puts the material on the sprite as it enters the tree, so without it
+// the sprite is a plain Sprite3D. bake() also leaves an AnimationLibrary on the sprite, for a real
+// AnimationPlayer to drive the same uniforms instead. No C++ plugin dependency at runtime.
 static const char *SPRITE_ANIMATOR_SCRIPT = R"GD(@tool
 extends Node
 signal animation_finished(anim_name: String)
@@ -28,6 +31,8 @@ signal animation_started(anim_name: String)
 @export var fps: float = 10.0:
 	set(v):
 		fps = v
+		if Engine.is_editor_hint():
+			bake_animations()  # the importer sets its fps option after bake()
 		_sync()
 @export var loop_animation: bool = true:
 	set(v):
@@ -63,6 +68,9 @@ const _BILLBOARD := {
 }
 const _BLEND := ["blend_mix", "blend_add", "blend_sub", "blend_mul", "blend_premul_alpha"]
 
+func _enter_tree() -> void:
+	_sync()
+
 func _ready() -> void:
 	if Engine.is_editor_hint():
 		return
@@ -80,7 +88,40 @@ func bake(frames: Array[Image]) -> void:
 	mat.shader.code = _code()
 	mat.set_shader_parameter(&"frame_count", float(frame_count))
 	base_material = mat
-	get_parent().material_override = mat
+	bake_animations()
+
+## Import time: the sprite's meta "animation_library", for an AnimationPlayer added as the sprite's
+## child. "loop" starts the shader clock at fps and ends at once, so the player then reports it
+## finished while the sprite loops; "once" steps the frames, then hides the sprite.
+func bake_animations() -> void:
+	var spr := get_parent() as Sprite3D
+	if spr == null or frame_count < 2:
+		return
+	var lib := AnimationLibrary.new()
+	lib.add_animation(&"loop", _animation(true))
+	lib.add_animation(&"once", _animation(false))
+	spr.set_meta(&"animation_library", lib)
+
+func _animation(loop: bool) -> Animation:
+	var anim := Animation.new()
+	var tracks := {}
+	for property in [&"instance_shader_parameters/fps", &"instance_shader_parameters/frame", &"visible"]:
+		var t := anim.add_track(Animation.TYPE_VALUE)
+		anim.track_set_path(t, NodePath(".:" + property))
+		anim.value_track_set_update_mode(t, Animation.UPDATE_DISCRETE)
+		tracks[property] = t
+	anim.track_insert_key(tracks[&"visible"], 0.0, true)
+	if loop:
+		anim.length = 0.0
+		anim.track_insert_key(tracks[&"instance_shader_parameters/fps"], 0.0, fps)
+		anim.track_insert_key(tracks[&"instance_shader_parameters/frame"], 0.0, 0.0)
+	else:
+		anim.length = frame_count / fps
+		anim.track_insert_key(tracks[&"instance_shader_parameters/fps"], 0.0, 0.0)
+		for i in frame_count:
+			anim.track_insert_key(tracks[&"instance_shader_parameters/frame"], i / fps, float(i))
+		anim.track_insert_key(tracks[&"visible"], anim.length, false)
+	return anim
 
 func _ensure_frames() -> void:
 	if base_material and base_material.get_shader_parameter(&"frames") == null and not layers.is_empty():
@@ -103,9 +144,7 @@ func unique_material() -> ShaderMaterial:
 	var spr := get_parent() as Sprite3D
 	_ensure_frames()
 	if not _unique:
-		var mat := (spr.material_override as ShaderMaterial).duplicate() as ShaderMaterial
-		mat.shader = _shader(_code())
-		spr.material_override = mat
+		spr.material_override = _shared_material().duplicate() as ShaderMaterial
 		_unique = true
 		_sync()
 	return spr.material_override as ShaderMaterial
@@ -161,17 +200,12 @@ func _sync() -> void:
 	if spr == null or base_material == null or Engine.is_editor_hint():
 		return
 	_ensure_frames()
+	if not _unique:
+		spr.material_override = _shared_material()
 	var rate := fps * speed_scale
 	var clocked := _playing and loop_animation and rate > 0.0
-	if _unique:
-		var mat := spr.material_override as ShaderMaterial
-		mat.set_shader_parameter(&"fps", rate if clocked else 0.0)
-		mat.set_shader_parameter(&"frame", float(_frame))
-	elif clocked or _frame == 0:
-		spr.material_override = _shared_material(rate if clocked else 0.0)
-	else:
-		unique_material()
-		return
+	spr.set_instance_shader_parameter(&"fps", rate if clocked else 0.0)
+	spr.set_instance_shader_parameter(&"frame", float(_frame))
 	var stepping := _playing and not loop_animation and rate > 0.0
 	if stepping and _timer == null:
 		_timer = Timer.new()
@@ -187,7 +221,7 @@ func _sync() -> void:
 func _step() -> void:
 	_frame += 1
 	if _frame < frame_count:
-		(get_parent().material_override as ShaderMaterial).set_shader_parameter(&"frame", float(_frame))
+		(get_parent() as Sprite3D).set_instance_shader_parameter(&"frame", float(_frame))
 		return
 	_frame = frame_count - 1
 	_playing = false
@@ -197,15 +231,13 @@ func _step() -> void:
 	current_animation = ""
 	animation_finished.emit(finished_anim)
 
-func _shared_material(rate: float) -> ShaderMaterial:
+func _shared_material() -> ShaderMaterial:
 	var code := _code()
-	var key := [base_material, code, rate]
+	var key := [base_material, code]
 	var mat: ShaderMaterial = _shared.get(key)
 	if mat == null:
 		mat = base_material.duplicate() as ShaderMaterial
 		mat.shader = _shader(code)
-		mat.set_shader_parameter(&"fps", rate)
-		mat.set_shader_parameter(&"frame", 0.0)
 		_shared[key] = mat
 	return mat
 
@@ -233,8 +265,8 @@ func _code() -> String:
 	if alpha_scissor:
 		alpha += "\tALPHA_SCISSOR_THRESHOLD = 0.5;\n"
 	return ("shader_type spatial;\nrender_mode %s;\n" % ", ".join(modes)
-		+ "uniform sampler2DArray frames : source_color, filter_linear_mipmap, repeat_enable;\n"
-		+ "uniform float frame_count = 1.0;\nuniform float fps = 0.0;\nuniform float frame = 0.0;\n"
+		+ "uniform sampler2DArray frames : source_color, filter_linear_mipmap, repeat_disable;\n"
+		+ "uniform float frame_count = 1.0;\ninstance uniform float fps = 0.0;\ninstance uniform float frame = 0.0;\n"
 		+ "uniform vec4 albedo : source_color = vec4(1.0);\n"
 		+ "void vertex() {\n%s}\n" % _BILLBOARD.get(billboard_mode, "")
 		+ "void fragment() {\n"
@@ -397,6 +429,11 @@ Sprite3D *GoldSrcSPR::build_scene() const {
 		default: // VP_PARALLEL, VP_PARALLEL_ORIENTED
 			billboard = BaseMaterial3D::BILLBOARD_ENABLED;
 			break;
+	}
+	// The same on the Sprite3D itself, for when it is drawn without the animator's material.
+	sprite->set_billboard_mode((BaseMaterial3D::BillboardMode)billboard);
+	if (data.texture_format == goldsrc::SPR_ALPHATEST) {
+		sprite->set_alpha_cut_mode(SpriteBase3D::ALPHA_CUT_DISCARD);
 	}
 	animator->set("billboard_mode", billboard);
 	animator->set("blend_mode", data.texture_format == goldsrc::SPR_ADDITIVE

@@ -22,6 +22,23 @@ func _get_resource_type() -> String:
 	return "PackedScene"
 
 
+## What shape of scene this importer builds. 2: the frames picked by the sprite's fps and frame
+## instance uniforms, the material put on by the animator at load, and the "animation_library" meta.
+## plugin.gd reimports any sprite recorded with another import_key().
+const FORMAT_VERSION := 2
+## Project metadata section recording, per .spr, the import_key() it was last imported with.
+const IMPORTED_WITH := "goldsrc_spr_imported_with"
+
+
+func _get_format_version() -> int:
+	return FORMAT_VERSION
+
+
+## What an import made now would be built by: this extension build and this script's version.
+static func import_key() -> String:
+	return "%s/%d" % [GoldSrcBSP.get_pipeline_id(), FORMAT_VERSION]
+
+
 func _get_preset_count() -> int:
 	return 1
 
@@ -100,4 +117,7 @@ func _import(source_file: String, save_path: String, options: Dictionary,
 		push_error("SPR Importer: Failed to pack scene for '%s': %s" % [source_file, error_string(pack_err)])
 		return pack_err
 
-	return ResourceSaver.save(scene, save_path + "." + _get_save_extension())
+	var save_err := ResourceSaver.save(scene, save_path + "." + _get_save_extension())
+	if save_err == OK:
+		EditorInterface.get_editor_settings().set_project_metadata(IMPORTED_WITH, source_file, import_key())
+	return save_err
