@@ -19,10 +19,10 @@ namespace goldsrc {
 // out as image}. "under" is the open air beneath the surface: the underside of the roof (R) and the
 // ground below it (G), or -1e6 in both where there is none (open ground, a wall). Found by
 // walking the same trace on down, face by face, to the first stretch of empty leaf at least
-// 12 units (0.3 m) tall within 160 (4 m) of the surface. B is the share of the cell at its height
-// and A the Godot Y of the highest surface on the rest: where the centre or a corner is 12 units
-// (0.3 m) or more under the top (a roof's edge crosses the cell) both are measured from 4x4 more
-// columns, the rest being what is that far under; elsewhere B is 1.
+// 12 units (0.3 m) tall within 160 (4 m) of the surface. Where the centre or a corner is 12 units
+// (0.3 m) or more under the top (a roof's edge crosses the cell), B is the share of the cell at its
+// height, from 4x4 more columns solid within 12 units under the top, and A the Godot Y of the
+// highest of those lower samples, where rain lands on the rest; elsewhere B is 1 and A the top.
 godot::Dictionary bake_surface_below_sky(const BSPData &bsp, float cell_size_gs, float scale_factor);
 
 } // namespace goldsrc
