@@ -21,6 +21,8 @@ namespace {
 constexpr float GAP_SEARCH = 160.0f;  // GoldSrc units: 4 m
 constexpr float MIN_GAP = 12.0f;      // 0.3 m
 constexpr float NO_GAP = -1e6f;
+constexpr int SHARE_SAMPLES = 4;      // columns per side measuring a cell a roof's edge crosses
+constexpr float EDGE_DROP = 12.0f;    // that far under the cell's top is off the roof (0.3 m)
 
 int world_contents(const BSPData &bsp, int node, float x, float y, float z) {
 	while (node >= 0) {
@@ -116,6 +118,25 @@ Dictionary bake_surface_below_sky(const BSPData &bsp_data, float cell_size_gs, f
 		return landed;
 	};
 
+	// The share of the cell from x, y that is as high as its top `landed`, from SHARE_SAMPLES²
+	// columns across it: one is if anything is solid in the EDGE_DROP under the top there. Asked of
+	// the map's leaves, not traced: a roof's slab, or a sloping roof's, is solid there; the ground
+	// beside it is not.
+	auto share_of = [&](float x, float y, float landed) {
+		int high = 0;
+		for (int v = 0; v < SHARE_SAMPLES; v++)
+			for (int u = 0; u < SHARE_SAMPLES; u++) {
+				float sx = x + (u + 0.5f) * cell_size_gs / SHARE_SAMPLES;
+				float sy = y + (v + 0.5f) * cell_size_gs / SHARE_SAMPLES;
+				for (float d = 1.0f; d < EDGE_DROP; d += 2.0f)
+					if (world_contents(bsp_data, head, sx, sy, landed - d) != CONTENTS_EMPTY) {
+						high++;
+						break;
+					}
+			}
+		return (float)high / (SHARE_SAMPLES * SHARE_SAMPLES);
+	};
+
 	// A cell is one height, so it takes the highest of its centre and corners: a roof over any of
 	// it covers all of it. A centre alone left every wall a cell straddled open to the sky.
 	// Corners are shared, and nudged off the grid lines that walls are built on.
@@ -136,10 +157,11 @@ Dictionary bake_surface_below_sky(const BSPData &bsp_data, float cell_size_gs, f
 	data.resize((size_t)w * h * 4);
 	float *heights = (float *)data.ptrw();
 	PackedByteArray under_data;
-	under_data.resize((size_t)w * h * 8);
+	under_data.resize((size_t)w * h * 16);
 	float *under = (float *)under_data.ptrw();
 	int open = 0;
 	int sheltered = 0;
+	int edges = 0;
 	for (int iy = 0; iy < h; iy++) {
 		for (int ix = 0; ix < w; ix++) {
 			float tops[5];
@@ -185,8 +207,24 @@ Dictionary bake_surface_below_sky(const BSPData &bsp_data, float cell_size_gs, f
 				cell_air = Vector2(hi * scale_factor, lo * scale_factor);
 				sheltered++;
 			}
-			under[((size_t)iy * w + ix) * 2] = cell_air.x;
-			under[((size_t)iy * w + ix) * 2 + 1] = cell_air.y;
+			// Where a roof's edge crosses the cell, how much of it is roofed, and the highest of
+			// the samples off it, where rain lands on the rest.
+			Vector2 share(1.0f, landed);
+			float rest = -1e30f;
+			for (int k = 0; k < 5; k++)
+				if (tops[k] < landed - EDGE_DROP) rest = fmaxf(rest, tops[k]);
+			if (rest > -1e30f && landed < top) {
+				float roofed = share_of(world.mins[0] + ix * cell_size_gs, world.mins[1] + iy * cell_size_gs, landed);
+				if (roofed < 1.0f) {
+					share = Vector2(roofed, rest);
+					edges++;
+				}
+			}
+			float *texel = under + ((size_t)iy * w + ix) * 4;
+			texel[0] = cell_air.x;
+			texel[1] = cell_air.y;
+			texel[2] = share.x;
+			texel[3] = share.y * scale_factor;
 		}
 	}
 
@@ -194,10 +232,10 @@ Dictionary bake_surface_below_sky(const BSPData &bsp_data, float cell_size_gs, f
 	result["origin"] = Vector3(-world.mins[0] * scale_factor, 0.0f, world.mins[1] * scale_factor);
 	result["size"] = Vector2(w * cell_size_gs * scale_factor, h * cell_size_gs * scale_factor);
 	result["image"] = Image::create_from_data(w, h, false, Image::FORMAT_RF, data);
-	result["under"] = Image::create_from_data(w, h, false, Image::FORMAT_RGF, under_data);
+	result["under"] = Image::create_from_data(w, h, false, Image::FORMAT_RGBAF, under_data);
 	result["top"] = top * scale_factor;
 	UtilityFunctions::print("[GoldSrc] Surface below sky: ", w, "x", h, " columns (", open,
-		" outside the map, ", sheltered, " with air under cover), ", (int64_t)(Time::get_singleton()->get_ticks_msec() - t0), "ms");
+		" outside the map, ", sheltered, " with air under cover, ", edges, " partly covered), ", (int64_t)(Time::get_singleton()->get_ticks_msec() - t0), "ms");
 	return result;
 }
 

@@ -13,14 +13,23 @@ func run() -> void:
 	var heights: Image = floor["image"]
 	var under: Image = floor["under"]
 	check_eq(under.get_size(), heights.get_size(), "an air gap per column")
-	check_eq(under.get_format(), Image.FORMAT_RGF, "underside and ground")
+	check_eq(under.get_format(), Image.FORMAT_RGBAF, "underside, ground, share and the rest's height")
 	var top: float = floor["top"]
 	var sheltered := 0
 	var bad := 0
+	var edges := 0
+	var bad_shares := 0
 	for y in heights.get_height():
 		for x in heights.get_width():
 			var landed := heights.get_pixel(x, y).r
 			var gap := under.get_pixel(x, y)
+			# A cell part covered: its share is under 1 and the rest lies lower.
+			if gap.b < 1.0:
+				edges += 1
+				if gap.b < 0.0 or gap.a >= landed:
+					bad_shares += 1
+			elif gap.b != 1.0 or gap.a != landed:
+				bad_shares += 1
 			if gap.r <= gap.g:
 				if gap.r != NO_GAP:
 					bad += 1
@@ -36,6 +45,8 @@ func run() -> void:
 			var p := Vector3(origin.x - (x + 0.5) * cell.x, (gap.r + gap.g) * 0.5, origin.z + (y + 0.5) * cell.y)
 			if bsp.point_contents(p) == -2:
 				bad += 1
+	check(edges > 0, "ww_ravine has cells a roof's edge crosses (%d)" % edges)
+	check_eq(bad_shares, 0, "and each part-covered cell's rest lies under its top, the others all covered")
 	check(sheltered > 0, "ww_ravine has air under cover (%d cells)" % sheltered)
 	check_eq(bad, 0, "and every gap is under the roof, tall enough, and open")
 	# The ravine itself, mid-map, is open to the sky: the surface is its floor, nothing over it.

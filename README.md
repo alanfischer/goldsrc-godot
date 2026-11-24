@@ -223,11 +223,14 @@ vec2 uv = vec2((below_sky_origin.x - p.x) / below_sky_size.x, (p.z - below_sky_o
 bool open_to_sky = p.y > textureLod(below_sky, uv, 0.0).r - 0.1;
 ```
 
-It also has `under`, an `FORMAT_RGF` image laid out the same: the open air beneath the
+It also has `under`, an `FORMAT_RGBAF` image laid out the same: the open air beneath the
 surface in each column, as the underside of the roof (R) and the ground below it (G), or both
 `-1e6` where there is none (open ground, a wall, a pillar). That is what wind blows rain in
 through, under eaves, through doorways and windows into a sealed room. A cell counts as solid
-when its middle or two of its corners are, so walls thinner than a cell are kept.
+when its middle or two of its corners are, so walls thinner than a cell are kept. B is the share
+of the cell at its height and A the height of the highest surface on the rest, measured where a
+roof's edge crosses the cell (B is 1 elsewhere): blending them lets a wet edge run along the roof's
+edge at any angle rather than stepping cell by cell.
 
 **The example.** `examples/shader_hook/` is a working one: `hook.gdshaderinc` does night, wet
 ground under open sky, dimmed liquids and a sky flash, and the demo map imports with it. Open
