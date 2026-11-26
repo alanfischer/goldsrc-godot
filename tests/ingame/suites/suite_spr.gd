@@ -58,15 +58,31 @@ func _frame_access_is_bounds_checked() -> void:
 		"a frame past the end has a zero origin")
 
 
+## A built sprite, in the tree as it would be in a game: its animator puts the material on as
+## it enters.
 func _built() -> Sprite3D:
 	var spr := GoldSrcSPR.new()
 	if spr.load_spr(SPRITE_PATH) != OK:
 		fail("could not load %s" % SPRITE_PATH)
 		return null
-	return track(spr.build_scene()) as Sprite3D
+	return _enter(spr.build_scene() as Sprite3D)
+
+
+func _enter(sprite: Sprite3D) -> Sprite3D:
+	track(sprite)
+	(Engine.get_main_loop() as SceneTree).current_scene.add_child(sprite)
+	return sprite
 
 
 func _scene_is_a_flipbook() -> void:
+	var spr := GoldSrcSPR.new()
+	spr.load_spr(SPRITE_PATH)
+	var outside := track(spr.build_scene()) as Sprite3D
+	check(outside.material_override == null, "out of the tree the sprite is a plain Sprite3D")
+	var library := outside.get_meta(&"animation_library", null) as AnimationLibrary
+	check(library != null and library.has_animation(&"loop") and library.has_animation(&"once"),
+		"the scene carries an AnimationLibrary with loop and once")
+
 	var sprite := _built()
 	if sprite == null:
 		return
@@ -93,19 +109,21 @@ func _looping_play_runs_on_the_shader_clock() -> void:
 	# Two instances of one packed scene, as an imported sprite is used.
 	var scene := PackedScene.new()
 	scene.pack(built)
-	var sprite := track(scene.instantiate()) as Sprite3D
+	var sprite := _enter(scene.instantiate() as Sprite3D)
 	var sap := sprite.get_node(^"SpriteAnimationPlayer")
 	check_eq(sap.layers.size(), 15, "a packed sprite keeps its frames")
 	sap.fps = 12.0
 	sap.play()
 	check(not sap.is_processing(), "a looping play runs no per-frame script")
-	var mat := sprite.material_override as ShaderMaterial
-	check_eq(mat.get_shader_parameter(&"fps"), 12.0, "the shader clocks the loop at the sprite's fps")
-	var other := track(scene.instantiate()) as Sprite3D
+	check_eq(sprite.get_instance_shader_parameter(&"fps"), 12.0,
+		"the shader clocks the loop at the sprite's fps")
+	var other := _enter(scene.instantiate() as Sprite3D)
 	var osap := other.get_node(^"SpriteAnimationPlayer")
-	osap.fps = 12.0
+	osap.fps = 7.0
 	osap.play()
-	check(other.material_override == mat, "sprites looping at one rate share a material")
+	check_eq(other.get_instance_shader_parameter(&"fps"), 7.0, "each sprite keeps its own rate")
+	check(other.material_override != null and other.material_override == sprite.material_override,
+		"sprites looping at different rates share a material")
 
 
 func _one_shot_steps_and_finishes() -> void:
@@ -117,10 +135,9 @@ func _one_shot_steps_and_finishes() -> void:
 	var finished := []
 	sap.animation_finished.connect(func(n: String) -> void: finished.append(n))
 	sap.play()
-	var mat := sprite.material_override as ShaderMaterial
-	check_eq(mat.get_shader_parameter(&"fps"), 0.0, "a one-shot is not on the shader clock")
+	check_eq(sprite.get_instance_shader_parameter(&"fps"), 0.0, "a one-shot is not on the shader clock")
 	sap._step()
-	check_eq(mat.get_shader_parameter(&"frame"), 1.0, "a step shows the next frame")
+	check_eq(sprite.get_instance_shader_parameter(&"frame"), 1.0, "a step shows the next frame")
 	for i in 13:
 		sap._step()
 	check(finished.is_empty() and sprite.visible, "still playing on the last frame")
