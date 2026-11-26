@@ -128,11 +128,18 @@ Dictionary bake_light_grid(const BSPData &bsp_data, const SunFraction &face_sun_
 				size_t px_ofs = (size_t)gz * slice_bytes + ((size_t)gy * slice_w + gx) * 3;
 
 				// Trace the 6 axis-aligned directions
+				RayHit hits[6];
+				for (int d = 0; d < 6; d++)
+					trace_ray(bsp_data, head_node, gs_pos, directions[d], 0.0f, max_trace_dist, hits[d]);
+				// Up into open sky, the up face takes the floor's lightmap instead of the flat sky fill:
+				// the compiler's own light for a surface facing up here (sky, sun and bounce), and what
+				// GoldSrc lit a model by (R_LightPoint, straight down). The fill alone left the tops of
+				// models in shade darker than their sides, which see sunlit walls and floor.
+				const bool up_from_floor = ray_reached_sky(bsp_data, hits[4]) && !ray_reached_sky(bsp_data, hits[5]);
+				if (up_from_floor)
+					hits[4] = hits[5];
 				for (int d = 0; d < 6; d++) {
-					RayHit hit;
-					trace_ray(bsp_data, head_node, gs_pos, directions[d],
-						0.0f, max_trace_dist, hit);
-
+					const RayHit &hit = hits[d];
 					bool reached_sky = ray_reached_sky(bsp_data, hit);
 					if (!reached_sky) {
 						float r, g, b;
@@ -180,6 +187,8 @@ Dictionary bake_light_grid(const BSPData &bsp_data, const SunFraction &face_sun_
 						// Cell has direct sunlight — distribute sun color to cube faces
 						// weighted by alignment toward the sun
 						for (int d = 0; d < 6; d++) {
+							if (d == 4 && up_from_floor)
+								continue;  // the floor's lightmap has the sun in it already
 							float dot = directions[d][0] * sun_dir[0]
 							          + directions[d][1] * sun_dir[1]
 							          + directions[d][2] * sun_dir[2];
